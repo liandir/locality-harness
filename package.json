@@ -2,7 +2,7 @@
   "name": "locality",
   "displayName": "Locality",
   "description": "Drive a LAN-hosted llama.cpp LLM from VS Code with hard network isolation, workspace-scoped tools, and an approval-gated terminal.",
-  "version": "2.1.0",
+  "version": "2.1.1",
   "repository": {
     "type": "git",
     "url": "https://github.com/liandir/locality.git"
@@ -195,7 +195,10 @@
           "description": "Top-p (nucleus) sampling: keep the smallest token set whose cumulative probability reaches p (1 disables)."
         },
         "locality.reasoningBudget": {
-          "type": ["integer", "null"],
+          "type": [
+            "integer",
+            "null"
+          ],
           "default": null,
           "minimum": 1,
           "maximum": 9007199254740991,
@@ -327,9 +330,9 @@
     "@types/markdown-it": "^14.1.2",
     "@types/node": "^20.11.0",
     "@types/vscode": "^1.90.0",
-    "@typescript-eslint/eslint-plugin": "^7.0.0",
-    "@typescript-eslint/parser": "^7.0.0",
-    "@vscode/vsce": "^3.9.2",
+    "@typescript-eslint/eslint-plugin": "^8.71.0",
+    "@typescript-eslint/parser": "^8.71.0",
+    "@vscode/vsce": "^4.0.0",
     "esbuild": "^0.28.0",
     "eslint": "^8.57.0",
     "typescript": "^5.4.0",
@@ -348,7 +351,7 @@
   },
   "allowScripts": {
     "esbuild@0.28.1": true,
-    "@vscode/vsce-sign@2.0.9": true,
+    "@vscode/vsce-sign@2.1.0": true,
     "keytar@7.9.0": true
   }
 }

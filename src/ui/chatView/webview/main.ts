@@ -1158,7 +1158,7 @@ function renderMessageActionsInnerHtml(m: Message): string {
   const mode = m.role === "user" ? renderMessageMode(m.mode) : "";
   if (actions.length === 0 && !date && !mode) return "";
   const hintClass = `message-action-hint${persistentHint ? " active" : ""}`;
-  return `${actions.join("")}${date ? `<span class="message-date">${date}</span>` : ""}${mode}<span class="${hintClass}" aria-hidden="true">${persistentHint}</span>`;
+  return `${actions.join("")}${mode}${date ? `<span class="message-date">${date}</span>` : ""}<span class="${hintClass}" aria-hidden="true">${persistentHint}</span>`;
 }
 
 function renderFileChangeSummary(parent: HTMLElement, m: Message): void {
