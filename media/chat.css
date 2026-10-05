@@ -111,10 +111,13 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   .msg > .message-actions { opacity: 0; pointer-events: none; }
   .msg:is(:hover, :focus-within) > .message-actions { opacity: 1; pointer-events: auto; }
 }
-.msg.user .message-actions { align-self: flex-end; flex-direction: row-reverse; max-width: 90%; padding-right: 2px; }
+.msg.user .message-actions { align-self: flex-end; flex-direction: row-reverse; gap: 15px; max-width: 90%; padding-right: 2px; }
 .msg.assistant .message-actions { align-self: flex-start; }
 .message-actions .message-mode { margin-inline-start: 7px; margin-inline-end: 4px; }
 .message-date { flex: 0 0 auto; margin-inline: 7px; font-variant-numeric: tabular-nums; color: var(--vscode-descriptionForeground); font-size: 0.82em; line-height: 1.35; white-space: nowrap; }
+.msg.user .message-actions > :is(.message-mode, .message-date) { margin-inline: 0; }
+/* Account for the 15px Copy icon's inset within its square button. */
+.msg.user .message-action-buttons + .message-mode { margin-inline-end: calc((15px - var(--icon-action-size)) / 2); }
 .delete-message-btn:is(:hover, :focus-visible) { background: color-mix(in srgb, var(--vscode-errorForeground) 12%, transparent); color: var(--error-highlight-foreground); }
 .copy-btn.copied { color: var(--vscode-testing-iconPassed, #3fb950); }
 .message-action-hint { min-width: 0; color: var(--vscode-descriptionForeground); opacity: 0; font-size: 0.82em; line-height: 1.35; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; transition: opacity 0.12s; pointer-events: none; }
@@ -258,7 +261,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   margin-bottom: calc(2 * var(--chat-part-gap));
   border-bottom: 1px solid var(--surface-stroke);
 }
-.msg.assistant > .work-section.conglomerate.settled + .final-answer-part {
+.msg.assistant > .work-section.conglomerate.settled + :is(.final-answer-part, .abort-part) {
   border-top: 1px solid var(--surface-stroke);
   padding-top: calc(2 * var(--chat-part-gap));
 }
@@ -268,7 +271,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .work-body > .part > :is(.thinking, .tool-card) { padding: 0; }
 .work-body > .part > :is(.thinking, .tool-card) > :is(.thinking-head, .tool-head) { padding: 3px 0; }
 /* Add one shared gap to the container's gap at each activity/text boundary. */
-:is(.work-section, .tool-part) + .text-part,
+:is(.work-section, .tool-part) + :is(.text-part, .abort-part),
 .intermediate-part + :is(.work-section, .tool-part) { margin-top: var(--chat-part-gap); }
 .intermediate-answer { padding: 0; }
 .thinking-body { padding: 3px 0 1px; margin-top: 0; font-weight: 400; line-height: 1.4; opacity: 0.94; }
