@@ -80,7 +80,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .todo-item.pending .todo-text { color: var(--vscode-foreground); }
 
 /* in_progress: highlight the row and the box, no accent color. */
-.todo-item.in_progress { background: var(--surface-fill); }
+/* Bisect the 13px card-to-checkpoint gap without shifting the row contents. */
+.todo-item.in_progress { background: var(--surface-fill); margin-inline-start: -2.5px; padding-inline-start: 6.5px; }
 .todo-item.in_progress .todo-box { border-color: var(--vscode-foreground); }
 .todo-item.in_progress .todo-text { color: var(--vscode-foreground); font-weight: 500; }
 
