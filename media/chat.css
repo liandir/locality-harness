@@ -71,8 +71,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
    conveyed by emphasis, not hue. */
 .todo-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0; }
 .todo-list-timeline { margin-top: 0; }
-.tool-card.update-todos > .tool-expanded { padding-left: 16px; }
-.todo-item { display: flex; align-items: center; gap: 8px; font-size: inherit; line-height: 1.35; padding: 2px 6px; border-radius: var(--control-radius); }
+/* Keep highlights inside the card inset, with room around each checkpoint. */
+.todo-item { display: flex; align-items: center; gap: 8px; font-size: inherit; line-height: 1.35; padding: 2px 4px; border-radius: var(--control-radius); }
 .todo-text { min-width: 0; overflow-wrap: anywhere; }
 .todo-box { flex: 0 0 auto; position: relative; width: 14px; height: 14px; box-sizing: border-box; border: 1.5px solid var(--surface-stroke-strong); border-radius: var(--control-radius); }
 
