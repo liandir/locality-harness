@@ -11,8 +11,8 @@
   --icon-action-size: 28px;
   --chat-part-gap: 6px;
   --chat-message-gap: calc(3 * var(--chat-part-gap));
-  --composer-radius: 16px;
-  --composer-action-radius: 10px;
+  --composer-radius: var(--control-radius);
+  --composer-action-radius: var(--control-radius);
   --surface-fill: color-mix(in srgb, var(--vscode-foreground) 7%, transparent);
   --surface-fill-strong: color-mix(in srgb, var(--vscode-foreground) 16%, transparent);
   --surface-stroke: color-mix(in srgb, var(--vscode-foreground) 9%, transparent);
@@ -46,9 +46,10 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .chat-header { display: flex; align-items: center; justify-content: space-between; gap: 4px; padding: 3px 4px; border-bottom: 1px solid var(--surface-stroke); }
 .header-actions { flex: 0 0 auto; display: flex; gap: 2px; align-items: center; justify-content: flex-end; margin-left: auto; min-width: 0; }
 .header-action { flex: 0 0 auto; }
-.icon-btn { width: var(--icon-action-size); height: var(--icon-action-size); display: inline-flex; align-items: center; justify-content: center; background: transparent; color: var(--vscode-descriptionForeground); border: 0; cursor: pointer; border-radius: var(--control-radius); padding: 0; transition: background 0.12s, color 0.12s; }
-.icon-btn:hover { background: var(--surface-fill); color: var(--vscode-foreground); }
-.icon-btn:focus-visible { outline: none; background: var(--surface-fill); color: var(--vscode-foreground); }
+.icon-btn { flex: 0 0 auto; width: var(--icon-action-size); height: var(--icon-action-size); box-sizing: border-box; display: inline-flex; align-items: center; justify-content: center; background: transparent; color: var(--vscode-descriptionForeground); border: 1px solid transparent; cursor: pointer; border-radius: var(--control-radius); padding: 0; outline: none; transition: background 0.12s, color 0.12s; }
+.icon-btn:where(:hover, :focus-visible, .active):not(:disabled) { background: var(--surface-fill-hover); color: var(--vscode-foreground); }
+.icon-btn:disabled { opacity: 0.55; cursor: default; }
+.icon-btn svg { display: block; }
 
 .chat-body { flex: 1; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: var(--chat-message-gap); }
 
@@ -93,7 +94,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 
 .msg { display: flex; flex-direction: column; gap: var(--chat-part-gap); }
 .msg.user .bubble { align-self: flex-end; background: var(--surface-fill); border: 1px solid transparent; padding: 0; border-radius: var(--control-radius); max-width: 90%; }
-.user-message-body { padding: 8px 11px; }
+.user-message-body { display: flex; flex-direction: column; gap: 8px; padding: 8px 11px; }
 .message-mode { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 4px; color: var(--vscode-descriptionForeground); font-size: 0.82em; line-height: 1.35; white-space: nowrap; }
 .message-mode-icon { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 18px; flex: 0 0 auto; }
 .user-edit-card { align-self: flex-end; width: min(90%, 680px); display: flex; flex-direction: column; gap: 7px; padding: 9px; background: var(--surface-fill); border: 1px solid transparent; border-radius: var(--control-radius); box-sizing: border-box; }
@@ -103,12 +104,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .msg.assistant .bubble { padding: 4px 0; }
 .msg.assistant .steering-part .bubble { padding: 0; color: var(--vscode-foreground); }
 .assistant-markdown { color: var(--vscode-foreground); line-height: 1.55; padding: 2px 0; }
-.msg.assistant .card.answer { padding: 8px 11px; }
-.msg.assistant.has-file-changes > .part.final-answer-part .card.answer {
-  border-bottom-left-radius: 0;
-  border-bottom-right-radius: 0;
-}
-.message-actions { display: flex; align-items: center; gap: 1px; min-height: 24px; margin-top: -2px; }
+.message-actions { display: flex; align-items: center; gap: 1px; min-height: var(--icon-action-size); margin-top: -2px; }
+.message-action-buttons { display: inline-flex; flex: 0 0 auto; gap: 1px; }
 @media (hover: hover) {
   /* Preserve spacing and keyboard access while revealing only this message's footer. */
   .msg > .message-actions { opacity: 0; pointer-events: none; }
@@ -118,11 +115,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .msg.assistant .message-actions { align-self: flex-start; }
 .message-actions .message-mode { margin-inline-start: 7px; margin-inline-end: 4px; }
 .message-date { flex: 0 0 auto; margin-inline: 7px; font-variant-numeric: tabular-nums; color: var(--vscode-descriptionForeground); font-size: 0.82em; line-height: 1.35; white-space: nowrap; }
-.copy-btn { width: 28px; height: 24px; display: inline-flex; align-items: center; justify-content: center; padding: 0; background: transparent; color: var(--vscode-descriptionForeground); border: 0; border-radius: var(--control-radius); cursor: pointer; opacity: 0.72; transition: background 0.12s, color 0.12s, opacity 0.12s; }
-.copy-btn:hover { background: var(--surface-fill); color: var(--vscode-foreground); opacity: 1; }
-.copy-btn:focus-visible { outline: none; background: var(--surface-fill); color: var(--vscode-foreground); }
-.copy-btn.copied { color: var(--vscode-testing-iconPassed, #3fb950); opacity: 1; }
-.copy-btn svg { display: block; }
+.delete-message-btn:is(:hover, :focus-visible) { background: color-mix(in srgb, var(--vscode-errorForeground) 12%, transparent); color: var(--error-highlight-foreground); }
+.copy-btn.copied { color: var(--vscode-testing-iconPassed, #3fb950); }
 .message-action-hint { min-width: 0; color: var(--vscode-descriptionForeground); opacity: 0; font-size: 0.82em; line-height: 1.35; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; transition: opacity 0.12s; pointer-events: none; }
 .msg.assistant .message-action-hint { margin-left: 5px; }
 .msg.user .message-action-hint { margin-right: 5px; }
@@ -263,6 +257,10 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   padding-bottom: calc(3px + var(--chat-part-gap));
   margin-bottom: calc(2 * var(--chat-part-gap));
   border-bottom: 1px solid var(--surface-stroke);
+}
+.msg.assistant > .work-section.conglomerate.settled + .final-answer-part {
+  border-top: 1px solid var(--surface-stroke);
+  padding-top: calc(2 * var(--chat-part-gap));
 }
 .work-section.conglomerate > .work-body { gap: var(--chat-part-gap); opacity: 1; }
 .msg.assistant.timeline > .part:is(.thought-part, .tool-part)
@@ -547,12 +545,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .review-btn:hover, .review-btn:focus-visible { background: var(--surface-fill-strong); color: var(--vscode-foreground); border-color: transparent; }
 .tool-diff.edit-preview { background: transparent; border: 0; border-radius: 0; padding: 3px 0; margin: 0; max-height: 240px; line-height: 1.2; }
 .change-summary { overflow: hidden; margin-top: 2px; }
-.part.final-answer-part + .change-summary,
-.card.answer + .change-summary {
-  border-top-left-radius: 0;
-  border-top-right-radius: 0;
-  margin-top: -6px;
-}
+/* Borders keep every file divider equally thin at fractional row positions. */
+.change-summary .card-separator { height: 0; border-top: 1px solid var(--surface-stroke); background: transparent; }
 .change-summary-head { display: flex; align-items: center; gap: 7px; padding: 5px 7px; background: var(--surface-fill-strong); }
 .change-summary-toggle { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; padding: 0; background: transparent; border: 0; color: var(--vscode-foreground); font: inherit; text-align: left; cursor: pointer; }
 .change-summary-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
@@ -560,7 +554,15 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .change-summary .review-btn { border: 0; }
 .change-summary .review-btn:hover { background: var(--surface-fill); border-color: transparent; }
 .change-file-row { width: 100%; min-height: 28px; display: flex; align-items: center; gap: 7px; padding: 4px 7px; background: transparent; border: 0; color: var(--vscode-descriptionForeground); font: inherit; text-align: left; cursor: pointer; }
-.change-file-row:hover { color: var(--vscode-foreground); background: var(--surface-fill); }
+.change-file-row:is(:hover, :focus-visible) { color: var(--vscode-foreground); background: var(--surface-fill); }
+/* Continue the row fill across adjacent dividers, including their side insets. */
+.change-file-list > .card-separator:has(+ .change-file-item > .change-file-row:is(:hover, :focus-visible)),
+.change-file-item:not(.open):has(> .change-file-row:is(:hover, :focus-visible)) + .card-separator,
+.change-file-row:is(:hover, :focus-visible) + .card-separator {
+  margin-inline: 0;
+  border-color: transparent;
+  background: var(--surface-fill);
+}
 .change-file-path { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .change-summary .tool-diff.edit-preview { max-height: 320px; }
 .tool-diff .diff-lines { display: grid; width: max-content; min-width: 100%; }
@@ -578,9 +580,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 
 .card { padding: 8px 10px; }
 .card.summary { font-weight: 500; }
-.msg.assistant .card.answer.abort {
-  background: color-mix(in srgb, var(--vscode-errorForeground) 12%, transparent);
-  border-color: transparent;
+.assistant-markdown.abort {
   color: var(--error-foreground);
   white-space: pre-wrap;
 }
@@ -664,9 +664,12 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 }
 .scroll-down:hover { background: var(--surface-fill-strong); border-color: transparent; color: var(--vscode-foreground); }
 .composer-row { position: relative; display: flex; align-items: stretch; }
-.composer-row textarea { flex: 1; width: 100%; resize: none; min-height: 86px; padding: 12px 80px 44px 14px; overflow-y: hidden; background: var(--surface-fill); color: var(--vscode-input-foreground); border: 1px solid transparent; border-radius: var(--composer-radius); font: inherit; box-sizing: border-box; outline: none; line-height: 1.45; }
-.composer-row.busy textarea { padding-right: 120px; }
-.composer-row textarea:focus { border-color: transparent; outline: none; }
+.composer-input { flex: 1; min-width: 0; display: flex; flex-direction: column; background: var(--surface-fill); border: 1px solid transparent; border-radius: var(--composer-radius); }
+.composer-input[hidden] { display: none; }
+.composer-input > textarea { flex: 0 0 auto; width: 100%; min-width: 0; resize: none; min-height: 52px; padding: 12px 13px 6px; overflow-y: hidden; background: transparent; color: var(--vscode-input-foreground); border: 0; border-radius: var(--composer-radius) var(--composer-radius) 0 0; font: inherit; box-sizing: border-box; outline: none; line-height: 1.45; }
+.composer-toolbar { display: flex; flex: 0 0 auto; align-items: center; gap: 4px; min-width: 0; padding: 0 9px 10px; }
+.composer-toolbar > .mode-selector { flex: 0 0 auto; }
+.composer-toolbar .send-btn { flex: 0 0 auto; width: var(--icon-action-size); height: var(--icon-action-size); box-sizing: border-box; }
 #approvalSlot { flex: 1; width: 100%; min-width: 0; }
 .approval-composer { width: 100%; min-height: 86px; display: flex; flex-direction: column; justify-content: center; gap: 10px; padding: 10px 12px; background: var(--surface-fill); color: var(--vscode-input-foreground); border: 1px solid transparent; border-radius: var(--composer-radius); box-sizing: border-box; }
 .approval-summary { display: flex; align-items: center; gap: 8px; min-height: 24px; min-width: 0; color: var(--vscode-descriptionForeground); font-size: 0.9em; }
@@ -724,37 +727,22 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .question-submit:disabled { cursor: default; }
 .question-cancel .question-option-badge { color: var(--error-foreground); }
 .question-cancel:is(:hover, :focus-visible):not(:disabled) .question-option-badge { color: var(--error-highlight-foreground); }
-#sendSlot { position: absolute; right: 10px; bottom: 10px; display: inline-flex; gap: 5px; }
-.composer-attach { position: absolute; right: 49px; bottom: 13px; width: var(--icon-action-size); height: var(--icon-action-size); display: inline-flex; align-items: center; justify-content: center; padding: 0; background: transparent; color: var(--vscode-descriptionForeground); border: 1px solid transparent; border-radius: var(--control-radius); cursor: pointer; outline: none; }
-.composer-row.busy .composer-attach { right: 88px; }
-.composer-attach svg { display: block; }
-.composer-attach:hover, .composer-attach:focus-visible { background: var(--surface-fill-strong); color: var(--vscode-foreground); }
-.composer-attach:disabled { opacity: 0.45; cursor: default; }
-.composer-attachment { position: absolute; left: 42px; right: 85px; bottom: 10px; display: flex; align-items: center; gap: 5px; min-width: 0; overflow-x: auto; overflow-y: hidden; }
+#sendSlot { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 4px; margin-left: auto; }
+/* Reserve the scrollbar below the shared control row without shifting its items. */
+.composer-attachment { display: flex; flex: 1 1 auto; align-self: flex-start; align-items: flex-start; gap: 4px; min-width: 0; height: calc(var(--icon-action-size) + 2px + var(--scrollbar-hover-size)); margin-bottom: calc(-2px - var(--scrollbar-hover-size)); overflow-x: auto; overflow-y: hidden; }
 .composer-attachment[hidden] { display: none; }
-.composer-row.busy .composer-attachment { right: 124px; }
-.composer-attachment-item { display: inline-flex; align-items: center; gap: 5px; flex: 0 0 auto; max-width: min(220px, 72vw); height: 30px; box-sizing: border-box; padding: 1px 3px 1px 1px; background: var(--surface-fill-strong); border: 1px solid transparent; border-radius: var(--control-radius); }
-.composer-attachment-preview { width: 28px; height: 28px; flex: 0 0 auto; box-sizing: border-box; padding: 0; background: transparent; border: 1px solid transparent; border-radius: var(--control-radius); cursor: zoom-in; overflow: hidden; }
+.composer-attachment-item { display: inline-flex; align-items: center; gap: 4px; flex: 0 0 auto; max-width: min(220px, 100%); height: var(--icon-action-size); box-sizing: border-box; padding: 0; background: var(--surface-fill-strong); border: 1px solid transparent; border-radius: var(--control-radius); }
+.composer-attachment-preview { width: calc(var(--icon-action-size) - 2px); height: calc(var(--icon-action-size) - 2px); flex: 0 0 auto; box-sizing: border-box; padding: 0; background: transparent; border: 1px solid transparent; border-radius: var(--control-radius); cursor: zoom-in; overflow: hidden; }
 .composer-attachment-preview:hover, .composer-attachment-preview:focus-visible { background: var(--surface-fill); }
 .composer-attachment-preview img { width: 100%; height: 100%; display: block; object-fit: cover; border-radius: var(--control-radius); }
 .composer-attachment-preview:hover img, .composer-attachment-preview:focus-visible img { opacity: 0.82; }
 .text-attachment-preview { display: inline-flex; align-items: center; justify-content: center; color: var(--vscode-descriptionForeground); cursor: zoom-in; }
 .text-attachment-preview .workspace-file-link-icon { font-size: 22px; margin: 0; }
 .composer-attachment-name { min-width: 0; max-width: 145px; overflow: hidden; color: var(--vscode-descriptionForeground); font-size: 0.82em; line-height: 1.3; text-overflow: ellipsis; white-space: nowrap; }
-.composer-attachment-remove { width: 22px; height: 22px; flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center; padding: 0; background: transparent; color: var(--vscode-descriptionForeground); border: 1px solid transparent; border-radius: var(--control-radius); font: inherit; font-size: 17px; line-height: 1; cursor: pointer; }
+.composer-attachment-name:last-child { margin-right: 6px; }
+.composer-attachment-remove { width: calc(var(--icon-action-size) - 2px); height: calc(var(--icon-action-size) - 2px); box-sizing: border-box; flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center; padding: 0; background: transparent; color: var(--vscode-descriptionForeground); border: 1px solid transparent; border-radius: var(--control-radius); font: inherit; font-size: 17px; line-height: 1; cursor: pointer; }
 .composer-attachment-remove:hover, .composer-attachment-remove:focus-visible { background: color-mix(in srgb, var(--vscode-errorForeground) 12%, transparent); color: var(--error-highlight-foreground); }
-.image-attachments { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; }
-.image-attachment { display: flex; align-items: center; gap: 9px; min-width: 0; width: fit-content; max-width: 100%; padding: 6px 8px; background: var(--surface-fill); border: 1px solid transparent; border-radius: var(--control-radius); box-sizing: border-box; }
-.image-attachment-preview { width: 64px; height: 48px; flex: 0 0 auto; box-sizing: border-box; padding: 0; background: transparent; border: 1px solid transparent; border-radius: var(--control-radius); cursor: zoom-in; overflow: hidden; }
-.image-attachment-preview:hover, .image-attachment-preview:focus-visible { background: var(--surface-fill-strong); }
-.image-attachment-preview img { width: 100%; height: 100%; display: block; object-fit: cover; border-radius: var(--control-radius); }
-.image-attachment-preview:hover img, .image-attachment-preview:focus-visible img { opacity: 0.82; }
-.image-attachment-meta { display: flex; flex-direction: column; min-width: 0; line-height: 1.25; }
-.image-attachment-meta span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.image-attachment-meta small { color: var(--vscode-descriptionForeground); }
-.image-attachment-remove { width: 26px; height: 26px; flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center; padding: 0; background: transparent; color: var(--vscode-descriptionForeground); border: 1px solid transparent; border-radius: var(--control-radius); font: inherit; font-size: 18px; cursor: pointer; outline: none; }
-.image-attachment-remove:hover, .image-attachment-remove:focus-visible { background: color-mix(in srgb, var(--vscode-errorForeground) 12%, transparent); color: var(--error-highlight-foreground); }
-.msg.user .bubble .image-attachment { margin-bottom: 8px; background: color-mix(in srgb, var(--vscode-editor-background) 14%, transparent); }
+.message-attachments { display: flex; flex-wrap: wrap; gap: 4px; min-width: 0; }
 .image-preview { position: fixed; inset: 0; z-index: 90; display: flex; align-items: center; justify-content: center; box-sizing: border-box; padding: 48px 18px 20px; background: color-mix(in srgb, var(--vscode-editor-background) 88%, transparent); }
 .image-preview[hidden] { display: none; }
 .image-preview-content { display: flex; flex-direction: column; align-items: center; gap: 10px; max-width: 100%; max-height: 100%; margin: 0; }
@@ -783,18 +771,11 @@ body.image-preview-open .chat-body { overflow: hidden; }
 .send-btn.cancel-btn { background: var(--accent-reject-fill); border-color: transparent; color: var(--error-foreground); }
 .send-btn.cancel-btn:hover, .send-btn.cancel-btn:focus-visible { color: var(--error-highlight-foreground); background: color-mix(in srgb, var(--vscode-errorForeground) 26%, transparent); border-color: transparent; }
 .composer-toggles { display: flex; gap: 8px; margin-top: 6px; font-size: 0.88em; color: var(--vscode-descriptionForeground); align-items: center; min-width: 0; }
-.mode-pill, .ctx-pill { display: inline-flex; align-items: center; justify-content: center; gap: 5px; min-height: 26px; box-sizing: border-box; line-height: 1; white-space: nowrap; flex: 0 0 auto; background: transparent; color: var(--vscode-descriptionForeground); border: 0; padding: 2px 9px; border-radius: var(--control-radius); cursor: pointer; font: inherit; transition: background 0.12s, color 0.12s; }
-.mode-pill:hover, .ctx-pill:hover { background: var(--surface-fill); color: var(--vscode-foreground); }
-.mode-pill:focus-visible, .ctx-pill:focus-visible { outline: none; background: var(--surface-fill); color: var(--vscode-foreground); }
-.mode-pill.active {
-  color: var(--vscode-foreground);
-  background: var(--surface-fill);
-}
+.ctx-pill { display: inline-flex; align-items: center; justify-content: center; gap: 5px; min-height: 26px; box-sizing: border-box; line-height: 1; white-space: nowrap; flex: 0 0 auto; background: transparent; color: var(--vscode-descriptionForeground); border: 0; padding: 2px 9px; border-radius: var(--control-radius); cursor: pointer; font: inherit; transition: background 0.12s, color 0.12s; }
+.ctx-pill:hover { background: var(--surface-fill); color: var(--vscode-foreground); }
+.ctx-pill:focus-visible { outline: none; background: var(--surface-fill); color: var(--vscode-foreground); }
 .inline-hint { min-width: 0; max-width: 0; color: var(--vscode-descriptionForeground); font-size: 0.86em; line-height: 1.35; opacity: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; pointer-events: none; transition: opacity 0.12s, max-width 0.12s; }
-.composer-mode-controls { position: absolute; left: 10px; bottom: 13px; display: inline-flex; align-items: center; gap: 4px; min-width: 0; }
 .mode-selector { position: relative; display: inline-flex; align-items: center; }
-.mode-icon-toggle { width: var(--icon-action-size); height: var(--icon-action-size); min-height: var(--icon-action-size); padding: 0; border-radius: var(--control-radius); }
-.mode-icon-toggle:disabled { opacity: 0.55; cursor: default; }
 .mode-icon-toggle span { display: inline-flex; align-items: center; justify-content: center; }
 .mode-icon-toggle svg, .mode-select-option-icon svg, .thinking-icon svg, .work-type-icon svg { display: block; }
 .mode-select-menu {

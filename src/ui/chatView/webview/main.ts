@@ -583,7 +583,7 @@ function renderCopyableCodeBlock(
     : renderedCode;
   const codeClass = `${displayPrefix ? "command-code-display" : "copy-code-source"}${languageClass}`;
   return `<div class="copy-code-block${displayPrefix ? " tool-output-header" : ""}${extraAction ? " has-extra-actions" : ""}">
-    <span class="code-block-actions">${extraAction}<button class="copy-btn code-copy-btn block-code-copy-btn" type="button" data-copy-code aria-label="Copy code">${copyIcon()}</button></span>
+    <span class="code-block-actions">${extraAction}<button class="icon-btn copy-btn code-copy-btn block-code-copy-btn" type="button" data-copy-code aria-label="Copy code">${copyIcon()}</button></span>
     <pre><code class="${codeClass}">${codeContent}</code></pre>
   </div>`;
 }
@@ -780,20 +780,22 @@ function mountShell(): void {
       <div id="messageQueue" class="message-queue" hidden></div>
       <div class="composer-row">
         <div id="approvalSlot"></div>
-        <textarea id="input" rows="3"></textarea>
-        <span class="composer-mode-controls">
-          <span class="mode-selector chat-mode-group">
-            <button id="chatMode" class="mode-pill mode-icon-toggle" type="button" aria-label="Mode (Act)" aria-haspopup="menu" aria-controls="chatModeMenu" aria-expanded="false" data-tip="Mode (Act)"><span id="chatModeIcon">${pawnIcon()}</span></button>
-            <span id="chatModeMenu" class="mode-select-menu chat-mode-menu" role="menu" hidden>
-              <button type="button" role="menuitemradio" data-chat-mode="act"><span class="mode-select-check"></span><span class="mode-select-option-icon">${pawnIcon()}</span><span>Act mode</span></button>
-              <button type="button" role="menuitemradio" data-chat-mode="plan"><span class="mode-select-check"></span><span class="mode-select-option-icon">${scrollIcon()}</span><span>Plan mode</span></button>
-              <button type="button" role="menuitemradio" data-chat-mode="review"><span class="mode-select-check"></span><span class="mode-select-option-icon">${searchIcon()}</span><span>Review mode</span></button>
+        <div id="composerInput" class="composer-input">
+          <textarea id="input" rows="3"></textarea>
+          <div class="composer-toolbar">
+            <span class="mode-selector chat-mode-group">
+              <button id="chatMode" class="icon-btn mode-icon-toggle" type="button" aria-label="Mode (Act)" aria-haspopup="menu" aria-controls="chatModeMenu" aria-expanded="false" data-tip="Mode (Act)"><span id="chatModeIcon">${pawnIcon()}</span></button>
+              <span id="chatModeMenu" class="mode-select-menu chat-mode-menu" role="menu" hidden>
+                <button type="button" role="menuitemradio" data-chat-mode="act"><span class="mode-select-check"></span><span class="mode-select-option-icon">${pawnIcon()}</span><span>Act mode</span></button>
+                <button type="button" role="menuitemradio" data-chat-mode="plan"><span class="mode-select-check"></span><span class="mode-select-option-icon">${scrollIcon()}</span><span>Plan mode</span></button>
+                <button type="button" role="menuitemradio" data-chat-mode="review"><span class="mode-select-check"></span><span class="mode-select-option-icon">${searchIcon()}</span><span>Review mode</span></button>
+              </span>
             </span>
-          </span>
-        </span>
-        <div id="composerAttachment" class="composer-attachment" hidden></div>
-        <button id="attachFiles" class="composer-attach" type="button" aria-label="Attach files" data-tip="Attach files">${paperclipIcon()}</button>
-        <span id="sendSlot"></span>
+            <button id="attachFiles" class="icon-btn composer-attach" type="button" aria-label="Attach files" data-tip="Attach files">${paperclipIcon()}</button>
+            <div id="composerAttachment" class="composer-attachment" hidden></div>
+            <span id="sendSlot"></span>
+          </div>
+        </div>
       </div>
       <div class="composer-toggles">
         <span class="compact-group">
@@ -1024,13 +1026,11 @@ function reconcileMessages(): void {
       messageEls.set(m.id, el);
       host.appendChild(el);
     }
-    const hasFileChanges = m.role !== "user" && (m.fileChanges?.length ?? 0) > 0;
     const cls = m.role === "user"
       ? "msg user"
       : [
         "msg",
         "assistant",
-        hasFileChanges ? "has-file-changes" : "",
         messageUsesTimeline(m) ? "timeline" : ""
       ].filter(Boolean).join(" ");
     if (el.className !== cls) el.className = cls;
@@ -1045,8 +1045,8 @@ function renderUserMessage(el: HTMLElement, m: Message): void {
   if (m.recordTs !== undefined && state.editingMessageTs === m.recordTs) {
     const attachments = (m.attachments ?? []).filter(attachment => !state.editingRemovedAttachmentIds.has(attachment.id));
     const html = `<div class="user-edit-card">
-      ${renderAttachmentsHtml(attachments, true, "data-edit-remove-attachment")}
       <textarea class="user-edit-input" rows="3" data-edit-input="${m.recordTs}">${escapeHtml(state.editDraft)}</textarea>
+      ${renderAttachmentsHtml(attachments, "data-edit-remove-attachment")}
       <div class="user-edit-actions">
         <button class="send-btn cancel-btn" type="button" data-edit-cancel data-tip="Cancel" aria-label="Cancel">${stopIcon()}</button>
         <button class="send-btn" type="button" data-edit-submit="${m.recordTs}" data-tip="Send" aria-label="Send"${state.editDraft.trim() || attachments.length ? "" : " disabled"}>${sendIcon()}</button>
@@ -1055,18 +1055,14 @@ function renderUserMessage(el: HTMLElement, m: Message): void {
     setHtml(el, html);
     return;
   }
-  const html = `<div class="bubble"><div class="user-message-body">${renderAttachmentsHtml(m.attachments ?? [])}${m.text ? md.render(m.text) : ""}</div></div>${renderMessageActionsHtml(m)}`;
+  const html = `<div class="bubble"><div class="user-message-body">${m.text ? `<div class="user-message-text">${md.render(m.text)}</div>` : ""}${renderAttachmentsHtml(m.attachments ?? [])}</div></div>${renderMessageActionsHtml(m)}`;
   setHtml(el, html);
 }
 
-function renderAttachmentsHtml(attachments: UiAttachment[], removable = false, removeAttribute = ""): string {
+function renderAttachmentsHtml(attachments: UiAttachment[], removeAttribute = ""): string {
   if (!attachments.length) return "";
-  return `<div class="image-attachments">${attachments.map(attachment =>
-    renderAttachmentHtml(
-      attachment,
-      removable,
-      removeAttribute ? `${removeAttribute}="${escapeHtml(attachment.id)}"` : ""
-    )
+  return `<div class="message-attachments">${attachments.map(attachment =>
+    renderAttachmentHtml(attachment, removeAttribute)
   ).join("")}</div>`;
 }
 
@@ -1087,23 +1083,15 @@ function renderQueuedAttachmentThumbnails(attachments: UiAttachment[]): string {
 }
 
 function renderComposerAttachmentsHtml(attachments: UiAttachment[]): string {
-  return attachments.map(attachment => `<span class="composer-attachment-item">
-    ${renderAttachmentPreview(attachment, "composer-attachment-preview")}
-    <span class="composer-attachment-name" data-tip="${escapeHtml(attachment.fileName)}">${escapeHtml(attachment.fileName)}</span>
-    <button type="button" class="composer-attachment-remove" data-remove-draft-attachment="${escapeHtml(attachment.id)}" aria-label="Remove ${escapeHtml(attachment.fileName)}">&times;</button>
-  </span>`).join("");
+  return attachments.map(attachment => renderAttachmentHtml(attachment, "data-remove-draft-attachment")).join("");
 }
 
-function renderAttachmentHtml(attachment: UiAttachment, removable = false, removeAttribute = ""): string {
-  const size = attachment.byteLength < 1024
-    ? `${attachment.byteLength} B`
-    : attachment.byteLength < 1024 * 1024 ? `${Math.round(attachment.byteLength / 1024)} KB` : `${(attachment.byteLength / (1024 * 1024)).toFixed(1)} MB`;
-  const detail = isImageAttachment(attachment) ? size : `${attachment.fileType?.toUpperCase() ?? "Plain text"} · ${size}`;
-  return `<div class="image-attachment">
-    ${renderAttachmentPreview(attachment, "image-attachment-preview")}
-    <span class="image-attachment-meta"><span>${escapeHtml(attachment.fileName)}</span><small>${escapeHtml(detail)}</small></span>
-    ${removable ? `<button type="button" class="image-attachment-remove" ${removeAttribute} aria-label="Remove attachment">&times;</button>` : ""}
-  </div>`;
+function renderAttachmentHtml(attachment: UiAttachment, removeAttribute = ""): string {
+  return `<span class="composer-attachment-item">
+    ${renderAttachmentPreview(attachment, "composer-attachment-preview")}
+    <span class="composer-attachment-name" data-tip="${escapeHtml(attachment.fileName)}">${escapeHtml(attachment.fileName)}</span>
+    ${removeAttribute ? `<button type="button" class="composer-attachment-remove" ${removeAttribute}="${escapeHtml(attachment.id)}" aria-label="Remove ${escapeHtml(attachment.fileName)}">&times;</button>` : ""}
+  </span>`;
 }
 
 function renderMessageActions(parent: HTMLElement, m: Message): void {
@@ -1129,13 +1117,12 @@ function renderMessageActionsHtml(m: Message): string {
 }
 
 function renderMessageActionsInnerHtml(m: Message): string {
-  if (m.steering) return "";
   if (m.role === "assistant" && isAssistantTurnLive(m)) return "";
   const actions: string[] = [];
   let persistentHint = "";
   if (copyableMessageText(m).trim()) {
     const copied = copiedMessageId === m.id;
-    const cls = `copy-btn${copied ? " copied" : ""}`;
+    const cls = `icon-btn copy-btn${copied ? " copied" : ""}`;
     const label = copied ? "Copied" : "Copy message";
     if (copied) persistentHint = label;
     actions.push(`<button class="${cls}" type="button" data-copy-message="${m.id}" data-tip="${label}" aria-label="${label}">
@@ -1143,14 +1130,17 @@ function renderMessageActionsInnerHtml(m: Message): string {
     </button>`);
   }
   if (m.role === "user" && m.recordTs !== undefined && !state.busy) {
-    actions.push(`<button class="copy-btn" type="button" data-edit-message="${m.recordTs}" data-tip="Edit message" aria-label="Edit message">${pencilIcon()}</button>`);
+    actions.push(`<button class="icon-btn copy-btn" type="button" data-edit-message="${m.recordTs}" data-tip="Edit message" aria-label="Edit message">${pencilIcon()}</button>`);
+    if (state.compactActivity?.status !== "pending") {
+      actions.push(`<button class="icon-btn copy-btn delete-message-btn" type="button" data-delete-message="${m.recordTs}" data-tip="Delete message and everything after it" aria-label="Delete message and everything after it">${trashIcon()}</button>`);
+    }
   }
   if (m.role === "assistant" && m.responseToTs !== undefined && !state.busy) {
     const latestResponse = [...state.messages].reverse().find(message => message.role === "assistant" || message.role === "user");
     if (m.aborted && m.recordTs !== undefined && latestResponse === m) {
-      actions.push(`<button class="copy-btn" type="button" data-continue-chat="${m.recordTs}" data-tip="Continue" aria-label="Continue">${rightArrowIcon()}</button>`);
+      actions.push(`<button class="icon-btn copy-btn" type="button" data-continue-chat="${m.recordTs}" data-tip="Continue" aria-label="Continue">${rightArrowIcon()}</button>`);
     } else if (!m.aborted) {
-      actions.push(`<button class="copy-btn" type="button" data-fork-chat="${m.responseToTs}" data-tip="Fork chat" aria-label="Fork chat">${forkIcon()}</button>`);
+      actions.push(`<button class="icon-btn copy-btn" type="button" data-fork-chat="${m.responseToTs}" data-tip="Fork chat" aria-label="Fork chat">${forkIcon()}</button>`);
     }
   }
   const date = (m.role === "user" || m.role === "assistant") && m.recordTs !== undefined
@@ -1158,7 +1148,7 @@ function renderMessageActionsInnerHtml(m: Message): string {
   const mode = m.role === "user" ? renderMessageMode(m.mode) : "";
   if (actions.length === 0 && !date && !mode) return "";
   const hintClass = `message-action-hint${persistentHint ? " active" : ""}`;
-  return `${actions.join("")}${mode}${date ? `<span class="message-date">${date}</span>` : ""}<span class="${hintClass}" aria-hidden="true">${persistentHint}</span>`;
+  return `<span class="message-action-buttons">${actions.join("")}</span>${mode}${date ? `<span class="message-date">${date}</span>` : ""}<span class="${hintClass}" aria-hidden="true">${persistentHint}</span>`;
 }
 
 function renderFileChangeSummary(parent: HTMLElement, m: Message): void {
@@ -1187,7 +1177,7 @@ function renderFileChangeSummary(parent: HTMLElement, m: Message): void {
       </button>
       <button class="review-btn change-review-btn" type="button" data-review-workspace-changes>Review</button>
     </div>
-    ${expanded ? `${CARD_SEPARATOR_HTML}<div class="change-file-list">${changes.map((change, index) => renderFileChangeRow(m, change, index)).join(CARD_SEPARATOR_HTML)}</div>` : ""}`);
+    ${expanded ? `<div class="change-file-list">${changes.map((change, index) => renderFileChangeRow(m, change, index)).join(CARD_SEPARATOR_HTML)}</div>` : ""}`);
 }
 
 function renderFileChangeRow(m: Message, change: FileChangeSummary, index: number): string {
@@ -1550,15 +1540,11 @@ function textPresentationForUnit(
 ): "inline" | "answer" {
   const part = unit.parts[0];
   if (part?.kind !== "text") return "inline";
-  // While the turn is live, every text run streams as inline model output —
-  // mid-turn we cannot know whether it is the final answer (a tool call may
-  // still follow), and a gray bubble that later demotes into a dot item reads
-  // worse than promoting the real final answer to a bubble once the turn
-  // settles.
+  // Keep live text inline until the turn settles, when the final answer can
+  // be separated from completed work history.
   if (isAssistantTurnLive(m)) return "inline";
-  // Settled (or work-free): the trailing text run is the final answer and
-  // renders in a bubble; any text run followed by more work is an
-  // intermediate answer between tool calls.
+  // Settled (or work-free): the trailing text run is the final answer; any
+  // text run followed by more work is an intermediate answer between tools.
   const index = units.indexOf(unit);
   const hasLaterWork = units.slice(index + 1).some(u => u.kind === "work" || u.parts.some(isWorkPart));
   return hasLaterWork ? "inline" : "answer";
@@ -1577,10 +1563,10 @@ function renderPartInto(
     renderThoughtPart(el, msgId, part);
     return;
   } else if (part.kind === "text") {
-    // Intermediate answers remain plain model output between tool calls.
+    // Final answers and intermediate updates share plain Markdown styling.
     cls = `part text-part${textPresentation === "answer" ? " final-answer-part" : " intermediate-part"}`;
     html = textPresentation === "answer"
-      ? `<div class="card answer bubble">${md.render(part.text)}</div>`
+      ? `<div class="assistant-markdown">${md.render(part.text)}</div>`
       : `<div class="assistant-markdown intermediate-answer">${md.render(part.text)}</div>`;
   } else if (part.kind === "tool") {
     if (el.className !== "part tool-part") el.className = "part tool-part";
@@ -1595,7 +1581,7 @@ function renderPartInto(
     return;
   } else {
     cls = "part abort-part";
-    html = `<div class="card answer bubble abort">${escapeHtml(part.reason)}</div>`;
+    html = `<div class="assistant-markdown abort">${escapeHtml(part.reason)}</div>`;
   }
   if (el.className !== cls) el.className = cls;
   setHtml(el, html);
@@ -1682,7 +1668,7 @@ function copyableMessageText(m: Message): string {
 }
 
 async function handleCopyMessage(messageId: string): Promise<void> {
-  const m = state.messages.find(x => x.id === messageId);
+  const m = messagesWithSteering().find(x => x.id === messageId);
   const text = m ? copyableMessageText(m).trimEnd() : "";
   if (!text.trim()) return;
   try {
@@ -1947,6 +1933,8 @@ function updateComposer(): void {
     }
     if (nextEditingInput) resizeComposerInput(nextEditingInput, MAX_QUEUED_EDIT_LINES);
   }
+  const composerInput = root.querySelector("#composerInput") as HTMLElement | null;
+  if (composerInput) composerInput.hidden = !!pendingDecision;
   const approvalSlot = root.querySelector("#approvalSlot") as HTMLElement | null;
   const attachmentSlot = root.querySelector("#composerAttachment") as HTMLElement | null;
   if (attachmentSlot) {
@@ -1991,12 +1979,8 @@ function updateComposer(): void {
     const label = state.supportsVision ? "Attach images or text files" : "Attach text files (vision unavailable)";
     attach.setAttribute("aria-label", label);
     attach.dataset.tip = label;
-    attach.style.display = pendingDecision ? "none" : "";
     attach.disabled = state.draftAttachments.length >= MAX_ATTACHMENTS_PER_MESSAGE || state.attachmentPastePending;
   }
-  if (sendSlot) sendSlot.style.display = pendingDecision ? "none" : "";
-  const modeControls = root.querySelector(".composer-mode-controls") as HTMLElement | null;
-  if (modeControls) modeControls.style.display = pendingDecision ? "none" : "";
   if (pendingDecision) state.chatModeMenuOpen = false;
   updateChatModeControl();
   updateScrollDownButton();
@@ -2025,7 +2009,7 @@ function updateScrollDownButton(): void {
   }
 }
 
-const MAX_COMPOSER_LINES = 20;
+const MAX_COMPOSER_LINES = 10;
 const MAX_QUEUED_EDIT_LINES = 10;
 
 function resizeComposerInput(input: HTMLTextAreaElement, maxLines = MAX_COMPOSER_LINES): void {
@@ -2518,7 +2502,7 @@ function renderChangeCard(tc: ToolCard, errorText?: string): string {
       <span class="tool-label-main">${renderToolPathLabel(tc)}</span>
       ${stats ? diffStatHtml(stats) : ""}
       ${operation ? `<span class="tool-change-operation">${escapeHtml(operation)}</span>` : ""}
-      ${hasDiff ? `<button class="copy-btn block-code-copy-btn tool-change-copy" type="button" data-copy-code aria-label="Copy diff">${copyIcon()}</button>` : ""}
+      ${hasDiff ? `<button class="icon-btn copy-btn block-code-copy-btn tool-change-copy" type="button" data-copy-code aria-label="Copy diff">${copyIcon()}</button>` : ""}
     </div>
     ${hasError || hasDiff || unavailable ? CARD_SEPARATOR_HTML : ""}
     ${hasError
@@ -3261,6 +3245,14 @@ function bindOnce(): void {
       startMessageEdit(Number(editMessage.dataset.editMessage));
       return;
     }
+    const deleteMessage = target.closest<HTMLElement>("[data-delete-message]");
+    if (deleteMessage) {
+      const messageTs = Number(deleteMessage.dataset.deleteMessage);
+      if (!state.busy && state.compactActivity?.status !== "pending" && Number.isFinite(messageTs)) {
+        send({ type: "deleteMessage", messageTs });
+      }
+      return;
+    }
     if (target.closest("[data-edit-cancel]")) {
       cancelMessageEdit();
       return;
@@ -3671,9 +3663,13 @@ function updateHeaderTitle(): void {
   }
 }
 
+function messagesWithSteering(): Message[] {
+  return state.messages.flatMap(message => [message, ...message.parts.flatMap(part => part.kind === "steering" ? [part.message] : [])]);
+}
+
 function startMessageEdit(messageTs: number): void {
   if (!Number.isFinite(messageTs) || state.busy) return;
-  const message = state.messages.find(item => item.role === "user" && item.recordTs === messageTs);
+  const message = messagesWithSteering().find(item => item.role === "user" && item.recordTs === messageTs);
   if (!message) return;
   state.editingMessageTs = messageTs;
   state.editDraft = message.text;
@@ -3697,7 +3693,7 @@ function cancelMessageEdit(): void {
 function submitMessageEdit(): void {
   const messageTs = state.editingMessageTs;
   const text = state.editDraft.trim();
-  const message = state.messages.find(item => item.recordTs === messageTs);
+  const message = messagesWithSteering().find(item => item.role === "user" && item.recordTs === messageTs);
   const retainedAttachments = (message?.attachments ?? [])
     .filter(attachment => !state.editingRemovedAttachmentIds.has(attachment.id));
   if (messageTs === undefined || (!text && retainedAttachments.length === 0) || state.busy) return;

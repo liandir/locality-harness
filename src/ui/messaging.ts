@@ -171,6 +171,7 @@ export type ChatToExt = (
   | { type: "reorderQueuedMessages"; ids: string[] }
   | { type: "removeQueuedMessage"; id: string }
   | { type: "editMessage"; messageTs: number; text: string; mode: ChatMode; removeAttachmentIds?: string[] }
+  | { type: "deleteMessage"; messageTs: number }
   | { type: "selectAttachment" }
   | { type: "pasteAttachments"; files: { fileName: string; dataUrl: string }[] }
   | { type: "pasteText"; text: string }

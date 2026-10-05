@@ -1,6 +1,7 @@
 /* Shared red text palette: muted at rest, brighter for hover/focus and emphasis. */
 :root {
-  --control-radius: 6px;
+  --control-radius: 10px;
+  --surface-fill-hover: color-mix(in srgb, var(--vscode-foreground) 8%, transparent);
   --scrollbar-size: 4px;
   --scrollbar-hover-size: calc(1.5 * var(--scrollbar-size));
   --scrollbar-hover-fill: color-mix(in srgb, var(--vscode-scrollbarSlider-hoverBackground, color-mix(in srgb, var(--vscode-foreground) 40%, transparent)) 85%, var(--vscode-foreground));

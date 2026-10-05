@@ -740,6 +740,55 @@ export class ChatSession {
     }
   }
 
+  async deleteUserMessage(messageTs: number): Promise<boolean> {
+    if (this.disposed) return false;
+    if (this.activeTurn || this.compactTasks.size) {
+      this.emit({ kind: "notice", text: "Wait for the current response or compaction to finish before deleting messages." });
+      return false;
+    }
+    const index = this.record.messages.findIndex(message => message.role === "user" && message.ts === messageTs);
+    if (index < 0) return false;
+
+    const before = { ...this.record };
+    let deleted = false;
+    const turn = (async () => {
+      this.cancelPendingTitle();
+      this.record.messages = this.record.messages.slice(0, index);
+      // Compacted context can include any of the removed messages. Rebuild it
+      // from the retained transcript when the next request is sent.
+      delete this.record.contextMessages;
+      delete this.record.pendingPlanMessageTs;
+      delete this.record.planning;
+      delete this.record.recalledMemories;
+      this.record.memoryCreations = this.record.memoryCreations?.filter(creation =>
+        this.record.messages.some(message => message.role === "assistant" && message.ts === creation.messageTs));
+      this.record.totalTokens = this.record.messages.reduce((total, message) => total + (message.tokens ?? 0), 0);
+      try {
+        await this.saveRecord();
+      } catch {
+        Object.assign(this.record, before);
+        this.emit({ kind: "notice", text: "Could not save the chat. No messages were deleted." });
+        return;
+      }
+      deleted = true;
+      this.loadedChatContextPending = this.record.messages.length > 0;
+      this.contextActivities.clear();
+      this.toolDiffSources.clear();
+      await this.deleteDroppedAttachments(before.messages.flatMap(message => message.attachments ?? []));
+    })();
+    this.activeTurn = turn;
+    try {
+      await turn;
+    } finally {
+      if (this.activeTurn === turn) this.activeTurn = undefined;
+      if (deleted && !this.disposed) {
+        this.emitContextActivities();
+        this.emitLoaded();
+      }
+    }
+    return deleted;
+  }
+
   async continueTurn(messageTs: number): Promise<boolean> {
     const interrupted = this.record.messages.at(-1);
     if (this.disposed || this.activeTurn || !interrupted?.interruption || interrupted.ts !== messageTs) return false;

@@ -606,6 +606,31 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         this.drainMessageQueueIfIdle(runtime);
         break;
       }
+      case "deleteMessage": {
+        const runtime = this.active;
+        const session = runtime.session;
+        if (!session || runtime.messageLoopRunning || runtime.compacting || session.isTurnActive()) break;
+        const messages = session.getRecord().messages;
+        const count = messages.length;
+        if (!messages.some(message => message.role === "user" && message.ts === m.messageTs)) break;
+        const choice = await vscode.window.showWarningMessage(
+          "Delete this message and everything after it?",
+          { modal: true, detail: "The selected message and all later messages will be permanently removed from this chat. Workspace file changes will remain." },
+          "Delete"
+        );
+        // A dialog can outlive its chat or workspace, or a newly started turn.
+        if (choice !== "Delete" || runtime !== this.active || runtime.removed || runtime.storage !== this.getStorage()
+          || runtime.messageLoopRunning || runtime.compacting || session.isTurnActive()
+          || session.getRecord().messages !== messages || messages.length !== count) break;
+        if (await session.deleteUserMessage(m.messageTs)) {
+          if (runtime.removed) break;
+          this.onChatOpened(session.getRecord());
+          this.onChatListChanged();
+          this.pushTabs();
+          await this.pushRecentChats();
+        }
+        break;
+      }
       case "forkChat": {
         const storage = this.getStorage();
         const record = this.session?.getRecord();
