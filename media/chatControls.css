@@ -26,12 +26,13 @@ body:is(.vscode-light, .vscode-high-contrast-light) {
 :where(button):disabled { opacity: 0.55; cursor: default; }
 :where(.action-btn) { background: var(--surface-fill); color: var(--button-foreground, var(--vscode-foreground)); padding: 5px 14px; text-align: center; }
 .action-btn:is(:hover, :focus-visible):not(:disabled) { background: var(--button-hover-fill, var(--surface-fill-strong)); }
+.cancel-btn { --button-foreground: var(--error-foreground); --button-hover-fill: color-mix(in srgb, var(--vscode-errorForeground) 26%, transparent); background: color-mix(in srgb, var(--vscode-errorForeground) 16%, transparent); }
 .quiet-btn { color: var(--button-foreground, var(--vscode-descriptionForeground)); }
 .icon-btn { flex: 0 0 auto; width: var(--action-size, var(--icon-action-size)); height: var(--action-size, var(--icon-action-size)); min-height: 0; box-sizing: border-box; display: inline-flex; align-items: center; justify-content: center; color: var(--button-foreground, var(--vscode-descriptionForeground)); padding: 0; line-height: 1; }
 .icon-btn.icon-btn-compact { --action-size: var(--icon-action-compact-size); }
 :is(.icon-btn, .quiet-btn):is(:hover, :focus-visible, .active, [aria-expanded=true]):not(:disabled) { background: var(--button-hover-fill, var(--surface-fill-hover)); color: var(--button-foreground, var(--vscode-foreground)); }
 .icon-btn svg { display: block; }
-:is(.action-btn, .icon-btn):is(.danger, .delete, .delete-message-btn, .remove, .reject, .question-cancel):is(:hover, :focus-visible):not(:disabled) { background: color-mix(in srgb, var(--vscode-errorForeground) 12%, transparent); color: var(--error-highlight-foreground); }
+:is(.action-btn, .icon-btn):is(.danger, .delete, .delete-message-btn, .remove, .reject):is(:hover, :focus-visible):not(:disabled) { background: color-mix(in srgb, var(--vscode-errorForeground) 12%, transparent); color: var(--error-highlight-foreground); }
 .icon-btn:is(.copied, .save):not(:disabled) { --button-foreground: var(--success-foreground); }
 
 /* Use the Settings/Welcome control geometry for decision fields and actions too. */

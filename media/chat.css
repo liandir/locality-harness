@@ -13,7 +13,6 @@
   --code-fill: color-mix(in srgb, var(--vscode-foreground) 14%, transparent);
   --code-inline-fill: var(--code-fill);
   --hover-help-fill: color-mix(in srgb, var(--vscode-foreground) 18%, var(--vscode-sideBar-background, var(--vscode-editor-background)));
-  --accent-reject-fill: color-mix(in srgb, var(--vscode-errorForeground) 16%, transparent);
   /* Readable history foreground; only active work receives a shimmer. */
   --tool-idle: var(--vscode-descriptionForeground);
   --shimmer-edge: var(--tool-idle);
@@ -647,8 +646,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .question-other:focus-within .question-submit:not(:disabled) { opacity: 1; pointer-events: auto; }
 .question-submit:hover:not(:disabled), .question-submit:focus-visible:not(:disabled) { color: var(--vscode-foreground); }
 .question-submit:disabled { opacity: 0; }
-.question-cancel .question-option-badge { color: var(--error-foreground); }
-.question-cancel:is(:hover, :focus-visible):not(:disabled) .question-option-badge { color: var(--error-highlight-foreground); }
+.question-cancel .question-option-badge { background: transparent; color: inherit; }
 #sendSlot { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 4px; margin-left: auto; }
 /* Reserve the scrollbar below the shared control row without shifting its items. */
 .composer-attachment { display: flex; flex: 1 1 auto; align-self: flex-start; align-items: flex-start; gap: 4px; min-width: 0; height: calc(var(--icon-action-size) + 2px + var(--scrollbar-hover-size)); margin-bottom: calc(-2px - var(--scrollbar-hover-size)); overflow-x: auto; overflow-y: hidden; }
@@ -684,7 +682,6 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .attachment-preview-previous svg { transform: rotate(180deg); }
 body.image-preview-open .chat-body { overflow: hidden; }
 .send-btn { flex: 0 0 auto; width: var(--icon-action-size); height: var(--icon-action-size); box-sizing: border-box; display: inline-flex; align-items: center; justify-content: center; padding: 0; transition: background 0.12s, opacity 0.12s; }
-.send-btn.cancel-btn { --button-foreground: var(--error-foreground); --button-hover-fill: color-mix(in srgb, var(--vscode-errorForeground) 26%, transparent); background: var(--accent-reject-fill); }
 .composer-toggles { display: flex; gap: 8px; margin-top: 6px; font-size: 0.88em; color: var(--vscode-descriptionForeground); align-items: center; min-width: 0; }
 .ctx-pill { display: inline-flex; align-items: center; justify-content: center; gap: 5px; min-height: 26px; box-sizing: border-box; line-height: 1; white-space: nowrap; flex: 0 0 auto; background: transparent; color: var(--vscode-descriptionForeground); border: 0; padding: 2px 9px; border-radius: var(--control-radius); cursor: pointer; font: inherit; transition: background 0.12s, color 0.12s; }
 .ctx-pill:hover { background: var(--surface-fill); color: var(--vscode-foreground); }
