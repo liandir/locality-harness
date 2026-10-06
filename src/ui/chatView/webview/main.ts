@@ -1052,7 +1052,7 @@ function renderUserMessage(el: HTMLElement, m: Message): void {
       <textarea class="user-edit-input" rows="3" data-edit-input="${m.recordTs}">${escapeHtml(state.editDraft)}</textarea>
       ${renderAttachmentsHtml(attachments, "data-edit-remove-attachment")}
       <div class="user-edit-actions">
-        <button class="action-btn send-btn cancel-btn" type="button" data-edit-cancel data-tip="Cancel" aria-label="Cancel">${stopIcon()}</button>
+        <button class="action-btn send-btn" type="button" data-edit-cancel data-tip="Cancel edit" aria-label="Cancel edit">${closeIcon()}</button>
         <button class="action-btn send-btn" type="button" data-edit-submit="${m.recordTs}" data-tip="Send" aria-label="Send"${state.editDraft.trim() || attachments.length ? "" : " disabled"}>${sendIcon()}</button>
       </div>
     </div>`;

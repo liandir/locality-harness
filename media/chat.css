@@ -81,7 +81,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .user-edit-card { align-self: flex-end; width: min(90%, 680px); display: flex; flex-direction: column; gap: 7px; padding: 9px; background: var(--surface-fill); border: 1px solid transparent; border-radius: var(--control-radius); box-sizing: border-box; }
 .user-edit-input { width: 100%; min-height: 72px; resize: vertical; padding: 4px 6px; background: transparent; color: var(--vscode-input-foreground); border: 0; border-radius: 0; outline: none; font: inherit; line-height: 1.45; box-sizing: border-box; }
 .user-edit-input:focus { border-color: transparent; outline: none; }
-.user-edit-actions { display: flex; justify-content: flex-end; gap: 6px; }
+.user-edit-actions { display: flex; justify-content: flex-end; gap: 4px; }
 .msg.assistant .bubble { padding: 4px 0; }
 .msg.assistant .steering-part .bubble { padding: 0; color: var(--vscode-foreground); }
 .assistant-markdown { color: var(--vscode-foreground); line-height: 1.55; padding: 2px 0; }
@@ -608,7 +608,6 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .composer-input > textarea { flex: 0 0 auto; width: 100%; min-width: 0; resize: none; min-height: 52px; padding: 12px 13px 6px; overflow-y: hidden; background: transparent; color: var(--vscode-input-foreground); border: 0; border-radius: var(--composer-radius) var(--composer-radius) 0 0; font: inherit; box-sizing: border-box; outline: none; line-height: 1.45; }
 .composer-toolbar { display: flex; flex: 0 0 auto; align-items: center; gap: 4px; min-width: 0; padding: 0 9px 10px; }
 .composer-toolbar > .mode-selector { flex: 0 0 auto; }
-.composer-toolbar .send-btn { flex: 0 0 auto; width: var(--icon-action-size); height: var(--icon-action-size); box-sizing: border-box; }
 #approvalSlot { flex: 1; width: 100%; min-width: 0; }
 .approval-composer { width: 100%; min-height: 86px; display: flex; flex-direction: column; justify-content: center; gap: 10px; padding: 10px 12px; background: var(--surface-fill); color: var(--vscode-input-foreground); border: 1px solid transparent; border-radius: var(--composer-radius); box-sizing: border-box; }
 .approval-summary { display: flex; align-items: center; gap: 8px; min-height: 24px; min-width: 0; color: var(--vscode-descriptionForeground); font-size: 0.9em; }
@@ -684,7 +683,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .attachment-preview-next { right: 10px; }
 .attachment-preview-previous svg { transform: rotate(180deg); }
 body.image-preview-open .chat-body { overflow: hidden; }
-.send-btn { width: 34px; height: 34px; display: inline-flex; align-items: center; justify-content: center; padding: 0; transition: background 0.12s, opacity 0.12s; }
+.send-btn { flex: 0 0 auto; width: var(--icon-action-size); height: var(--icon-action-size); box-sizing: border-box; display: inline-flex; align-items: center; justify-content: center; padding: 0; transition: background 0.12s, opacity 0.12s; }
 .send-btn.cancel-btn { --button-foreground: var(--error-foreground); --button-hover-fill: color-mix(in srgb, var(--vscode-errorForeground) 26%, transparent); background: var(--accent-reject-fill); }
 .composer-toggles { display: flex; gap: 8px; margin-top: 6px; font-size: 0.88em; color: var(--vscode-descriptionForeground); align-items: center; min-width: 0; }
 .ctx-pill { display: inline-flex; align-items: center; justify-content: center; gap: 5px; min-height: 26px; box-sizing: border-box; line-height: 1; white-space: nowrap; flex: 0 0 auto; background: transparent; color: var(--vscode-descriptionForeground); border: 0; padding: 2px 9px; border-radius: var(--control-radius); cursor: pointer; font: inherit; transition: background 0.12s, color 0.12s; }
