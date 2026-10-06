@@ -341,12 +341,13 @@
   "dependencies": {
     "@vscode/markdown-it-katex": "^1.1.2",
     "htmlparser2": "^10.1.0",
-    "katex": "^0.16.10",
+    "katex": "^0.18.2",
     "markdown-it": "^14.1.0",
     "shiki": "^4.1.0",
     "undici": "^6.29.0"
   },
   "overrides": {
+    "katex": "$katex",
     "undici": "$undici"
   },
   "allowScripts": {
