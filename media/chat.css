@@ -646,7 +646,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .question-other:focus-within .question-submit:not(:disabled) { opacity: 1; pointer-events: auto; }
 .question-submit:hover:not(:disabled), .question-submit:focus-visible:not(:disabled) { color: var(--vscode-foreground); }
 .question-submit:disabled { opacity: 0; }
-.question-cancel .question-option-badge { background: transparent; color: inherit; }
+.question-cancel:is(:hover, :focus-visible):not(:disabled) .question-option-badge { color: inherit; }
 #sendSlot { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 4px; margin-left: auto; }
 /* Reserve the scrollbar below the shared control row without shifting its items. */
 .composer-attachment { display: flex; flex: 1 1 auto; align-self: flex-start; align-items: flex-start; gap: 4px; min-width: 0; height: calc(var(--icon-action-size) + 2px + var(--scrollbar-hover-size)); margin-bottom: calc(-2px - var(--scrollbar-hover-size)); overflow-x: auto; overflow-y: hidden; }
