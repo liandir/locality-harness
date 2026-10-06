@@ -1,9 +1,10 @@
 import { sideFeature } from "../../../build/side.js";
+import { preserveFormFocus } from "../../formFocus.js";
 import { installTooltips } from "../../tooltips.js";
 import type { MemoryListItem } from "../../../chat/memory.js";
 import { installChatContextMenu } from "../../chatContextMenu.js";
 import type { ChatTab } from "../../messaging.js";
-import { chevronIcon, cloudIcon } from "../../icons.js";
+import { chevronIcon, memoryIcon } from "../../icons.js";
 import { renderMemoryDate } from "../../memoryDate.js";
 import { DEFAULT_MEMORY_MAX_COUNT, MAX_MEMORY_COUNT } from "../../../chat/memoryLimits.js";
 import { isReasoningBudget } from "../../../chat/reasoningBudget.js";
@@ -34,7 +35,11 @@ interface State {
   reasoningEffort: ReasoningEffort;
   reasoningEffortError?: string;
   reasoningBudgetError?: string;
-  endpointMsg?: { ok: boolean; text: string };
+  endpointMsg?: { ok?: boolean; text: string };
+  endpointDraft?: string;
+  endpointTesting?: boolean;
+  endpointSubmitted?: string;
+  endpointRequestId?: number;
   endpointMetadata?: { modelAlias: string; contextSize: number; supportsVision: boolean };
   serverModels: { id: string }[];
   openTabs: ChatTab[];
@@ -56,6 +61,7 @@ const state: State = {
   version: ""
 };
 
+let endpointRequestSequence = 0;
 const memoryDrafts = new Map<string, string>();
 const expandedMemories = new Set<string>();
 let expandedSettings = new Set<SettingsSection>();
@@ -68,7 +74,8 @@ function send(msg: SideToExt): void {
   vscode.postMessage(msg);
 }
 
-function render(): void {
+function render(preserveDrafts = true): void {
+  const restoreFocus = preserveFormFocus(root, preserveDrafts);
   const active = document.activeElement as HTMLTextAreaElement | null;
   const editingMemory = active?.dataset.memoryEditor;
   const editingPanel = active?.closest<HTMLElement>("[data-memory-details]")?.id;
@@ -85,6 +92,7 @@ function render(): void {
     </div>
   `;
   bind();
+  restoreFocus();
   if (editingMemory && selection) {
     const editor = root.querySelector(`#${editingPanel} [data-memory-editor="${editingMemory}"]`) as HTMLTextAreaElement | null;
     editor?.focus();
@@ -115,15 +123,15 @@ function renderWelcome(): string {
       <section class="welcome-actions">
         <div class="welcome-group">
           <p class="welcome-caption">Start chatting immediately.</p>
-          <button id="newChat" class="welcome-button icon-label">${plusIcon()}<span>Start new chat</span></button>
+          <button id="newChat" class="action-btn welcome-button icon-label">${plusIcon()}<span>Start new chat</span></button>
         </div>
         <div class="welcome-group">
           <p class="welcome-caption">Continue, where you left off.</p>
-          <button id="openRecentChats" class="welcome-button icon-label">${historyIcon()}<span>Open recent chats</span></button>
+          <button id="openRecentChats" class="action-btn welcome-button icon-label">${historyIcon()}<span>Open recent chats</span></button>
         </div>
         <div class="welcome-group">
           <p class="welcome-caption">Set things up, before you get started.</p>
-          <button id="openSettings" class="welcome-button icon-label">${settingsIcon()}<span>Open settings</span></button>
+          <button id="openSettings" class="action-btn welcome-button icon-label">${settingsIcon()}<span>Open settings</span></button>
         </div>
       </section>
       <footer class="welcome-footer">
@@ -145,7 +153,7 @@ function renderChats(): string {
   return `
     <div class="panel chats-panel">
       <section class="panel-section">
-        <button id="newChat" class="welcome-button icon-label">${plusIcon()}<span>Start new chat</span></button>
+        <button id="newChat" class="action-btn welcome-button icon-label">${plusIcon()}<span>Start new chat</span></button>
       </section>
 
       ${state.openTabs.some(tab => tab.open !== false) ? `
@@ -169,9 +177,9 @@ function renderChats(): string {
           `<ul class="chat-list">${chats.map(c => renderChatEntry(c, memories.get(c.id), "recent")).join("")}</ul>`}
         <p class="setting-help">Memories update after responses when Use workspace memories is enabled. Edited memories are preserved.</p>
         ${state.memoryError ? `<p class="memory-error" role="alert">${esc(state.memoryError)}</p>` : ""}
-        ${busy ? '<button id="cancelMemories" class="wide-button">Cancel generation</button>' : ""}
-        <button id="summarizeMemories" class="wide-button memory-generate icon-label">${cloudIcon()}<span>Re-generate all memories</span></button>
-        ${state.chats.length > 0 ? `<button id="clearChats" class="wide-button danger icon-label clear-chats">${trashIcon()}<span>Clear all chats</span></button>` : ""}
+        ${busy ? '<button id="cancelMemories" class="action-btn wide-button">Cancel generation</button>' : ""}
+        <button id="summarizeMemories" class="action-btn wide-button icon-label">${memoryIcon()}<span>Re-generate all memories</span></button>
+        ${state.chats.length > 0 ? `<button id="clearChats" class="action-btn wide-button danger icon-label clear-chats">${trashIcon()}<span>Clear all chats</span></button>` : ""}
       </section>
     </div>
   `;
@@ -197,8 +205,8 @@ function renderChatEntry(chat: { id: string; title: string; updatedAt?: number }
       <span class="chat-running-dot${running ? " running" : ""}" aria-label="${running ? "Running" : "Idle"}"></span>
       <span class="chat-row-title">${esc(chat.title)}</span>
       ${chat.updatedAt !== undefined ? `<time>${ago(chat.updatedAt)}</time>` : ""}
-      <button class="memory-reveal${active ? " memory-usable" : ""}" data-memory-reveal="${esc(panelId)}" data-tip="Memory ${esc(status)}" aria-label="Memory for ${esc(chat.title)} (${esc(status)})" aria-expanded="${expandedMemories.has(panelId)}" aria-controls="${esc(panelId)}">${cloudIcon()}</button>
-      <button class="delete" data-delete="${esc(chat.id)}" data-tip="Delete" aria-label="Delete chat">${trashIcon()}</button>
+      <button class="icon-btn icon-btn-compact memory-reveal${active ? " memory-usable" : ""}" data-memory-reveal="${esc(panelId)}" data-tip="Memory ${esc(status)}" aria-label="Memory for ${esc(chat.title)} (${esc(status)})" aria-expanded="${expandedMemories.has(panelId)}" aria-controls="${esc(panelId)}">${memoryIcon()}</button>
+      <button class="icon-btn icon-btn-compact delete" data-delete="${esc(chat.id)}" data-tip="Delete" aria-label="Delete chat">${trashIcon()}</button>
     </div>
     ${renderChatMemory(memory ?? { sourceId: chat.id, title: chat.title, text: "", sourceRevision: "", generatedAt: 0, enabled: false, usable: false, status: "missing" }, panelId)}
   </li>`;
@@ -211,16 +219,16 @@ function renderChatMemory(memory: MemoryListItem, panelId: string): string {
         ${memory.error ? `<p class="memory-error">${esc(memory.error)}</p>` : ""}
         <textarea class="memory-editor" data-memory-editor="${esc(memory.sourceId)}" aria-label="Memory for ${esc(memory.title)}" placeholder="No summary yet">${esc(memoryDrafts.get(memory.sourceId) ?? memory.text)}</textarea>
         <div class="memory-actions">
-          <button data-memory-save="${esc(memory.sourceId)}">Save edit</button>
-          <button data-memory-toggle="${esc(memory.sourceId)}" aria-label="${memory.enabled ? "Deactivate memory for" : "Activate memory for"} ${esc(memory.title)}">${memory.enabled ? "Deactivate" : "Activate"}</button>
-          <button data-memory-regenerate="${esc(memory.sourceId)}">Regenerate</button>
+          <button class="action-btn" data-memory-save="${esc(memory.sourceId)}">Save edit</button>
+          <button class="action-btn" data-memory-toggle="${esc(memory.sourceId)}" aria-label="${memory.enabled ? "Deactivate memory for" : "Activate memory for"} ${esc(memory.title)}">${memory.enabled ? "Deactivate" : "Activate"}</button>
+          <button class="action-btn" data-memory-regenerate="${esc(memory.sourceId)}">Regenerate</button>
         </div>
       </div>`;
 }
 
 function renderSettings(): string {
   const s = state.settings;
-  const endpoint = String(s["endpoint"] ?? "http://localhost:8080/v1");
+  const endpoint = state.endpointDraft ?? String(s["endpoint"] ?? "http://localhost:8080/v1");
   const model = String(s["model"] ?? "local");
   const toolCallingMode = String(s["toolCallingMode"] ?? "compat-gemma4");
   const temperature = String(s["temperature"] ?? 0.8);
@@ -234,17 +242,17 @@ function renderSettings(): string {
   const showThinking = s["showThinking"] === true;
   const autoCompact = !!s["autoCompact"];
   const autoCompactPct = clampPercent(Number(s["autoCompactThresholdPercent"] ?? 80));
-  const validationCls = state.endpointMsg?.ok ? "ok" : state.endpointMsg ? "err" : "";
+  const validationCls = state.endpointMsg?.ok === true ? "ok" : state.endpointMsg?.ok === false ? "err" : "";
 
   return `
     <div class="panel settings-panel">
       ${settingsSection("model", "Model", `
         <label class="field-label" for="endpoint">Server URL</label>
         <div class="setting-action-row">
-          <input id="endpoint" type="text" value="${esc(endpoint)}" />
-          <button id="saveEndpoint" class="primary">Set</button>
+          <input id="endpoint" type="text" value="${esc(endpoint)}" ${state.endpointTesting ? "readonly" : ""} />
+          <button id="saveEndpoint" class="action-btn" ${state.endpointTesting ? "disabled" : ""}>${state.endpointTesting ? "Connecting…" : "Set"}</button>
         </div>
-        <div class="validation ${validationCls}">${esc(state.endpointMsg?.text ?? "")}</div>
+        <div class="validation ${validationCls}" role="${state.endpointMsg?.ok === false ? "alert" : "status"}">${esc(state.endpointMsg?.text ?? "")}</div>
         ${state.serverModels.length > 0 ? `
           <label class="field-label" for="model">Model</label>
           <select id="model">
@@ -326,13 +334,13 @@ function renderSettings(): string {
       `)}
 
       ${settingsSection("user", "User", `
-        <button id="editUserSettings" class="wide-button">Edit User Settings</button>
-        <button id="editWorkspacePrompts" class="wide-button">Edit workspace prompts</button>
-        <button id="restorePrompts" class="wide-button">Restore default prompts</button>
+        <button id="editUserSettings" class="action-btn wide-button">Edit User Settings</button>
+        <button id="editWorkspacePrompts" class="action-btn wide-button">Edit workspace prompts</button>
+        <button id="restorePrompts" class="action-btn wide-button">Restore default prompts</button>
       `)}
 
       ${settingsSection("reset", "Reset", `
-        <button id="resetDefaults" class="wide-button danger">Restore all defaults</button>
+        <button id="resetDefaults" class="action-btn wide-button danger">Restore all defaults</button>
       `)}
     </div>
   `;
@@ -398,13 +406,28 @@ function bind(): void {
   root.querySelector("#openRecentChats")?.addEventListener("click", () => openTab("chats"));
   root.querySelector("#openSettings")?.addEventListener("click", () => openTab("settings"));
   root.querySelector("#openGithub")?.addEventListener("click", () => send({ type: "openGithub" }));
+  const endpointInput = root.querySelector<HTMLInputElement>("#endpoint");
+  endpointInput?.addEventListener("input", () => {
+    state.endpointDraft = endpointInput.value;
+    state.endpointMsg = undefined;
+    const notice = root.querySelector(".validation");
+    if (notice) { notice.textContent = ""; notice.className = "validation"; }
+  });
+  endpointInput?.addEventListener("keydown", event => {
+    if (event.key === "Enter") { event.preventDefault(); root.querySelector<HTMLButtonElement>("#saveEndpoint")?.click(); }
+  });
   root.querySelector("#saveEndpoint")?.addEventListener("click", () => {
+    if (state.endpointTesting) return;
     const url = (root.querySelector("#endpoint") as HTMLInputElement).value;
-    state.endpointMsg = { ok: true, text: "Reading server metadata…" };
+    state.endpointDraft = url;
+    state.endpointSubmitted = url;
+    state.endpointTesting = true;
+    state.endpointRequestId = ++endpointRequestSequence;
+    state.endpointMsg = { text: "Reading server metadata…" };
     state.endpointMetadata = undefined;
     state.serverModels = [];
     render();
-    send({ type: "validateEndpoint", url });
+    send({ type: "validateEndpoint", url, requestId: state.endpointRequestId });
   });
   bindSetting("model", "change", v => v);
   bindSetting("toolCallingMode", "change", v => v);
@@ -619,11 +642,32 @@ window.addEventListener("message", ev => {
     case "memories": state.memories = msg.memories; render(); break;
     case "memoryError": state.memoryError = msg.error; render(); break;
     case "appInfo": state.version = msg.version; render(); break;
-    case "settings": state.settings = msg.settings; state.reasoningEffort = msg.reasoningEffort; state.memorySettingError = undefined; render(); break;
+    case "settings":
+      if (msg.resetDrafts) {
+        state.endpointDraft = undefined;
+        state.endpointSubmitted = undefined;
+        state.endpointRequestId = undefined;
+        state.endpointTesting = false;
+        state.endpointMsg = undefined;
+        state.endpointMetadata = undefined;
+        state.serverModels = [];
+      }
+      state.settings = msg.settings;
+      state.reasoningEffort = msg.reasoningEffort;
+      state.memorySettingError = undefined;
+      render(!msg.resetDrafts); break;
     case "reasoningEffort": state.reasoningEffort = msg.effort; state.reasoningEffortError = undefined; render(); break;
     case "chats": state.chats = msg.chats; render(); break;
     case "focusTab": state.tab = msg.tab; render(); break;
     case "endpointValidation":
+      if (msg.requestId !== state.endpointRequestId && (state.endpointTesting || msg.requestId !== undefined)) break;
+      state.endpointTesting = false;
+      state.endpointRequestId = undefined;
+      if (msg.ok && state.endpointSubmitted !== undefined) {
+        state.settings.endpoint = state.endpointSubmitted;
+        state.endpointDraft = undefined;
+      }
+      state.endpointSubmitted = undefined;
       state.endpointMsg = msg.ok
         ? { ok: true, text: `Connected — ${msg.resolved?.join(", ") ?? "allowed endpoint"}`.trim() }
         : { ok: false, text: msg.error ?? "Validation failed." };

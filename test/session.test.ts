@@ -4601,3 +4601,50 @@ describe("steering an active turn", () => {
     await expect(fs.stat(path.join(workspaceRoot, "cancelled.txt"))).rejects.toThrow();
   });
 });
+
+describe("saved response file Undo", () => {
+  it.each([true, false])("persists snapshots across reopening and informs the next request (existing file: %s)", async existed => {
+    const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "locality-session-undo-"));
+    const { ChatSession } = await import("../src/chat/session.js");
+    const { ChatStorage } = await import("../src/chat/storage.js");
+    const storage = new ChatStorage(workspaceRoot, path.join(workspaceRoot, "history"));
+    const record = storage.newRecord("native");
+    mocks.settings.toolCallingMode = "native";
+    mocks.settings.autoapproveWrites = true;
+    const events: UiEvent[] = [];
+    let session = new ChatSession({ storage, workspaceRoot, record, emit: event => events.push(event) });
+    try {
+      if (existed) await fs.writeFile(path.join(workspaceRoot, "existing.txt"), "");
+      let pass = 0;
+      mocks.streamChat.mockImplementation(async function* () {
+        if (pass++ === 0) yield { kind: "toolCall", name: "insert_text", argsJson: '{"path":"existing.txt","line":1,"expectedLine":"<EOF>","text":"edited"}', id: "edit-existing" };
+        else if (pass === 2) yield { kind: "toolCall", name: "create_file", argsJson: '{"path":"created.txt","content":"created"}', id: "create-new" };
+        else yield { kind: "text", text: "Updated both files." };
+      });
+      await session.sendUserMessage("Update the files");
+      const userTs = record.messages.find(message => message.role === "user")!.ts;
+      expect(events.filter(event => event.kind === "toolCallResolved" && event.status === "executed"))
+        .toEqual(expect.arrayContaining([expect.objectContaining({ fileUndoState: "available", fileUndoPath: "existing.txt" })]));
+      await session.shutdown();
+      const restored = (await storage.load(record.id))!;
+      expect(restored.messages.filter(message => message.role === "tool").map(message => message.toolCall?.fileUndo?.previous)).toEqual([existed ? "" : null, null]);
+      session = new ChatSession({ storage, workspaceRoot, record: restored, emit: event => events.push(event) });
+      await session.undoResponseFiles(userTs, () => undefined);
+      if (existed) expect(await fs.readFile(path.join(workspaceRoot, "existing.txt"), "utf8")).toBe("");
+      else await expect(fs.stat(path.join(workspaceRoot, "existing.txt"))).rejects.toMatchObject({ code: "ENOENT" });
+      await expect(fs.stat(path.join(workspaceRoot, "created.txt"))).rejects.toMatchObject({ code: "ENOENT" });
+      expect((await storage.load(record.id))!.messages.filter(message => message.role === "tool").map(message => message.toolCall?.fileUndoState)).toEqual(["undone", "undone"]);
+      expect(events).toContainEqual({ kind: "fileEditsUndone", userMessageTs: userTs, paths: ["existing.txt", "created.txt"] });
+      await expect(session.undoResponseFiles(userTs, () => undefined)).rejects.toThrow("already been undone");
+      mocks.streamChat.mockImplementation(async function* (_endpoint, request) {
+        expect(request.messages).toEqual(expect.arrayContaining([expect.objectContaining({ role: "user", content: expect.stringContaining("The user undid this response's file edits") })]));
+        expect(request.messages.slice(1).some((message: { role: string }) => message.role === "system")).toBe(false);
+        yield { kind: "text", text: "I will read the restored files." };
+      });
+      await session.sendUserMessage("Check the current files");
+    } finally {
+      await session.shutdown();
+      await fs.rm(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+});

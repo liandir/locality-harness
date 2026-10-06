@@ -71,9 +71,9 @@ export class SideViewProvider implements vscode.WebviewViewProvider {
 
   post(msg: ExtToSide): void { this.view?.webview.postMessage(msg); }
 
-  pushSettings(): void {
+  pushSettings(resetDrafts = false): void {
     const s = readSettings();
-    this.post({ type: "settings", settings: s as unknown as Record<string, unknown>, reasoningEffort: this.currentReasoningEffort() });
+    this.post({ type: "settings", settings: s as unknown as Record<string, unknown>, reasoningEffort: this.currentReasoningEffort(), ...(resetDrafts ? { resetDrafts: true } : {}) });
     void this.featureHost?.pushSettings();
   }
 
@@ -209,7 +209,7 @@ export class SideViewProvider implements vscode.WebviewViewProvider {
       case "validateEndpoint": {
         const v = await validateEndpoint(m.url);
         if (!v.ok) {
-          this.post({ type: "endpointValidation", ok: false, error: v.error, resolved: v.resolved });
+          this.post({ type: "endpointValidation", requestId: m.requestId, ok: false, error: v.error, resolved: v.resolved });
           break;
         }
         try {
@@ -217,10 +217,10 @@ export class SideViewProvider implements vscode.WebviewViewProvider {
           await writeSetting("endpoint", m.url);
           if (readSettings().model !== selectedModel) await writeSetting("model", selectedModel);
           this.onEndpointConnected?.();
-          this.post({ type: "endpointValidation", ok: true, resolved: v.resolved, metadata, models, selectedModel });
+          this.post({ type: "endpointValidation", requestId: m.requestId, ok: true, resolved: v.resolved, metadata, models, selectedModel });
         } catch (error) {
           this.post({
-            type: "endpointValidation",
+            type: "endpointValidation", requestId: m.requestId,
             ok: false,
             resolved: v.resolved,
             error: `Could not read llama.cpp server information: ${(error as Error).message}`
@@ -257,7 +257,7 @@ export class SideViewProvider implements vscode.WebviewViewProvider {
         if (choice === "Restore defaults") {
           await resetAllSettings();
           await this.featureHost?.reset();
-          this.pushSettings();
+          this.pushSettings(true);
         }
         break;
       }

@@ -6,6 +6,7 @@ import { MAX_MEMORY_COUNT } from "./memoryLimits.js";
 import { randomUUID } from "node:crypto";
 import { normalizeToolCallingProfile, type ToolCallingProfile } from "../llm/toolCallingProfile.js";
 import type { ChatToolResultDisplay } from "../ui/messaging.js";
+import type { FileUndoSnapshot } from "./fileUndo.js";
 import type { FileChangeSummary } from "./fileChanges.js";
 import { attachmentFileType, isImageAttachment, MAX_TEXT_ATTACHMENT_BYTES } from "./attachments.js";
 import { MAX_ATTACHMENTS_PER_MESSAGE } from "./attachmentLimits.js";
@@ -36,6 +37,8 @@ export interface ChatAttachment {
 
 export interface ChatMessage {
   role: Role;
+  /** Harness note about a user-requested file undo; hidden from the transcript UI. */
+  fileUndoNotice?: boolean;
   content: string;
   /** Display-only terminal response; never included in model context. */
   interruption?: { reason: string; mode: ChatMode; reasoningEffort: ReasoningEffort };
@@ -62,6 +65,9 @@ export interface ChatMessage {
     processExitCode?: number;
     /** Exact change made by this call, independent of later edits to the same file. */
     fileChange?: FileChangeSummary;
+    /** Host-only data, excluded from model prompts and webview payloads. */
+    fileUndo?: FileUndoSnapshot;
+    fileUndoState?: "available" | "undone";
   } & ChatToolResultDisplay;
   /** File changes made during this assistant turn. */
   fileChanges?: FileChangeSummary[];

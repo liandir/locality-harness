@@ -1,8 +1,4 @@
 :root {
-  --surface-fill: color-mix(in srgb, var(--vscode-foreground) 7%, transparent);
-  --surface-fill-strong: color-mix(in srgb, var(--vscode-foreground) 16%, transparent);
-  --surface-stroke: color-mix(in srgb, var(--vscode-foreground) 11%, transparent);
-  --surface-stroke-strong: color-mix(in srgb, var(--vscode-foreground) 17%, transparent);
   --hover-help-fill: color-mix(in srgb, var(--vscode-foreground) 18%, var(--vscode-sideBar-background, var(--vscode-editor-background)));
 }
 
@@ -21,12 +17,6 @@ h2 { font-size: 1.15em; margin: 8px 0 12px; }
 h3 { font-size: 0.82em; margin: 0 0 12px; color: var(--vscode-descriptionForeground); text-transform: uppercase; letter-spacing: 0.5px; }
 .muted { color: var(--vscode-descriptionForeground); }
 .row { display: flex; gap: 6px; margin: 8px 0; }
-button { background: var(--surface-fill); color: var(--vscode-foreground); border: 1px solid transparent; padding: 5px 14px; border-radius: var(--control-radius); cursor: pointer; font: inherit; text-align: center; outline: none; transition: background 0.12s, color 0.12s; }
-button:hover, button:focus-visible { background: var(--surface-fill-strong); }
-button.primary { background: var(--surface-fill-strong); color: var(--vscode-foreground); }
-button.primary:hover, button.primary:focus-visible { background: color-mix(in srgb, var(--vscode-foreground) 18%, transparent); }
-.intro-section button.primary { background: var(--surface-fill-strong); color: var(--vscode-foreground); }
-.intro-section button.primary:hover, .intro-section button.primary:focus-visible { background: color-mix(in srgb, var(--vscode-foreground) 18%, transparent); }
 .search-box { width: 100%; min-height: 32px; margin: 0; display: flex; align-items: center; gap: 7px; padding: 0 12px; background: var(--surface-fill); color: var(--vscode-descriptionForeground); border: 1px solid transparent; border-radius: var(--control-radius); box-sizing: border-box; transition: background 0.12s; }
 .search-box:focus-within { background: var(--surface-fill-strong); border-color: transparent; }
 .search-box input { min-width: 0; flex: 1; padding: 5px 0; background: transparent; color: var(--vscode-input-foreground); border: none; outline: none; box-shadow: none; box-sizing: border-box; font: inherit; }
@@ -39,11 +29,8 @@ button.primary:hover, button.primary:focus-visible { background: color-mix(in sr
 .chat-row > .chat-row-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chat-entry { min-width: 0; }
 .chat-list li > .chat-row time { color: var(--vscode-descriptionForeground); font-size: 0.85em; }
-.chat-list button.delete, .chat-list button.memory-reveal { display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; flex: 0 0 auto; background: transparent; border: 1px solid transparent; border-radius: var(--control-radius); padding: 0; color: var(--vscode-descriptionForeground); }
-.chat-list li button.delete:hover, .chat-list li button.delete:focus-visible { background: color-mix(in srgb, var(--vscode-errorForeground) 12%, transparent); border-color: transparent; color: var(--error-highlight-foreground); }
-.chat-list button.memory-reveal.memory-usable { color: var(--vscode-textLink-foreground); }
-.chat-list button.memory-reveal[aria-expanded=true] { background: var(--surface-fill-strong); }
-.chat-list button.memory-reveal:hover, .chat-list button.memory-reveal:focus-visible, button.memory-generate:hover, button.memory-generate:focus-visible { background: color-mix(in srgb, var(--vscode-textLink-foreground) 12%, transparent); color: var(--vscode-textLink-foreground); }
+
+.memory-reveal.memory-usable { --button-foreground: var(--vscode-textLink-foreground); --button-hover-fill: color-mix(in srgb, var(--vscode-textLink-foreground) 8%, transparent); }
 .clear-chats { margin-top: 12px; }
 .panel { display: flex; flex-direction: column; gap: 2px; padding-bottom: 8px; }
 .panel-section { padding: 14px 0 16px; border-top: 1px solid var(--surface-stroke); }
@@ -91,8 +78,7 @@ button.primary:hover, button.primary:focus-visible { background: color-mix(in sr
 .number-stepper-actions button:hover, .number-stepper-actions button:focus-visible { color: var(--vscode-foreground); background: var(--surface-fill-strong); }
 .number-stepper-actions [data-budget-step="1"] svg { transform: rotate(-90deg); }
 .number-stepper-actions [data-budget-step="-1"] svg { transform: rotate(90deg); }
-.settings-panel :is(input:not([type=checkbox]), select, button):disabled { opacity: .45; cursor: default; }
-.settings-panel button:disabled:hover { background: transparent; color: var(--vscode-descriptionForeground); }
+.settings-panel :is(input:not([type=checkbox]), select):disabled { opacity: .45; cursor: default; }
 .panel-section select option { background: var(--vscode-dropdown-background, var(--vscode-sideBar-background)); color: var(--vscode-dropdown-foreground, var(--vscode-foreground)); }
 .setting-help { margin: 5px 0 0; color: var(--vscode-descriptionForeground); font-size: 0.82em; line-height: 1.4; }
 .setting-help + .wide-button { margin-top: 10px; }
@@ -102,7 +88,6 @@ button.primary:hover, button.primary:focus-visible { background: color-mix(in sr
 .setting-action-row { display: flex; gap: 8px; align-items: stretch; }
 .setting-action-row input { min-width: 0; flex: 1; }
 .panel-section .wide-button + .wide-button { margin-top: 8px; }
-button.danger:hover, button.danger:focus-visible { background: color-mix(in srgb, var(--vscode-errorForeground) 12%, transparent); border-color: transparent; color: var(--error-highlight-foreground); }
 .switch-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 32px; margin: 12px 0; color: var(--vscode-foreground); cursor: pointer; }
 .switch-row input { position: absolute; opacity: 0; pointer-events: none; }
 .switch { width: 38px; height: 20px; flex: 0 0 auto; border-radius: var(--control-radius); background: var(--surface-fill); border: 1px solid transparent; position: relative; transition: background 0.15s; }
@@ -127,7 +112,7 @@ button.danger:hover, button.danger:focus-visible { background: color-mix(in srgb
 .range-setting input[type=range]:active::-webkit-slider-thumb { background: var(--vscode-foreground); box-shadow: 0 0 0 5px var(--surface-fill-strong); }
 .range-setting input[type=range]:focus-visible::-webkit-slider-thumb { background: var(--vscode-foreground); box-shadow: none; }
 .validation { font-size: 0.85em; padding: 7px 0 0; min-height: 1em; color: var(--vscode-descriptionForeground); }
-.validation.ok { color: var(--vscode-testing-iconPassed, #3fb950); }
+.validation.ok { color: var(--success-foreground); }
 .validation.err { color: var(--error-foreground); }
 .validation.err:not(:empty) { margin-top: 7px; padding: 9px 10px; border: 1px solid transparent; border-radius: var(--control-radius); background: color-mix(in srgb, var(--vscode-errorForeground) 12%, transparent); overflow-wrap: anywhere; }
 .connection-settings { margin-bottom: 14px; }

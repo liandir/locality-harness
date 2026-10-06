@@ -4,7 +4,7 @@ import type { MemoryCreation, MemorySnapshot } from "../../../chat/memory.js";
 import { installChatContextMenu } from "../../chatContextMenu.js";
 import type { ChatTab, ChatToolProcess, ChatTurnPreparation } from "../../messaging.js";
 import { chatFeature } from "../../../build/chat.js";
-import { chevronIcon, cloudIcon, pawnIcon, scrollIcon, searchIcon } from "../../icons.js";
+import { chevronIcon, memoryIcon, pawnIcon, scrollIcon, searchIcon } from "../../icons.js";
 import { chatModeIcon, chatModeLabel, renderMessageMode } from "./messageMode.js";
 import { renderMessageDate } from "../../memoryDate.js";
 import { renderMemoryContents, renderMemoryCreation, renderMemoryResult } from "./memoryResults.js";
@@ -70,6 +70,7 @@ import { isImageAttachment, isLargePaste, clipboardFileUris } from "../../../cha
 import { MAX_ATTACHMENTS_PER_MESSAGE } from "../../../chat/attachmentLimits.js";
 import {
   activeToolLabel,
+  waitingToolLabel,
   editOperationLabel,
   erroredToolLabel,
   finishedWorkSummary,
@@ -158,6 +159,8 @@ interface ToolCard extends ChatToolProcess {
   argsJson: string;
   category: string;
   approvalRequired?: boolean;
+  fileUndoState?: "available" | "undone";
+  fileUndoPath?: string;
   reason?: string;
   status: "streaming" | "pending" | "approved" | "rejected" | "executed" | "failed";
   resultPreview?: string;
@@ -261,6 +264,7 @@ interface State {
   autoScroll: boolean;
   savedScrollTop: number;
   scrollDownOpacity: number;
+  pendingFileUndoTs?: number;
   pendingPlanMessageTs?: number;
   planning: boolean;
   compactAvailable: boolean;
@@ -583,7 +587,7 @@ function renderCopyableCodeBlock(
     : renderedCode;
   const codeClass = `${displayPrefix ? "command-code-display" : "copy-code-source"}${languageClass}`;
   return `<div class="copy-code-block${displayPrefix ? " tool-output-header" : ""}${extraAction ? " has-extra-actions" : ""}">
-    <span class="code-block-actions">${extraAction}<button class="icon-btn copy-btn code-copy-btn block-code-copy-btn" type="button" data-copy-code aria-label="Copy code">${copyIcon()}</button></span>
+    <span class="code-block-actions">${extraAction}<button class="icon-btn copy-btn code-copy-btn block-code-copy-btn icon-btn-compact" type="button" data-copy-code aria-label="Copy code">${copyIcon()}</button></span>
     <pre><code class="${codeClass}">${codeContent}</code></pre>
   </div>`;
 }
@@ -641,7 +645,7 @@ function updateMemoryDisclosure(): void {
   details.hidden = !state.memories.length;
   const entries = state.memories.map(memory =>
     `<details class="tool-card memory-source output-surface-tool" data-memory-entry="${escapeHtml(memory.sourceId)}">
-      <summary class="tool-head disclosure-trigger"><span class="tool-icon">${cloudIcon()}</span><span class="tool-name">Memory</span><span class="tool-label"><button type="button" class="tool-path-link tool-label-text memory-source-link" data-open-memory="${escapeHtml(memory.sourceId)}">${escapeHtml(memory.title)}</button></span>${chevronIcon()}</summary>
+      <summary class="tool-head disclosure-trigger"><span class="tool-icon">${memoryIcon()}</span><span class="tool-name">Memory</span><span class="tool-label"><button type="button" class="tool-path-link tool-label-text memory-source-link" data-open-memory="${escapeHtml(memory.sourceId)}">${escapeHtml(memory.title)}</button></span>${chevronIcon()}</summary>
       <div class="tool-expanded">${renderToolOutputSurface(renderMemoryContents(memory.text, memory.generatedAt, md), false)}</div>
     </details>`
   ).join("");
@@ -805,17 +809,17 @@ function mountShell(): void {
           <span id="compactHint" class="inline-hint compact-hint"></span>
           <div id="compactMenu" class="compact-menu" role="menu" hidden>
             <p>Agent is currently active.</p>
-            <button type="button" data-compact-action="interrupt">Interrupt chat and compact</button>
-            <button type="button" data-compact-action="wait">Wait for the agent to respond</button>
+            <button class="action-btn" type="button" data-compact-action="interrupt">Interrupt chat and compact</button>
+            <button class="action-btn" type="button" data-compact-action="wait">Wait for the agent to respond</button>
           </div>
         </span>
       </div>
     </footer>
     <div id="imagePreview" class="image-preview" role="dialog" aria-modal="true" aria-labelledby="imagePreviewCaption" hidden>
-      <button class="attachment-preview-open" type="button" data-open-preview-in-editor hidden>Open in editor</button>
-      <button class="image-preview-close" type="button" data-close-image-preview aria-label="Close attachment preview">${closeIcon()}</button>
-      <button class="attachment-preview-nav attachment-preview-previous" type="button" data-attachment-preview-step="-1" aria-label="Previous attachment" hidden>${chevronIcon()}</button>
-      <button class="attachment-preview-nav attachment-preview-next" type="button" data-attachment-preview-step="1" aria-label="Next attachment" hidden>${chevronIcon()}</button>
+      <button class="action-btn attachment-preview-open" type="button" data-open-preview-in-editor hidden>Open in editor</button>
+      <button class="icon-btn image-preview-close" type="button" data-close-image-preview aria-label="Close attachment preview">${closeIcon()}</button>
+      <button class="icon-btn attachment-preview-nav attachment-preview-previous" type="button" data-attachment-preview-step="-1" aria-label="Previous attachment" hidden>${chevronIcon()}</button>
+      <button class="icon-btn attachment-preview-nav attachment-preview-next" type="button" data-attachment-preview-step="1" aria-label="Next attachment" hidden>${chevronIcon()}</button>
       <figure class="image-preview-content">
         <img id="imagePreviewImage" alt="" />
         <pre id="attachmentPreviewText" class="attachment-preview-text" tabindex="0" hidden><code></code></pre>
@@ -1048,8 +1052,8 @@ function renderUserMessage(el: HTMLElement, m: Message): void {
       <textarea class="user-edit-input" rows="3" data-edit-input="${m.recordTs}">${escapeHtml(state.editDraft)}</textarea>
       ${renderAttachmentsHtml(attachments, "data-edit-remove-attachment")}
       <div class="user-edit-actions">
-        <button class="send-btn cancel-btn" type="button" data-edit-cancel data-tip="Cancel" aria-label="Cancel">${stopIcon()}</button>
-        <button class="send-btn" type="button" data-edit-submit="${m.recordTs}" data-tip="Send" aria-label="Send"${state.editDraft.trim() || attachments.length ? "" : " disabled"}>${sendIcon()}</button>
+        <button class="action-btn send-btn cancel-btn" type="button" data-edit-cancel data-tip="Cancel" aria-label="Cancel">${stopIcon()}</button>
+        <button class="action-btn send-btn" type="button" data-edit-submit="${m.recordTs}" data-tip="Send" aria-label="Send"${state.editDraft.trim() || attachments.length ? "" : " disabled"}>${sendIcon()}</button>
       </div>
     </div>`;
     setHtml(el, html);
@@ -1090,7 +1094,7 @@ function renderAttachmentHtml(attachment: UiAttachment, removeAttribute = ""): s
   return `<span class="composer-attachment-item">
     ${renderAttachmentPreview(attachment, "composer-attachment-preview")}
     <span class="composer-attachment-name" data-tip="${escapeHtml(attachment.fileName)}">${escapeHtml(attachment.fileName)}</span>
-    ${removeAttribute ? `<button type="button" class="composer-attachment-remove" ${removeAttribute}="${escapeHtml(attachment.id)}" aria-label="Remove ${escapeHtml(attachment.fileName)}">&times;</button>` : ""}
+    ${removeAttribute ? `<button type="button" class="icon-btn remove composer-attachment-remove" ${removeAttribute}="${escapeHtml(attachment.id)}" aria-label="Remove ${escapeHtml(attachment.fileName)}">&times;</button>` : ""}
   </span>`;
 }
 
@@ -1167,6 +1171,13 @@ function renderFileChangeSummary(parent: HTMLElement, m: Message): void {
   if (summary.className !== cls) summary.className = cls;
   if (summary.dataset.changeSummary !== m.id) summary.dataset.changeSummary = m.id;
   const totals = totalFileChangeStats(changes);
+  const edits = m.toolCards.filter(card => card.status === "executed" && isWriteToolCard(card));
+  const undone = edits.length > 0 && edits.every(card => card.fileUndoState === "undone");
+  const available = edits.length > 0 && edits.every(card => !!card.fileUndoState) && !undone;
+  const undoPending = m.responseToTs !== undefined && state.pendingFileUndoTs === m.responseToTs;
+  const undoTip = undone ? "File edits from this response were undone" : !available
+    ? "Undo is unavailable: complete file snapshots were not saved"
+    : "Undo file edits from this response";
   setHtml(summary, `<div class="change-summary-head">
       <button class="tool-head disclosure-trigger change-summary-toggle" type="button" data-file-changes-toggle="${m.id}" aria-expanded="${expanded}">
         <span class="tool-icon">${pencilIcon()}</span>
@@ -1174,7 +1185,7 @@ function renderFileChangeSummary(parent: HTMLElement, m: Message): void {
         ${diffStatHtml(totals)}
         ${chevronIcon()}
       </button>
-      <button class="review-btn change-review-btn" type="button" data-review-workspace-changes>Review</button>
+      <button class="quiet-btn change-undo-btn" type="button" data-undo-response="${m.responseToTs ?? ""}" data-tip="${undoTip}" aria-label="${undoTip}" ${!available || state.busy || undoPending || m.responseToTs === undefined ? "disabled" : ""}>${undone ? "Undone" : undoPending ? "Undoing…" : "Undo"}</button>
     </div>
     ${expanded ? `<div class="tool-expanded">${renderToolOutputSurface(
       changes.map((change, index) => renderFileChangeRow(m, change, index)).join(CARD_SEPARATOR_HTML),
@@ -1325,7 +1336,7 @@ function renderWorkHead(el: HTMLElement, group: ResolvedUnit): void {
     ].join("");
     setHtml(head, html);
   }
-  setDisclosureAffordance(head, expandable);
+  setDisclosureAffordance(head, expandable, !!group.expanded);
 }
 
 function renderSubSessionHead(head: HTMLElement, group: ResolvedUnit): void {
@@ -1618,7 +1629,7 @@ function renderThoughtPart(
   } else if (head !== thinking.firstElementChild) {
     thinking.insertBefore(head, thinking.firstChild);
   }
-  setDisclosureAffordance(head, presentation.expandable);
+  setDisclosureAffordance(head, presentation.expandable, expanded);
   if (presentation.includeInHistory) ensureThinkingIcon(head);
   else head.querySelector(":scope > .thinking-icon")?.remove();
   if (presentation.expandable) head.dataset.thoughtToggle = `${msgId}|${part.id}`;
@@ -1817,7 +1828,7 @@ function renderToolHead(card: HTMLElement, tc: ToolCard): void {
   label.hidden = !label.textContent?.trim();
 
   directChild(head, "badge")?.remove();
-  setDisclosureAffordance(head, expandable);
+  setDisclosureAffordance(head, expandable, toolBodyOpen(tc));
 }
 
 /**
@@ -1870,8 +1881,67 @@ function directChild(parent: HTMLElement, className: string): HTMLElement | null
   return null;
 }
 
-/** Keep the shared hover chevron in sync with whether this row expands. */
-function setDisclosureAffordance(head: HTMLElement, expandable: boolean): void {
+/** Pointer and keyboard activation share the same history state transition. */
+function toggleHistoryDisclosure(target: HTMLElement): boolean {
+  const workEl = target.closest("[data-work-toggle]") as HTMLElement | null;
+  if (workEl && !target.closest("button, a")) {
+    const groupId = workEl.dataset.workToggle!;
+    const m = state.messages.find(x => findWorkUnit(resolveRenderUnits(x), groupId));
+    if (m) {
+      const group = findWorkUnit(resolveRenderUnits(m), groupId);
+      m.workGroupExpanded ??= new Map<string, boolean>();
+      m.workGroupExpanded.set(groupId, !(group?.expanded ?? false));
+      scrollFollow.pause();
+      render();
+    }
+    return true;
+  }
+  const thoughtEl = target.closest("[data-thought-toggle]") as HTMLElement | null;
+  if (thoughtEl) {
+    const [msgId, partId] = thoughtEl.dataset.thoughtToggle!.split("|");
+    const m = state.messages.find(x => x.id === msgId);
+    const part = m?.parts.find((p): p is Extract<MessagePart, { kind: "thought" }> => p.id === partId && p.kind === "thought");
+    if (part) {
+      const currentExpanded = part.userExpanded ?? false;
+      part.userExpanded = !currentExpanded;
+      scrollFollow.pause();
+      render();
+    }
+    return true;
+  }
+  const toolEl = target.closest("[data-tool-toggle]") as HTMLElement | null;
+  if (toolEl && !target.closest("button, a")) {
+    const id = toolEl.dataset.toolToggle!;
+    for (const m of state.messages) {
+      const tc = m.toolCards.find(t => t.toolId === id);
+      if (tc) {
+        if (tc.toolName === "compact_context" && tc.status === "pending") return true;
+        tc.expanded = !tc.expanded;
+        if (tc.expanded && isWriteToolCard(tc)) {
+          if (tc.status === "executed" && !tc.diffPreview && !tc.diffRequested && !tc.diffUnavailable) {
+            tc.diffRequested = true;
+            send({ type: "requestToolDiff", toolId: tc.toolId });
+          }
+        }
+        scrollFollow.pause();
+        render();
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function setDisclosureAffordance(head: HTMLElement, expandable: boolean, expanded = false): void {
+  if (expandable) {
+    head.setAttribute("role", "button");
+    head.tabIndex = 0;
+    head.setAttribute("aria-expanded", String(expanded));
+  } else {
+    head.removeAttribute("role");
+    head.removeAttribute("tabindex");
+    head.removeAttribute("aria-expanded");
+  }
   head.classList.toggle("disclosure-trigger", expandable);
   const chevron = head.querySelector(":scope > .disclosure-icon");
   if (expandable) {
@@ -1907,7 +1977,7 @@ function updateComposer(): void {
     setHtml(queue, state.queuedMessages.map((message, index) => `
       <div class="queued-message${state.editingQueuedMessageId === message.id ? " editing" : ""}" data-queued-message-id="${escapeHtml(message.id)}">
         <div class="queued-message-row">
-          <button class="queued-message-drag" type="button" draggable="true" data-drag-queued="${escapeHtml(message.id)}" data-tip="Drag to reorder" aria-label="Reorder queued message ${index + 1}">${dragHandleIcon()}</button>
+          <button class="icon-btn icon-btn-compact queued-message-drag" type="button" draggable="true" data-drag-queued="${escapeHtml(message.id)}" data-tip="Drag to reorder" aria-label="Reorder queued message ${index + 1}">${dragHandleIcon()}</button>
           <span class="queued-message-order">${index + 1}</span>
           <span class="queued-message-content">
             ${renderQueuedAttachmentThumbnails(message.attachments ?? [])}
@@ -1918,10 +1988,10 @@ function updateComposer(): void {
           ${renderMessageMode(message.mode)}
           <span class="queued-message-actions">
             ${state.editingQueuedMessageId === message.id
-              ? `<button class="queued-message-action save" type="button" data-save-queued="${escapeHtml(message.id)}" data-tip="Save" aria-label="Save queued message">${checkIcon()}</button>
-                 <button class="queued-message-action" type="button" data-cancel-queued-edit data-tip="Cancel" aria-label="Cancel editing">&times;</button>`
-              : `<button class="queued-message-action" type="button" data-edit-queued="${escapeHtml(message.id)}" data-tip="Edit" aria-label="Edit queued message">${pencilIcon()}</button>
-                 <button class="queued-message-action remove" type="button" data-remove-queued="${escapeHtml(message.id)}" data-tip="Remove" aria-label="Remove queued message">${trashIcon()}</button>`}
+              ? `<button class="icon-btn icon-btn-compact queued-message-action save" type="button" data-save-queued="${escapeHtml(message.id)}" data-tip="Save" aria-label="Save queued message">${checkIcon()}</button>
+                 <button class="icon-btn icon-btn-compact queued-message-action" type="button" data-cancel-queued-edit data-tip="Cancel" aria-label="Cancel editing">&times;</button>`
+              : `<button class="icon-btn icon-btn-compact queued-message-action" type="button" data-edit-queued="${escapeHtml(message.id)}" data-tip="Edit" aria-label="Edit queued message">${pencilIcon()}</button>
+                 <button class="icon-btn icon-btn-compact queued-message-action remove" type="button" data-remove-queued="${escapeHtml(message.id)}" data-tip="Remove" aria-label="Remove queued message">${trashIcon()}</button>`}
           </span>
         </div>
       </div>`).join(""));
@@ -1967,8 +2037,8 @@ function updateComposer(): void {
   const sendSlot = root.querySelector("#sendSlot") as HTMLElement | null;
   if (sendSlot && renderedBusy !== state.busy) {
     const html = state.busy
-      ? `<button id="queueMessage" class="send-btn"></button><button id="cancel" class="send-btn cancel-btn" data-tip="Cancel" aria-label="Cancel">${stopIcon()}</button>`
-      : `<button id="send" class="send-btn"></button>`;
+      ? `<button id="queueMessage" class="action-btn send-btn"></button><button id="cancel" class="action-btn send-btn cancel-btn" data-tip="Cancel" aria-label="Cancel">${stopIcon()}</button>`
+      : `<button id="send" class="action-btn send-btn"></button>`;
     sendSlot.innerHTML = html;
     renderedBusy = state.busy;
   }
@@ -2004,7 +2074,7 @@ function updateScrollDownButton(): void {
   const shouldShowScrollDown = !state.autoScroll;
   if (scrollSlot && renderedScrollDown !== shouldShowScrollDown) {
     const html = shouldShowScrollDown
-      ? `<button id="scrollDown" class="scroll-down" style="opacity: ${state.scrollDownOpacity.toFixed(2)}" data-tip="Scroll to latest" aria-label="Scroll to latest">${downArrowIcon()}</button>`
+      ? `<button id="scrollDown" class="icon-btn scroll-down" style="opacity: ${state.scrollDownOpacity.toFixed(2)}" data-tip="Scroll to latest" aria-label="Scroll to latest">${downArrowIcon()}</button>`
       : "";
     scrollSlot.innerHTML = html;
     renderedScrollDown = shouldShowScrollDown;
@@ -2079,7 +2149,7 @@ function renderQuestionComposer(tc: ToolCard): string {
   const options = suggestions
     .map(
       (s, index) =>
-        `<button class="question-option" type="button" data-answer-option="${toolId}" data-answer="${escapeHtml(s)}">
+        `<button class="action-btn question-option" type="button" data-answer-option="${toolId}" data-answer="${escapeHtml(s)}">
           <span class="question-option-badge">${String.fromCharCode(65 + index)}</span>
           <span class="question-option-label">${escapeHtml(s)}</span>
           <span class="question-option-arrow" aria-hidden="true">${sendIcon()}</span>
@@ -2119,7 +2189,7 @@ function renderQuestionLayout(config: {
           <textarea id="questionOther" class="question-other-input" rows="1" placeholder="${escapeHtml(config.placeholder)}" aria-label="${escapeHtml(config.inputLabel)}"></textarea>
           <button class="question-option-arrow question-submit" type="button" ${config.submit.attribute} aria-label="${escapeHtml(config.submit.label)}" disabled>${sendIcon()}</button>
         </div>
-        ${config.secondary ? `<button class="question-option question-${config.secondary.kind}" type="button" ${config.secondary.attribute}>
+        ${config.secondary ? `<button class="action-btn question-option question-${config.secondary.kind}" type="button" ${config.secondary.attribute}>
           ${config.secondary.kind === "cancel" ? `<span class="question-option-badge" aria-hidden="true">${stopIcon()}</span>` : ""}
           <span class="question-option-label">${escapeHtml(config.secondary.label)}</span>
         </button>` : ""}
@@ -2148,9 +2218,9 @@ function renderToolApprovalComposer(tc: ToolCard): string {
       <span>${label}</span>
     </div>
     <div class="approval-actions">
-      <button class="approve" data-approve="${tc.toolId}">Approve this time</button>
-      ${autoApproveLabel ? `<button class="approve" data-auto-approve="${tc.toolId}">Auto-approve future ${autoApproveLabel}</button>` : ""}
-      <button class="reject" data-reject="${tc.toolId}">${rejectText}</button>
+      <button class="action-btn approve" data-approve="${tc.toolId}">Approve this time</button>
+      ${autoApproveLabel ? `<button class="action-btn approve" data-auto-approve="${tc.toolId}">Auto-approve future ${autoApproveLabel}</button>` : ""}
+      <button class="action-btn reject" data-reject="${tc.toolId}">${rejectText}</button>
     </div>
   </div>`;
 }
@@ -2159,7 +2229,7 @@ function renderPlanApprovalComposer(messageTs?: number): string {
   return renderQuestionLayout({
     title: "Plan", icon: scrollIcon(),
     content: `<p>${messageTs === undefined ? "Planning is paused. " : ""}Accepting the plan switches to Act mode and starts implementation. Request changes to stay in Plan mode, or cancel planning to release queued messages.</p>`,
-    options: `<button class="question-option" type="button" data-accept-plan="${messageTs ?? ""}"${messageTs === undefined ? " disabled" : ""}>
+    options: `<button class="action-btn question-option" type="button" data-accept-plan="${messageTs ?? ""}"${messageTs === undefined ? " disabled" : ""}>
       <span class="question-option-badge" aria-hidden="true">${pawnIcon()}</span>
       <span class="question-option-label">Accept plan</span>
       <span class="question-option-arrow" aria-hidden="true">${sendIcon()}</span>
@@ -2475,7 +2545,7 @@ function toolIcon(tc: ToolCard): string {
   if (tc.toolName === "ask_user_question") return questionIcon();
   if (isFeatureTool(tc)) return chatFeature.icon?.() ?? searchIcon();
   if (isWriteToolCard(tc)) return pencilIcon();
-  if (tc.toolName === "search_memories" || tc.toolName === "recall_memory") return cloudIcon();
+  if (tc.toolName === "search_memories" || tc.toolName === "recall_memory") return memoryIcon();
   if (tc.toolName === "view_image") return viewImageIcon();
   if (tc.toolName === "read_file") return readFileIcon();
   return searchIcon();
@@ -2504,7 +2574,7 @@ function renderChangeCard(tc: ToolCard, errorText?: string): string {
       <span class="tool-label-main">${renderToolPathLabel(tc)}</span>
       ${stats ? diffStatHtml(stats) : ""}
       ${operation ? `<span class="tool-change-operation">${escapeHtml(operation)}</span>` : ""}
-      ${hasDiff ? `<button class="icon-btn copy-btn block-code-copy-btn tool-change-copy" type="button" data-copy-code aria-label="Copy diff">${copyIcon()}</button>` : ""}
+      ${hasDiff ? `<button class="icon-btn copy-btn block-code-copy-btn icon-btn-compact tool-change-copy" type="button" data-copy-code aria-label="Copy diff">${copyIcon()}</button>` : ""}
     </div>
     ${hasError || hasDiff || unavailable ? CARD_SEPARATOR_HTML : ""}
     ${hasError
@@ -2571,6 +2641,7 @@ function parseDiffLine(line: string): { kind: "add" | "del" | "neutral"; oldLine
 
 /** Header name for a tool card. */
 function toolCardHeadName(tc: ToolCard): string {
+  if (tc.status === "pending" && tc.toolName !== "compact_context") return waitingToolLabel(tc.toolName);
   const featureLabel = chatFeature.headerLabel?.(tc, isActiveToolCard(tc));
   if (featureLabel) return featureLabel;
   const includeFileNoun = !isWriteToolCard(tc) && !["read_file", "view_image", "list_dir"].includes(tc.toolName);
@@ -3086,6 +3157,14 @@ function bindOnce(): void {
       }
       return;
     }
+    if ((e.key === "Enter" || e.key === " ") && other?.matches('.disclosure-trigger[role="button"]')) {
+      e.preventDefault();
+      const workId = other.closest<HTMLElement>("[data-work-id]")?.dataset.workId;
+      if (!e.repeat) toggleHistoryDisclosure(other);
+      // The current-only preview may have been replaced by its expanded group.
+      if (!other.isConnected && workId) root.querySelector<HTMLElement>(`[data-work-id="${CSS.escape(workId)}"] > .work-head[tabindex="0"]`)?.focus({ preventScroll: true });
+      return;
+    }
     if (e.key === "Escape" && state.chatModeMenuOpen) {
       e.preventDefault();
       state.chatModeMenuOpen = false;
@@ -3133,61 +3212,14 @@ function bindOnce(): void {
   document.fonts.addEventListener("loadingdone", syncToolHeaderScrollbars);
   chatFeature.bind?.(root);
   root.addEventListener("pointerdown", e => {
+    if (e.button !== 0) return;
     const target = e.target as HTMLElement;
     if (target.closest("#cancel")) {
       e.preventDefault();
       send({ type: "cancel" });
       return;
     }
-    const workEl = target.closest("[data-work-toggle]") as HTMLElement | null;
-    if (workEl && !target.closest("button, a")) {
-      e.preventDefault();
-      const groupId = workEl.dataset.workToggle!;
-      const m = state.messages.find(x => findWorkUnit(resolveRenderUnits(x), groupId));
-      if (m) {
-        const group = findWorkUnit(resolveRenderUnits(m), groupId);
-        m.workGroupExpanded ??= new Map<string, boolean>();
-        m.workGroupExpanded.set(groupId, !(group?.expanded ?? false));
-        scrollFollow.pause();
-        render();
-      }
-      return;
-    }
-    const thoughtEl = target.closest("[data-thought-toggle]") as HTMLElement | null;
-    if (thoughtEl) {
-      e.preventDefault();
-      const [msgId, partId] = thoughtEl.dataset.thoughtToggle!.split("|");
-      const m = state.messages.find(x => x.id === msgId);
-      const part = m?.parts.find((p): p is Extract<MessagePart, { kind: "thought" }> => p.id === partId && p.kind === "thought");
-      if (part) {
-        const currentExpanded = part.userExpanded ?? false;
-        part.userExpanded = !currentExpanded;
-        scrollFollow.pause();
-        render();
-      }
-      return;
-    }
-    const toolEl = target.closest("[data-tool-toggle]") as HTMLElement | null;
-    if (toolEl && !target.closest("button, a")) {
-      e.preventDefault();
-      const id = toolEl.dataset.toolToggle!;
-      for (const m of state.messages) {
-        const tc = m.toolCards.find(t => t.toolId === id);
-        if (tc) {
-          if (tc.toolName === "compact_context" && tc.status === "pending") return;
-          tc.expanded = !tc.expanded;
-          if (tc.expanded && isWriteToolCard(tc)) {
-            if (tc.status === "executed" && !tc.diffPreview && !tc.diffRequested && !tc.diffUnavailable) {
-              tc.diffRequested = true;
-              send({ type: "requestToolDiff", toolId: tc.toolId });
-            }
-          }
-          scrollFollow.pause();
-          render();
-          return;
-        }
-      }
-    }
+    if (toggleHistoryDisclosure(target)) { e.preventDefault(); return; }
     if (chatFeature.click?.(target, state.messages.flatMap(message => message.toolCards), send)) {
       e.preventDefault();
       render();
@@ -3332,8 +3364,12 @@ function bindOnce(): void {
       }
       return;
     }
-    if (target.closest("[data-review-workspace-changes]")) {
-      send({ type: "reviewWorkspaceChanges" });
+    const undoButton = target.closest<HTMLButtonElement>("[data-undo-response]");
+    if (undoButton && !undoButton.disabled) {
+      const userMessageTs = Number(undoButton.dataset.undoResponse);
+      state.pendingFileUndoTs = userMessageTs;
+      send({ type: "undoResponseFiles", userMessageTs });
+      render();
       return;
     }
     if (target.closest("[data-close-chat]")) {
@@ -3652,7 +3688,7 @@ function updateHeaderTitle(): void {
   tabs.dataset.activeId = activeChatId ?? "";
   setHtml(tabs, chatTabs.map(tab => `<div class="chat-tab tab-btn${tab.id === activeChatId ? " active" : ""}" data-chat-context="${escapeHtml(tab.id)}">
     <button class="chat-tab-label" role="tab" aria-selected="${tab.id === activeChatId}" data-chat-tab="${escapeHtml(tab.id)}" data-tip="${escapeHtml(tab.title)}"><span class="chat-running-dot${tab.running ? " running" : ""}" aria-hidden="true"></span><span>${escapeHtml(tab.title)}</span></button>
-    <button class="chat-tab-close" data-close-chat="${escapeHtml(tab.id)}" aria-label="Close ${escapeHtml(tab.title)}">${closeIcon()}</button>
+    <button class="icon-btn icon-btn-compact chat-tab-close" data-close-chat="${escapeHtml(tab.id)}" aria-label="Close ${escapeHtml(tab.title)}">${closeIcon()}</button>
   </div>`).join(""));
   if (activeChanged) {
     const selected = tabs.querySelector<HTMLElement>(".chat-tab.active");
@@ -4057,6 +4093,7 @@ function loadFromRecord(rec: ChatRecord): void {
     state.chatModeMenuOpen = false;
   }
   state.messages = [];
+  state.pendingFileUndoTs = undefined;
   state.notices = [];
   const fileChanges = restoredToolFileChanges(rec);
   let currentUserTs: number | undefined;
@@ -4125,6 +4162,8 @@ function loadFromRecord(rec: ChatRecord): void {
         added: fileChange?.added,
         removed: fileChange?.removed,
         diffUnavailable: !fileChange,
+        fileUndoState: m.toolCall?.fileUndoState,
+        fileUndoPath: m.toolCall?.fileChange?.path,
         createsNewFile: restoredCreatesNewFile(restoredName, m.toolCall?.createsNewFile),
         processCommand: m.toolCall?.processCommand,
         processOutput: m.toolCall?.processOutput,
@@ -4186,6 +4225,11 @@ function handleHostMessage(msg: ExtToChat): void {
         workspacePathTypes.clear();
       }
       state.workspaceRoot = msg.workspaceRoot;
+      render();
+      return;
+    }
+    if (msg.type === "fileUndoFinished") {
+      if (state.pendingFileUndoTs === msg.userMessageTs) state.pendingFileUndoTs = undefined;
       render();
       return;
     }
@@ -4307,6 +4351,7 @@ function handleHostMessage(msg: ExtToChat): void {
       state.hasChat = false;
       state.chatTitle = "Chat";
       state.messages = [];
+      state.pendingFileUndoTs = undefined;
       state.queuedMessages = [];
       state.editingQueuedMessageId = undefined;
       state.queuedMessageDraft = "";
@@ -4469,7 +4514,7 @@ function handleHostMessage(msg: ExtToChat): void {
           reason: msg.reason,
           diffPreview: msg.diffPreview,
           diffRequested: false,
-          status: "pending",
+          status: msg.approvalRequired || msg.category === "question" ? "pending" : "approved",
           createsNewFile: msg.createsNewFile,
           processJobId: msg.processJobId,
           processCommand: msg.processCommand,
@@ -4490,7 +4535,7 @@ function handleHostMessage(msg: ExtToChat): void {
         card.diffPreview = msg.diffPreview;
         card.diffRequested = false;
         card.progress = undefined;
-        card.status = "pending";
+        card.status = msg.approvalRequired || msg.category === "question" ? "pending" : "approved";
         if (typeof msg.createsNewFile === "boolean") card.createsNewFile = msg.createsNewFile;
         card.processJobId = msg.processJobId;
         card.processCommand = msg.processCommand;
@@ -4519,6 +4564,8 @@ function handleHostMessage(msg: ExtToChat): void {
         const tc = m.toolCards.find(t => t.toolId === msg.toolId);
         if (tc) {
           tc.status = msg.status;
+          if (msg.fileUndoState) tc.fileUndoState = msg.fileUndoState;
+          if (msg.fileUndoPath) tc.fileUndoPath = msg.fileUndoPath;
           if (msg.resultPreview) tc.resultPreview = msg.resultPreview;
           if (msg.diffPreview) {
             tc.diffPreview = msg.diffPreview;
@@ -4553,6 +4600,15 @@ function handleHostMessage(msg: ExtToChat): void {
     }
     case "contextActivity":
       state.contextActivityIds = new Set(msg.activityIds);
+      render();
+      break;
+    case "fileEditsUndone":
+      for (const message of state.messages) {
+        if (message.responseToTs !== msg.userMessageTs) continue;
+        for (const card of message.toolCards) {
+          if (card.fileUndoPath && msg.paths.includes(card.fileUndoPath)) card.fileUndoState = "undone";
+        }
+      }
       render();
       break;
     case "fileChanges": {

@@ -56,6 +56,7 @@ import { normalizeTodos, renderTodosMarkdown, todoCounts } from "./todos.js";
 import { compact, compactAvailableForMessageCount, KEEP_TAIL, MIN_COMPACT_MESSAGES, type CompactConfig } from "./compactor.js";
 import { countTokens, promptTokens, recomputeTokens, truncateToTokenBudget } from "./contextTracker.js";
 import { lineDiffStats, renderLineDiff } from "./diffPreview.js";
+import { fileUndoPlan, turnFileEdits, undoFiles, type FileUndoSnapshot } from "./fileUndo.js";
 import { rememberFileWrite, summarizeFileChanges, type FileChangeSummary, type TrackedFileWrite } from "./fileChanges.js";
 import { generateChatTitle } from "./chatTitle.js";
 import { continuationContext } from "./continuation.js";
@@ -83,8 +84,9 @@ export type UiEvent =
   | { kind: "toolCallProgress"; toolId: string; messageId: string; toolName: string; path?: string; contentLines: number; added?: number; removed?: number; createsNewFile?: boolean; replacedLines?: number; startLine?: number; endLine?: number; line?: number }
   | ({ kind: "toolCallProposed"; toolId: string; messageId: string; toolName: string; argsJson: string; category: ToolCategory; approvalRequired: boolean; reason?: string; diffPreview?: string; createsNewFile?: boolean } & ChatToolProcess)
   | ({ kind: "toolCallOutput"; toolId: string; resultPreview: string } & ChatToolProcess)
-  | ({ kind: "toolCallResolved"; toolId: string; status: "approved" | "rejected" | "executed" | "failed"; resultPreview?: string; diffPreview?: string; added?: number; removed?: number; createsNewFile?: boolean } & ChatToolProcess)
+  | ({ kind: "toolCallResolved"; toolId: string; status: "approved" | "rejected" | "executed" | "failed"; fileUndoState?: "available" | "undone"; fileUndoPath?: string; resultPreview?: string; diffPreview?: string; added?: number; removed?: number; createsNewFile?: boolean } & ChatToolProcess)
   | ({ kind: "processJobState"; toolId: string; jobId: string; running: boolean; resultPreview?: string; status?: "failed" } & ChatToolProcess)
+  | { kind: "fileEditsUndone"; userMessageTs: number; paths: string[] }
   | { kind: "fileChanges"; messageId: string; changes: FileChangeSummary[] }
   | { kind: "summary"; messageId: string; text: string }
   | ChatPlanFinal
@@ -310,6 +312,27 @@ export class ChatSession {
   getRecord(): ChatRecord { return this.record; }
 
   isTurnActive(): boolean { return this.activeTurn !== undefined; }
+
+  async undoResponseFiles(userTs: number, check: (absolute: string) => void | Promise<void>): Promise<void> {
+    if (this.isTurnActive()) throw new Error("Wait for the response to finish before undoing its edits.");
+    const messages = turnFileEdits(this.record.messages, userTs);
+    const result = await undoFiles(this.workspaceRoot, fileUndoPlan(messages), check);
+    const undone = new Set(result.undonePaths);
+    for (const message of messages) {
+      if (message.toolCall?.fileUndo && undone.has(message.toolCall.fileUndo.path)) message.toolCall.fileUndoState = "undone";
+    }
+    // In compacted chats the retained model history may be a separate object graph.
+    for (const message of this.record.contextMessages ?? []) {
+      if (message.toolCall?.fileUndo && messages.some(original => original.ts === message.ts && original.toolCall?.id === message.toolCall?.id)
+        && undone.has(message.toolCall.fileUndo.path)) message.toolCall.fileUndoState = "undone";
+    }
+    if (undone.size) {
+      appendChatMessage(this.record, { role: "system", fileUndoNotice: true, content: `The user undid this response's file edits: ${[...undone].join(", ")}. Re-read these files before editing them again.`, ts: Date.now() });
+      try { await this.saveRecord(); }
+      finally { this.emit({ kind: "fileEditsUndone", userMessageTs: userTs, paths: [...undone] }); }
+    }
+    if (result.error) throw new Error(result.error);
+  }
 
   private turnMode(): ChatMode {
     return this.activeTurnModes?.mode ?? this.record.mode;
@@ -1190,6 +1213,10 @@ export class ChatSession {
       diffPreview: change.diffPreview ?? renderLineDiff(change.previous, change.next)
     } : undefined;
     if (change && fileChange) change.diffPreview = fileChange.diffPreview;
+    const fileUndo: FileUndoSnapshot | undefined = change && change.undoAvailable !== false ? {
+      path: change.path, previous: change.createsNewFile ? null : change.previous, next: change.next
+    } : undefined;
+    const fileUndoState = fileUndo ? "available" as const : undefined;
     const event = (resultPreview: string): Extract<UiEvent, { kind: "toolCallResolved" }> => {
       const latest = this.featureDisplays.get(toolId);
       return {
@@ -1198,6 +1225,8 @@ export class ChatSession {
         status,
         resultPreview: latest?.status === "failed" ? latest.processOutput : displayResult ?? resultPreview,
         diffPreview: fileChange?.diffPreview ?? diffPreview,
+        fileUndoState,
+        fileUndoPath: fileUndo?.path,
         added,
         removed,
         createsNewFile,
@@ -1217,7 +1246,7 @@ export class ChatSession {
       argsJson,
       content,
       callId,
-      { status, createsNewFile, displayResult, processJobId, processCommand, processOutput, processExitCode, toolId, fileChange, attachments: completion.attachments }
+      { status, createsNewFile, displayResult, processJobId, processCommand, processOutput, processExitCode, toolId, fileChange, fileUndo, fileUndoState, attachments: completion.attachments }
     );
     if (storedResult !== content) {
       this.emit(event(fullResult ? storedResult : previewOf(storedResult)));
@@ -1271,7 +1300,7 @@ export class ChatSession {
     argsJson: string,
     content: string,
     callId?: string,
-    outcome: { status: "executed" | "failed" | "rejected"; createsNewFile?: boolean; toolId?: string; fileChange?: FileChangeSummary; attachments?: ChatAttachment[] } & ChatToolProcess & ChatToolResultDisplay = { status: "executed" }
+    outcome: { status: "executed" | "failed" | "rejected"; createsNewFile?: boolean; toolId?: string; fileChange?: FileChangeSummary; fileUndo?: FileUndoSnapshot; fileUndoState?: "available" | "undone"; attachments?: ChatAttachment[] } & ChatToolProcess & ChatToolResultDisplay = { status: "executed" }
   ): Promise<string> {
     const guardedContent = await this.prepareToolResultForContext(s, toolName, content);
     const message: ChatMessage = {
@@ -1288,7 +1317,9 @@ export class ChatSession {
         processCommand: outcome.processCommand,
         processOutput: outcome.processOutput,
         processExitCode: outcome.processExitCode,
-        fileChange: outcome.fileChange
+        fileChange: outcome.fileChange,
+        fileUndo: outcome.fileUndo,
+        fileUndoState: outcome.fileUndoState
       },
       ts: Date.now()
     };
@@ -2283,19 +2314,20 @@ export class ChatSession {
         if (looksLikeNumberedReadOutput(editBody, expectedFirstLine)) {
           throw new Error(numberedPrefixMessage(e.name));
         }
+        let originalBytes: Buffer | null;
+        try { originalBytes = await fs.readFile(absolute); }
+        catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+          originalBytes = null;
+        }
+        const originalText = originalBytes?.toString("utf8") ?? "";
         let previous = "";
         let next = "";
         let bytesWritten = 0;
-        // True only when write_file creates a file that didn't exist — drives
-        // the "Created file" vs "Edited file" label (an overwrite is an edit).
-        let createsNewFile = false;
+        // Line-addressed tools can also create a previously missing empty file.
+        let createsNewFile = originalBytes === null;
         if (effectiveWriteArgs.kind === "write_file") {
-          try {
-            previous = (await readFile({ workspaceRoot: this.workspaceRoot }, { path: effectiveWriteArgs.path })).content;
-          } catch {
-            previous = "";
-            createsNewFile = true;
-          }
+          previous = originalText;
           const r = await writeFile({ workspaceRoot: this.workspaceRoot }, effectiveWriteArgs);
           next = effectiveWriteArgs.content;
           bytesWritten = r.bytesWritten;
@@ -2356,7 +2388,11 @@ export class ChatSession {
         executedCreatesNewFile = createsNewFile;
         added = stats.added;
         removed = stats.removed;
-        this.toolDiffSources.set(toolId, { path: displayPath, previous, next });
+        this.toolDiffSources.set(toolId, {
+          path: displayPath, previous, next, createsNewFile,
+          // Refuse lossy snapshots or a file that changed before the tool read it.
+          undoAvailable: previous === originalText && (originalBytes === null || Buffer.from(previous, "utf8").equals(originalBytes))
+        });
       } else if (e.name === "update_todos") {
         // A bare array is a natural shape for todos, but normalizeToolArgs
         // either rejects it (multi-element) or unwraps a single element into
@@ -2558,7 +2594,7 @@ export class ChatSession {
       } else if (m.role === "assistant" && !m.content.trim()) {
         continue;
       } else {
-        msgs.push({ role: m.role as "user" | "assistant" | "system", content: m.content });
+        msgs.push({ role: m.fileUndoNotice ? "user" : m.role as "user" | "assistant" | "system", content: m.content });
       }
     }
     // The tool replay above should keep assistant/tool-result exchanges alternating.
@@ -2596,7 +2632,7 @@ export class ChatSession {
               ]
             : stored.content;
           messages.push({
-            role: stored.role,
+            role: stored.fileUndoNotice ? "user" : stored.role,
             content,
             reasoning_content: stored.role === "assistant" ? stored.reasoningContent : undefined
           });

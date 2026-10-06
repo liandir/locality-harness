@@ -24,7 +24,7 @@ export const chatFeature: ChatFeature = {
   actions(card, escape, icon) {
     if (!names.slice(0, 3).includes(card.toolName) || !card.processJobId || !card.processRunning) return "";
     const label = card.processStopping ? "Stopping process" : "Stop process";
-    return `<button class="copy-btn code-block-stop" type="button" data-feature-action="${escape(card.processJobId)}" data-tip="${label}" aria-label="${label}" ${card.processStopping ? "disabled" : ""}>${icon}</button>`;
+    return `<button class="icon-btn icon-btn-compact copy-btn code-block-stop" type="button" data-feature-action="${escape(card.processJobId)}" data-tip="${label}" aria-label="${label}" ${card.processStopping ? "disabled" : ""}>${icon}</button>`;
   },
   click(target, cards, send) {
     const button = target.closest<HTMLElement>("[data-feature-action]");
