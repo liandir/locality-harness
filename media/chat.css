@@ -810,8 +810,6 @@ body.image-preview-open .chat-body { overflow: hidden; }
 .memory-disclosure[open] > summary .disclosure-icon,
 .memory-source[open] > summary .disclosure-icon { transform: rotate(90deg); }
 .memory-source { padding: 0; }
-/* Match the answer-to-memory gap to the gap before the next chat message. */
-.msg.assistant > [data-memory-creation] { margin-top: calc(var(--chat-message-gap) - var(--chat-part-gap)); }
 /* Native memory summaries retain pointer focus after clicks. Keep their
    keyboard-only focus affordance separate from tool rows' focus-within rule. */
 .memory-source > summary.disclosure-trigger > .disclosure-icon { opacity: 0; }

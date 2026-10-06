@@ -1098,7 +1098,7 @@ function renderAttachmentHtml(attachment: UiAttachment, removeAttribute = ""): s
   </span>`;
 }
 
-function renderMessageActions(parent: HTMLElement, m: Message): void {
+function renderMessageActions(parent: HTMLElement, m: Message): HTMLElement | undefined {
   let actions = directChild(parent, "message-actions");
   const inner = renderMessageActionsInnerHtml(m);
   if (!inner) {
@@ -1108,10 +1108,10 @@ function renderMessageActions(parent: HTMLElement, m: Message): void {
   if (!actions) {
     actions = document.createElement("div");
     actions.className = "message-actions";
-    parent.appendChild(actions);
   }
   if (actions.dataset.messageActions !== m.id) actions.dataset.messageActions = m.id;
   setHtml(actions, inner);
+  return actions;
 }
 
 function renderMessageActionsHtml(m: Message): string {
@@ -1155,7 +1155,7 @@ function renderMessageActionsInnerHtml(m: Message): string {
   return `<span class="message-action-buttons">${actions.join("")}</span>${mode}${date ? `<span class="message-date">${date}</span>` : ""}<span class="${hintClass}" aria-hidden="true">${persistentHint}</span>`;
 }
 
-function renderFileChangeSummary(parent: HTMLElement, m: Message): void {
+function renderFileChangeSummary(parent: HTMLElement, m: Message): HTMLElement | undefined {
   let summary = directChild(parent, "change-summary");
   const changes = m.fileChanges ?? [];
   if (changes.length === 0) {
@@ -1164,7 +1164,6 @@ function renderFileChangeSummary(parent: HTMLElement, m: Message): void {
   }
   if (!summary) {
     summary = document.createElement("div");
-    parent.appendChild(summary);
   }
   const expanded = m.fileChangesExpanded ?? false;
   const cls = `change-summary${expanded ? " open" : ""}`;
@@ -1191,6 +1190,7 @@ function renderFileChangeSummary(parent: HTMLElement, m: Message): void {
       changes.map((change, index) => renderFileChangeRow(m, change, index)).join(CARD_SEPARATOR_HTML),
       false, " change-file-list"
     )}</div>` : ""}`);
+  return summary;
 }
 
 function renderFileChangeRow(m: Message, change: FileChangeSummary, index: number): string {
@@ -1272,12 +1272,15 @@ function reconcileAssistantParts(el: HTMLElement, m: Message): void {
       anchor = partEl;
     }
   }
-  renderFileChangeSummary(el, m);
-  renderMessageActions(el, m);
-  reconcileMemoryCreation(el, m);
+  // Keep late-arriving file and memory updates with the answer, above its actions.
+  for (const footer of [renderFileChangeSummary(el, m), reconcileMemoryCreation(el, m), renderMessageActions(el, m)]) {
+    if (!footer) continue;
+    placeAfter(el, footer, anchor);
+    anchor = footer;
+  }
 }
 
-function reconcileMemoryCreation(el: HTMLElement, message: Message): void {
+function reconcileMemoryCreation(el: HTMLElement, message: Message): HTMLElement | undefined {
   let card = el.querySelector<HTMLDetailsElement>(":scope > [data-memory-creation]");
   const creation = state.memoryCreations.find(item => item.messageTs === message.recordTs);
   if (!creation) { card?.remove(); return; }
@@ -1287,8 +1290,7 @@ function reconcileMemoryCreation(el: HTMLElement, message: Message): void {
   }
   card.className = `tool-card memory-source output-surface-tool ${creation.status === "created" ? "executed" : creation.status === "failed" ? "failed" : "pending"}`;
   setHtml(card, renderMemoryCreation(creation, md, chevronIcon()));
-  // Keep this independent of the collapsed work that preceded the answer.
-  if (card !== el.lastElementChild) el.appendChild(card);
+  return card;
 }
 
 function removeWorkElement(el: HTMLElement): void {
