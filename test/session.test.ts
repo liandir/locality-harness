@@ -4086,6 +4086,126 @@ describe("separate transcript and model context", () => {
 });
 
 
+describe("delete user messages", () => {
+  it("persists truncation, removes unused attachments, and discards stale compacted context", async () => {
+    const { ChatStorage } = await import("../src/chat/storage.js");
+    const { ChatSession } = await import("../src/chat/session.js");
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "locality-delete-messages-"));
+    let session: ChatSession | undefined;
+    try {
+      const storage = new ChatStorage(dir, path.join(dir, "chats"));
+      const record = storage.newRecord("native");
+      const retained = await storage.importAttachmentBytes(record.id, "keep.txt", Buffer.from("KEPT_ATTACHMENT"));
+      const removed = await storage.importAttachmentBytes(record.id, "remove.txt", Buffer.from("REMOVED_ATTACHMENT"));
+      record.messages = [
+        { role: "user", content: "Keep this request", ts: 1, attachments: [retained], tokens: 10 },
+        { role: "assistant", content: "Keep this answer", ts: 2, tokens: 20 },
+        { role: "user", content: "REMOVED_REQUEST", ts: 3, attachments: [removed, retained], tokens: 10 },
+        { role: "tool", content: "REMOVED_TOOL_RESULT", ts: 4 },
+        { role: "assistant", content: "REMOVED_ANSWER", ts: 5 }
+      ];
+      record.contextMessages = [{ role: "system", content: "[context summary] REMOVED_SUMMARY", ts: 6 }];
+      record.totalTokens = 100;
+      record.planning = true;
+      record.pendingPlanMessageTs = 5;
+      record.memoryCreations = [2, 5].map(messageTs => ({ messageTs, status: "created", text: "Memory", generatedAt: 7 }));
+      await storage.save(record);
+      const events: UiEvent[] = [];
+      session = new ChatSession({ storage, workspaceRoot: dir, record, emit: event => events.push(event) });
+      expect(await session.deleteUserMessage(3)).toBe(true);
+      const loaded = (await storage.load(record.id))!;
+      expect(loaded.messages.map(message => message.ts)).toEqual([1, 2]);
+      expect(loaded.contextMessages).toBeUndefined();
+      expect(loaded.planning).toBeUndefined();
+      expect(loaded.pendingPlanMessageTs).toBeUndefined();
+      expect(loaded.totalTokens).toBe(30);
+      expect(loaded.memoryCreations?.map(creation => creation.messageTs)).toEqual([2]);
+      await expect(fs.stat(storage.attachmentPath(record.id, removed))).rejects.toThrow();
+      expect(await fs.readFile(storage.attachmentPath(record.id, retained), "utf8")).toBe("KEPT_ATTACHMENT");
+      expect(events).toContainEqual(expect.objectContaining({ kind: "chatLoaded", record: expect.objectContaining({ messages: loaded.messages }) }));
+      expect(mocks.streamChat).not.toHaveBeenCalled();
+      expect(mocks.complete).not.toHaveBeenCalled();
+      expect(session.isTurnActive()).toBe(false);
+      await session.shutdown();
+
+      session = new ChatSession({ storage, workspaceRoot: dir, record: loaded, emit: () => undefined });
+      mocks.streamChat.mockImplementation(async function* () { yield { kind: "text", text: "New answer" }; });
+      await session.sendUserMessage("New request");
+      const request = JSON.stringify(mocks.streamChat.mock.calls[0][1].messages);
+      expect(request).toContain("Keep this request");
+      expect(request).toContain("Keep this answer");
+      expect(request).not.toContain("REMOVED_");
+    } finally {
+      await session?.shutdown();
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it.each([false, true])("deletes the selected user message including steering=%s", async steering => {
+    const { ChatSession } = await import("../src/chat/session.js");
+    const record = newRecord();
+    record.messages = [
+      { role: "user", content: "First request", ts: 1 },
+      { role: "assistant", content: "First answer", ts: 2 },
+      { role: "user", content: "Guidance", steering, ts: 3 },
+      { role: "assistant", content: "Later answer", ts: 4 }
+    ];
+    const save = vi.fn(async () => undefined);
+    const session = new ChatSession({ storage: { save } as never, workspaceRoot: "/tmp/workspace", record, emit: () => undefined });
+    expect(await session.deleteUserMessage(3)).toBe(true);
+    expect(record.messages.map(message => message.ts)).toEqual([1, 2]);
+    expect(await session.deleteUserMessage(1)).toBe(true);
+    expect(record.messages).toEqual([]);
+    expect(record.totalTokens).toBe(0);
+    expect(save).toHaveBeenCalledTimes(2);
+    await session.shutdown();
+  });
+
+  it("rejects invalid targets and deletion during an active response", async () => {
+    const { ChatSession } = await import("../src/chat/session.js");
+    const record = newRecord();
+    record.messages = [{ role: "user", content: "Keep", ts: 1 }, { role: "assistant", content: "Answer", ts: 2 }];
+    const save = vi.fn(async () => undefined);
+    const session = new ChatSession({ storage: { save } as never, workspaceRoot: "/tmp/workspace", record, emit: () => undefined });
+    expect(await session.deleteUserMessage(2)).toBe(false);
+    expect(await session.deleteUserMessage(99)).toBe(false);
+    expect(save).not.toHaveBeenCalled();
+    let finish!: () => void;
+    mocks.streamChat.mockImplementation(async function* () {
+      await new Promise<void>(resolve => { finish = resolve; });
+      yield { kind: "text", text: "Done" };
+    });
+    const turn = session.sendUserMessage("Next");
+    await vi.waitFor(() => expect(finish).toBeDefined());
+    expect(await session.deleteUserMessage(1)).toBe(false);
+    expect(record.messages[0].content).toBe("Keep");
+    finish();
+    await turn;
+    await session.shutdown();
+    expect(await session.deleteUserMessage(1)).toBe(false);
+  });
+
+  it("restores the transcript and keeps attachments when saving fails", async () => {
+    const { ChatSession } = await import("../src/chat/session.js");
+    const record = newRecord();
+    record.messages = [{ role: "user", content: "Keep", ts: 1 }, { role: "assistant", content: "Answer", ts: 2 }];
+    record.contextMessages = [{ role: "system", content: "Summary", ts: 3 }];
+    record.pendingPlanMessageTs = 2;
+    record.planning = true;
+    const original = structuredClone(record);
+    const events: UiEvent[] = [];
+    const storage = { save: vi.fn().mockRejectedValue(new Error("Disk full")), deleteAttachment: vi.fn() };
+    const session = new ChatSession({ storage: storage as never, workspaceRoot: "/tmp/workspace", record, emit: event => events.push(event) });
+    expect(await session.deleteUserMessage(1)).toBe(false);
+    expect(record).toEqual(original);
+    expect(storage.deleteAttachment).not.toHaveBeenCalled();
+    expect(events).toContainEqual({ kind: "notice", text: "Could not save the chat. No messages were deleted." });
+    expect(events.some(event => event.kind === "chatLoaded")).toBe(false);
+    expect(session.isTurnActive()).toBe(false);
+    await session.shutdown();
+  });
+});
+
 describe("workspace memory tools", () => {
   it.each([
     ["native", "act"], ["native", "plan"], ["native", "review"],
@@ -4479,5 +4599,52 @@ describe("steering an active turn", () => {
     expect(session.steerUserMessage("Too late")).toBe(false);
     expect(mocks.streamChat).toHaveBeenCalledOnce();
     await expect(fs.stat(path.join(workspaceRoot, "cancelled.txt"))).rejects.toThrow();
+  });
+});
+
+describe("saved response file Undo", () => {
+  it.each([true, false])("persists snapshots across reopening and informs the next request (existing file: %s)", async existed => {
+    const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "locality-session-undo-"));
+    const { ChatSession } = await import("../src/chat/session.js");
+    const { ChatStorage } = await import("../src/chat/storage.js");
+    const storage = new ChatStorage(workspaceRoot, path.join(workspaceRoot, "history"));
+    const record = storage.newRecord("native");
+    mocks.settings.toolCallingMode = "native";
+    mocks.settings.autoapproveWrites = true;
+    const events: UiEvent[] = [];
+    let session = new ChatSession({ storage, workspaceRoot, record, emit: event => events.push(event) });
+    try {
+      if (existed) await fs.writeFile(path.join(workspaceRoot, "existing.txt"), "");
+      let pass = 0;
+      mocks.streamChat.mockImplementation(async function* () {
+        if (pass++ === 0) yield { kind: "toolCall", name: "insert_text", argsJson: '{"path":"existing.txt","line":1,"expectedLine":"<EOF>","text":"edited"}', id: "edit-existing" };
+        else if (pass === 2) yield { kind: "toolCall", name: "create_file", argsJson: '{"path":"created.txt","content":"created"}', id: "create-new" };
+        else yield { kind: "text", text: "Updated both files." };
+      });
+      await session.sendUserMessage("Update the files");
+      const userTs = record.messages.find(message => message.role === "user")!.ts;
+      expect(events.filter(event => event.kind === "toolCallResolved" && event.status === "executed"))
+        .toEqual(expect.arrayContaining([expect.objectContaining({ fileUndoState: "available", fileUndoPath: "existing.txt" })]));
+      await session.shutdown();
+      const restored = (await storage.load(record.id))!;
+      expect(restored.messages.filter(message => message.role === "tool").map(message => message.toolCall?.fileUndo?.previous)).toEqual([existed ? "" : null, null]);
+      session = new ChatSession({ storage, workspaceRoot, record: restored, emit: event => events.push(event) });
+      await session.undoResponseFiles(userTs, () => undefined);
+      if (existed) expect(await fs.readFile(path.join(workspaceRoot, "existing.txt"), "utf8")).toBe("");
+      else await expect(fs.stat(path.join(workspaceRoot, "existing.txt"))).rejects.toMatchObject({ code: "ENOENT" });
+      await expect(fs.stat(path.join(workspaceRoot, "created.txt"))).rejects.toMatchObject({ code: "ENOENT" });
+      expect((await storage.load(record.id))!.messages.filter(message => message.role === "tool").map(message => message.toolCall?.fileUndoState)).toEqual(["undone", "undone"]);
+      expect(events).toContainEqual({ kind: "fileEditsUndone", userMessageTs: userTs, paths: ["existing.txt", "created.txt"] });
+      await expect(session.undoResponseFiles(userTs, () => undefined)).rejects.toThrow("already been undone");
+      mocks.streamChat.mockImplementation(async function* (_endpoint, request) {
+        expect(request.messages).toEqual(expect.arrayContaining([expect.objectContaining({ role: "user", content: expect.stringContaining("The user undid this response's file edits") })]));
+        expect(request.messages.slice(1).some((message: { role: string }) => message.role === "system")).toBe(false);
+        yield { kind: "text", text: "I will read the restored files." };
+      });
+      await session.sendUserMessage("Check the current files");
+    } finally {
+      await session.shutdown();
+      await fs.rm(workspaceRoot, { recursive: true, force: true });
+    }
   });
 });

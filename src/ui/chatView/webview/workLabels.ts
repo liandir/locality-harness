@@ -23,7 +23,7 @@ export function toolActivityIsActive(
   contextPending = false,
   waitingForTitle = false
 ): boolean {
-  return ["streaming", "pending", "approved"].includes(status)
+  return (["streaming", "approved"].includes(status) || (status === "pending" && toolName === "compact_context"))
     || (status === "executed" && contextPending && !waitingForTitle)
     || toolOwnsRunningProcess(toolName, processRunning);
 }
@@ -53,7 +53,8 @@ export function finishedWorkSummary(activities: WorkActivity[]): string | undefi
  * Thoughts follow tool types; a live status may occupy a remaining text slot.
  */
 export function liveWorkSummary(activities: WorkActivity[], liveStatus?: string): string | undefined {
-  const tools = activities.filter(activity => activity.kind === "tool");
+  const waiting = [...activities].reverse().find(activity => activity.kind === "tool" && activity.status === "pending" && activity.toolName !== "compact_context");
+  const tools = activities.filter(activity => activity.kind === "tool" && activity !== waiting);
   const current = tools.at(-1);
   let summary = finishedWorkSummary(tools);
   if (current && workActivityIsActive(current)) {
@@ -74,6 +75,7 @@ export function liveWorkSummary(activities: WorkActivity[], liveStatus?: string)
   if (liveStatus && (typeCount < 3 || liveStatus === "Generating title") && !(liveStatus === "Thinking" && thoughts.length)) {
     labels.push(lowerFirst(liveStatus));
   }
+  if (waiting?.kind === "tool") labels.push(lowerFirst(waitingToolLabel(waiting.toolName)));
   return labels.length ? capitalizeSentence(labels.join(", ")) : undefined;
 }
 
@@ -93,7 +95,7 @@ export function liveWorkSummaryIncludesCurrent(activities: WorkActivity[]): bool
 function workActivityIsActive(activity: WorkActivity): boolean {
   if (activity.kind === "thought") return activity.active ?? false;
   if (activity.active !== undefined) return activity.active;
-  return activity.status === undefined || ["streaming", "pending", "approved"].includes(activity.status);
+  return activity.status === undefined || toolActivityIsActive(activity.toolName, activity.status);
 }
 
 function workSummary(
@@ -124,7 +126,7 @@ export function workActivityType(activity: WorkActivity): string | undefined {
   if (activity.kind === "thought") return "thought";
   // Failed and rejected calls remain available in the expanded timeline, but
   // must not be described as completed work in the collapsed summary.
-  if (activity.status === "failed" || activity.status === "rejected") return undefined;
+  if (activity.status === "failed" || activity.status === "rejected" || (activity.status === "pending" && activity.toolName !== "compact_context")) return undefined;
   // `tool_call` is the synthetic card name for an unparseable tool block, not
   // an activity type the model successfully used. Keep its rejected card in
   // the expanded timeline, but never advertise it in the sub-session summary.
@@ -134,7 +136,8 @@ export function workActivityType(activity: WorkActivity): string | undefined {
 
 /** Visual category used to deduplicate icons in a sub-session summary. */
 export function workActivityIconType(activity: WorkActivity): string | undefined {
-  const type = workActivityType(activity);
+  const type = activity.kind === "tool" && activity.status === "pending"
+    ? activityType(activity.toolName, activity.createsNewFile) : workActivityType(activity);
   if (!type || activity.kind === "thought") return type;
   const featureIcon = chatFeature.icons?.[activity.toolName];
   if (featureIcon) return featureIcon;
@@ -168,6 +171,11 @@ export function workSummaryIcons(
   return [...icons.entries()]
     .sort(([a], [b]) => Number(a === "thought") - Number(b === "thought"))
     .map(([, icon]) => icon);
+}
+
+/** Waiting is a decision state, not an executing operation. */
+export function waitingToolLabel(toolName: string): string {
+  return toolName === "ask_user_question" ? "Awaiting your answer" : "Awaiting approval";
 }
 
 /** Present-progress label for an actively executing tool or live summary. */

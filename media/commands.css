@@ -1,9 +1,7 @@
-.code-block-stop { width: 28px; height: 24px; background: color-mix(in srgb, var(--vscode-errorForeground) 12%, transparent); color: var(--error-foreground); border-color: transparent; }
-.code-block-stop:hover, .code-block-stop:focus-visible { background: color-mix(in srgb, var(--vscode-errorForeground) 20%, transparent); color: var(--error-highlight-foreground); }
+.code-block-stop { --button-foreground: var(--error-foreground); --button-hover-fill: color-mix(in srgb, var(--vscode-errorForeground) 20%, transparent); background: color-mix(in srgb, var(--vscode-errorForeground) 12%, transparent); }
 .code-block-stop:disabled { opacity: 0.62; cursor: default; }
-.tool-output-header .code-block-stop { height: 20px; }
 .command-exit-dot { display: inline-block; width: 7px; height: 7px; margin-right: 6px; border-radius: 50%; vertical-align: 0.06em; }
-.command-exit-dot.success { background: var(--vscode-charts-blue, var(--vscode-textLink-foreground)); }
+.command-exit-dot.success { background: var(--success-foreground); }
 .command-exit-dot.failure { background: var(--error-highlight-foreground); }
 .tool-card.process-running .tool-icon { animation: icon-bounce 1.15s cubic-bezier(0.42, 0, 0.24, 1) infinite; }
 @media (prefers-reduced-motion: reduce) { .tool-card.process-running .tool-icon { animation: none; } }

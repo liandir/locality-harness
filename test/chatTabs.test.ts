@@ -7,10 +7,10 @@ import type { WorkspaceMemory } from "../src/chat/workspaceMemory.js";
 import type { UiEvent } from "../src/chat/session.js";
 import type { ChatToExt, ExtToChat } from "../src/ui/messaging.js";
 
-const mocks = vi.hoisted(() => ({ sessions: new Map<string, FakeSession>(), input: vi.fn(), picker: vi.fn(), metadata: vi.fn(), settings: { reasoningEfforts: {}, endpoint: "http://127.0.0.1:8080", model: "model-a", memoryEnabled: true } }));
+const mocks = vi.hoisted(() => ({ sessions: new Map<string, FakeSession>(), input: vi.fn(), picker: vi.fn(), warning: vi.fn(), metadata: vi.fn(), settings: { reasoningEfforts: {}, endpoint: "http://127.0.0.1:8080", model: "model-a", memoryEnabled: true } }));
 vi.mock("vscode", () => ({
   commands: { executeCommand: vi.fn() },
-  window: { showInputBox: mocks.input, showOpenDialog: mocks.picker },
+  window: { showInputBox: mocks.input, showOpenDialog: mocks.picker, showWarningMessage: mocks.warning },
   Uri: { file: (path: string) => path }
 }));
 vi.mock("../src/config/settings.js", () => ({ readSettings: () => mocks.settings }));
@@ -21,6 +21,7 @@ interface FakeSession {
   approve: ReturnType<typeof vi.fn>;
   approveFutureTools: ReturnType<typeof vi.fn>;
   continueTurn: ReturnType<typeof vi.fn>;
+  deleteUserMessage: ReturnType<typeof vi.fn>;
   steerUserMessage: ReturnType<typeof vi.fn>;
   shutdown: ReturnType<typeof vi.fn>;
   sent: string[];
@@ -40,6 +41,13 @@ vi.mock("../src/chat/session.js", () => ({
     cancel = vi.fn(() => this.finish());
     approve = vi.fn();
     approveFutureTools = vi.fn(async () => undefined);
+    deleteUserMessage = vi.fn(async (messageTs: number) => {
+      const index = this.args.record.messages.findIndex(message => message.role === "user" && message.ts === messageTs);
+      if (this.active || index < 0) return false;
+      this.args.record.messages = this.args.record.messages.slice(0, index);
+      this.emitLoaded();
+      return true;
+    });
     steerUserMessage = vi.fn((_text: string, _attachments: ChatAttachment[]) => this.active);
     continueTurn = vi.fn(async (_messageTs: number) => {
       if (this.active) return false;
@@ -123,23 +131,94 @@ function setup(memory?: WorkspaceMemory) {
     update: vi.fn(async (key: string, value: unknown) => { preferences.set(key, value); })
   };
   const createChat = vi.fn();
+  const onChatOpened = vi.fn();
+  const onChatListChanged = vi.fn();
   const provider = new ChatViewProvider(
     { workspaceState } as unknown as vscode.ExtensionContext,
-    () => storage as unknown as ChatStorage, () => "/workspace", vi.fn(), vi.fn(), createChat, vi.fn(), memory
+    () => storage as unknown as ChatStorage, () => "/workspace", vi.fn(), onChatOpened, createChat, onChatListChanged, memory
   );
   const posted: ExtToChat[] = [];
   (provider as unknown as { view: unknown }).view = { webview: { postMessage: (message: ExtToChat) => posted.push(message), asWebviewUri: (path: string) => path } };
   const send = (message: ChatToExt) => (provider as unknown as { onMessage(message: ChatToExt): Promise<void> }).onMessage(message);
   const snapshot = () => [...posted].reverse().find(message => "type" in message && message.type === "chatSnapshot") as Extract<ExtToChat, { type: "chatSnapshot" }>;
-  return { provider, storage, posted, send, snapshot, workspaceState, createChat };
+  return { provider, storage, posted, send, snapshot, workspaceState, createChat, onChatOpened, onChatListChanged };
 }
 beforeEach(() => {
   mocks.sessions.clear();
   vi.clearAllMocks();
+  mocks.warning.mockReset();
   mocks.settings.model = "model-a";
   mocks.settings.reasoningEfforts = {};
   mocks.settings.memoryEnabled = true;
   mocks.metadata.mockReset().mockResolvedValue({ modelAlias: "model-a", contextSize: 32768, supportsVision: false });
+});
+
+describe("delete messages", () => {
+  const chat = () => ({ ...record("a"), messages: [
+    { role: "user" as const, content: "Request", ts: 1 },
+    { role: "assistant" as const, content: "Answer", ts: 2 }
+  ] });
+
+  it("confirms deletion and refreshes the transcript and chat lists", async () => {
+    const { provider, send, posted, storage, onChatOpened, onChatListChanged } = setup();
+    provider.openChat(chat());
+    mocks.warning.mockResolvedValue("Delete");
+    await send({ type: "deleteMessage", chatId: "a", messageTs: 1 });
+    expect(mocks.warning).toHaveBeenCalledWith(
+      "Delete this message and everything after it?", expect.objectContaining({ modal: true }), "Delete"
+    );
+    expect(mocks.sessions.get("a")!.deleteUserMessage).toHaveBeenCalledWith(1);
+    expect(posted).toContainEqual(expect.objectContaining({ kind: "chatLoaded", record: expect.objectContaining({ messages: [] }) }));
+    expect(onChatOpened).toHaveBeenLastCalledWith(expect.objectContaining({ id: "a", messages: [] }));
+    expect(onChatListChanged).toHaveBeenCalled();
+    expect(storage.list).toHaveBeenCalled();
+    await provider.closeAll();
+  });
+
+  it("keeps messages when confirmation is dismissed", async () => {
+    const { provider, send } = setup();
+    const rec = chat();
+    provider.openChat(rec);
+    await send({ type: "deleteMessage", chatId: "a", messageTs: 1 });
+    expect(mocks.sessions.get("a")!.deleteUserMessage).not.toHaveBeenCalled();
+    expect(rec.messages).toHaveLength(2);
+    await provider.closeAll();
+  });
+
+  it.each(["switch chat", "new turn", "changed history", "close chats"])("ignores confirmation after %s", async action => {
+    const { provider, send } = setup();
+    const rec = chat();
+    provider.openChat(rec);
+    const session = mocks.sessions.get("a")!;
+    let confirm!: (choice: string) => void;
+    mocks.warning.mockImplementation(() => new Promise<string>(resolve => { confirm = resolve; }));
+    const deletion = send({ type: "deleteMessage", chatId: "a", messageTs: 1 });
+    expect(mocks.warning).toHaveBeenCalledOnce();
+    let nextTurn: Promise<void> | undefined;
+    if (action === "switch chat") provider.openChat(record("b"));
+    else if (action === "new turn") {
+      nextTurn = send({ type: "send", chatId: "a", text: "Next", mode: "act" });
+      await vi.waitFor(() => expect(session.sent).toEqual(["Next"]));
+    }
+    else if (action === "changed history") rec.messages = rec.messages.slice();
+    else await provider.closeAll();
+    confirm("Delete");
+    await deletion;
+    expect(session.deleteUserMessage).not.toHaveBeenCalled();
+    session.finish();
+    await nextTurn;
+    await provider.closeAll();
+  });
+
+  it("ignores stale chat requests and non-user messages", async () => {
+    const { provider, send } = setup();
+    provider.openChat(chat());
+    await send({ type: "deleteMessage", chatId: "b", messageTs: 1 });
+    await send({ type: "deleteMessage", chatId: "a", messageTs: 2 });
+    expect(mocks.warning).not.toHaveBeenCalled();
+    expect(mocks.sessions.get("a")!.deleteUserMessage).not.toHaveBeenCalled();
+    await provider.closeAll();
+  });
 });
 
 describe("continue interrupted chats", () => {

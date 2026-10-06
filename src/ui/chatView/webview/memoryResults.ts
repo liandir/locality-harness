@@ -1,6 +1,6 @@
 import type MarkdownIt from "markdown-it";
 import { renderMemoryDate } from "../../memoryDate.js";
-import { cloudIcon } from "../../icons.js";
+import { memoryIcon } from "../../icons.js";
 import type { MemoryCreation } from "../../../chat/memory.js";
 import { renderToolOutputSurface } from "./toolOutputSurface.js";
 
@@ -15,7 +15,7 @@ export function renderMemoryCreation(creation: MemoryCreation, md: MarkdownIt, d
     : `<div class="${creation.status === "failed" ? "tool-error-result" : "assistant-markdown"}">${md.utils.escapeHtml(
       creation.error ?? (creation.status === "queued" ? "Waiting for the model to be idle." : "Saving a summary for future chats.")
     )}</div>`;
-  return `<summary class="tool-head disclosure-trigger${active ? " active-tool-head" : ""}"><span class="tool-icon" aria-hidden="true">${cloudIcon()}</span><span class="tool-name">${label}</span>${disclosureIcon}</summary>
+  return `<summary class="tool-head disclosure-trigger${active ? " active-tool-head" : ""}"><span class="tool-icon" aria-hidden="true">${memoryIcon()}</span><span class="tool-name">${label}</span>${disclosureIcon}</summary>
     <div class="tool-expanded">${renderToolOutputSurface(contents, creation.status === "failed")}</div>`;
 }
 
@@ -38,7 +38,7 @@ export function renderMemoryResult(toolName: string, result: string, md: Markdow
   if (toolName !== "search_memories" || !Array.isArray(parsed.memories) || !parsed.memories.every(isMetadata)) return "";
   const escape = md.utils.escapeHtml;
   const rows = parsed.memories.map(memory =>
-    `<li class="tool-filelist-item tool-memory-item"><span class="tool-filelist-icon" aria-hidden="true">${cloudIcon()}</span>
+    `<li class="tool-filelist-item tool-memory-item"><span class="tool-filelist-icon" aria-hidden="true">${memoryIcon()}</span>
       <div class="tool-memory-entry"><div class="tool-memory-name">${escape(memory.name)}</div>
         <div class="memory-date">${renderMemoryDate(Date.parse(memory.date))}</div></div></li>`
   ).join("");

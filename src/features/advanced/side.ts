@@ -21,7 +21,7 @@ export const sideFeature: SideFeature = {
         <label class="field-label" for="webSearchEndpoint">Web search endpoint</label>
         <div class="setting-action-row">
           <input id="webSearchEndpoint" type="text" value="${escape(endpoint ?? String(settings.webSearchEndpoint ?? ""))}" placeholder="https://search.example.org" ${disabled} />
-          <button id="setWebSearch" class="primary" aria-label="Test and save web search settings" ${disabled}>${testing ? "Testing…" : "Set"}</button>
+          <button id="setWebSearch" class="action-btn" aria-label="Test and save web search settings" ${disabled}>${testing ? "Testing…" : "Set"}</button>
         </div>
         <label class="field-label" for="webSearchApiKey">API-key</label>
         <input id="webSearchApiKey" type="password" autocomplete="off" spellcheck="false" placeholder="Required for some endpoints" ${disabled} />

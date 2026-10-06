@@ -1,13 +1,39 @@
-/* Shared red text palette: muted at rest, brighter for hover/focus and emphasis. */
+/* Shared geometry and semantic colors for both webviews. */
 :root {
-  --control-radius: 6px;
+  --control-radius: 10px;
+  --icon-action-size: 28px;
+  --icon-action-compact-size: 20px;
+  --surface-fill: color-mix(in srgb, var(--vscode-foreground) 7%, transparent);
+  --surface-fill-strong: color-mix(in srgb, var(--vscode-foreground) 16%, transparent);
+  --surface-stroke: color-mix(in srgb, var(--vscode-foreground) 9%, transparent);
+  --surface-stroke-strong: color-mix(in srgb, var(--vscode-foreground) 14%, transparent);
+  --success-foreground: var(--vscode-gitDecoration-addedResourceForeground, var(--vscode-testing-iconPassed, #3fb950));
+  --surface-fill-hover: color-mix(in srgb, var(--vscode-foreground) 8%, transparent);
   --scrollbar-size: 4px;
   --scrollbar-hover-size: calc(1.5 * var(--scrollbar-size));
   --scrollbar-hover-fill: color-mix(in srgb, var(--vscode-scrollbarSlider-hoverBackground, color-mix(in srgb, var(--vscode-foreground) 40%, transparent)) 85%, var(--vscode-foreground));
   --scrollbar-active-fill: var(--vscode-scrollbarSlider-activeBackground, color-mix(in srgb, var(--vscode-foreground) 55%, transparent));
-  --error-foreground: color-mix(in srgb, var(--vscode-errorForeground) 52%, #3f0d0d);
-  --error-highlight-foreground: color-mix(in srgb, var(--vscode-errorForeground) 78%, #5c1111);
+  --error-foreground: var(--vscode-errorForeground);
+  --error-highlight-foreground: var(--error-foreground);
 }
+
+body:is(.vscode-light, .vscode-high-contrast-light) {
+  --error-foreground: color-mix(in srgb, var(--vscode-errorForeground) 70%, var(--vscode-foreground));
+  --success-foreground: var(--vscode-gitDecoration-addedResourceForeground, #286b35);
+}
+/* Shared filled actions and quiet toolbar actions; icon-btn adds square geometry. */
+:where(button) { background: transparent; color: inherit; border: 1px solid transparent; border-radius: var(--control-radius); font: inherit; cursor: pointer; outline: none; transition: background 0.12s, color 0.12s; }
+:where(button):disabled { opacity: 0.55; cursor: default; }
+:where(.action-btn) { background: var(--surface-fill); color: var(--button-foreground, var(--vscode-foreground)); padding: 5px 14px; text-align: center; }
+.action-btn:is(:hover, :focus-visible):not(:disabled) { background: var(--button-hover-fill, var(--surface-fill-strong)); }
+.cancel-btn { --button-foreground: var(--error-foreground); --button-hover-fill: color-mix(in srgb, var(--vscode-errorForeground) 26%, transparent); background: color-mix(in srgb, var(--vscode-errorForeground) 16%, transparent); }
+.quiet-btn { color: var(--button-foreground, var(--vscode-descriptionForeground)); }
+.icon-btn { flex: 0 0 auto; width: var(--action-size, var(--icon-action-size)); height: var(--action-size, var(--icon-action-size)); min-height: 0; box-sizing: border-box; display: inline-flex; align-items: center; justify-content: center; color: var(--button-foreground, var(--vscode-descriptionForeground)); padding: 0; line-height: 1; }
+.icon-btn.icon-btn-compact { --action-size: var(--icon-action-compact-size); }
+:is(.icon-btn, .quiet-btn):is(:hover, :focus-visible, .active, [aria-expanded=true]):not(:disabled) { background: var(--button-hover-fill, var(--surface-fill-hover)); color: var(--button-foreground, var(--vscode-foreground)); }
+.icon-btn svg { display: block; }
+:is(.action-btn, .icon-btn):is(.danger, .delete, .delete-message-btn, .remove, .reject):is(:hover, :focus-visible):not(:disabled) { background: color-mix(in srgb, var(--vscode-errorForeground) 12%, transparent); color: var(--error-highlight-foreground); }
+.icon-btn:is(.copied, .save):not(:disabled) { --button-foreground: var(--success-foreground); }
 
 /* Use the Settings/Welcome control geometry for decision fields and actions too. */
 .welcome-button, .wide-button, .question-option, .question-other,
@@ -21,16 +47,8 @@
 .question-option, .question-other { padding-left: 6px; }
 .question-option.question-skip { padding-left: 12px; text-align: center; }
 
-/* Decision controls keep a gray fill at rest, half the hover/focus strength. */
-.approval-actions .approve, .question-option, .question-other {
-  background: color-mix(in srgb, var(--surface-fill-strong) 50%, transparent);
-}
-.approval-actions .approve:is(:hover, :focus-visible):not(:disabled),
-.question-option:is(:hover, :focus-visible):not(:disabled),
-.question-other:is(:hover, :focus-within) {
-  background: var(--surface-fill-strong);
-}
-.question-option.question-cancel:is(:hover, :focus-visible):not(:disabled) { background: color-mix(in srgb, var(--vscode-errorForeground) 12%, transparent); color: var(--error-highlight-foreground); }
+.question-other { background: var(--surface-fill); }
+.question-other:is(:hover, :focus-within) { background: var(--surface-fill-strong); }
 
 /* Text links share hover/focus underlines in both webviews. Workspace links
    underline only their label; tool path/URL links keep the tighter underline
@@ -70,7 +88,7 @@ pre, textarea { scrollbar-gutter: stable; }
 .tab-btn { flex: 1 1 0; min-width: 0; display: inline-flex; align-items: center; justify-content: center; gap: 6px; background: transparent; color: var(--vscode-descriptionForeground); border: 1px solid transparent; min-height: 28px; box-sizing: border-box; padding: 4px 8px; font: inherit; font-weight: normal; cursor: pointer; border-radius: var(--control-radius); transition: background 0.12s, color 0.12s; }
 .tab-btn svg { flex: 0 0 auto; }
 .tab-btn span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.tab-btn:hover { background: var(--surface-fill); color: var(--vscode-foreground); }
+.tab-btn:is(:hover, :focus-visible) { background: var(--surface-fill-hover); color: var(--vscode-foreground); }
 .tab-btn.active { background: var(--surface-fill-strong); color: var(--vscode-foreground); }
 .chat-context-menu { position: fixed; z-index: 10000; min-width: 130px; padding: 4px; border-radius: var(--control-radius); background: var(--vscode-menu-background, var(--vscode-editor-background)); color: var(--vscode-menu-foreground, var(--vscode-foreground)); box-shadow: 0 4px 16px var(--vscode-widget-shadow); }
 .chat-context-menu button { display: block; width: 100%; padding: 4px 8px; border: 1px solid transparent; border-radius: var(--control-radius); background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; outline: none; }

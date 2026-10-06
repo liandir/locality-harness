@@ -130,7 +130,7 @@ export type SideToExt =
   | { type: "openGithub" }
   | { type: "saveSetting"; key: string; value: unknown }
   | { type: "setReasoningEffort"; effort: ReasoningEffort }
-  | { type: "validateEndpoint"; url: string }
+  | { type: "validateEndpoint"; url: string; requestId?: number }
   | { type: "validateWebSearch"; endpoint: string; apiKey: string }
   | { type: "editUserSettingsJson" }
   | { type: "editWorkspacePrompts" }
@@ -148,14 +148,14 @@ export type ExtToSide =
   | { type: "revealMemory"; id: string }
   | { type: "memories"; memories: MemoryListItem[] }
   | { type: "memoryError"; error: string }
-  | { type: "settings"; settings: Record<string, unknown>; reasoningEffort: ReasoningEffort }
+  | { type: "settings"; settings: Record<string, unknown>; reasoningEffort: ReasoningEffort; resetDrafts?: boolean }
   | { type: "reasoningEffort"; effort: ReasoningEffort }
   | { type: "webSearchSettings"; endpoint: string; apiKey: string; verified: boolean; error?: string; reset?: boolean }
   | { type: "webSearchValidation"; ok: boolean; error?: string; endpoint?: string }
   | { type: "appInfo"; version: string }
   | { type: "chats"; chats: { id: string; title: string; updatedAt: number }[] }
   | { type: "focusTab"; tab: SideTab }
-  | { type: "endpointValidation"; ok: boolean; error?: string; resolved?: string[]; metadata?: { modelAlias: string; contextSize: number; supportsVision: boolean }; models?: { id: string }[]; selectedModel?: string }
+  | { type: "endpointValidation"; requestId?: number; ok: boolean; error?: string; resolved?: string[]; metadata?: { modelAlias: string; contextSize: number; supportsVision: boolean }; models?: { id: string }[]; selectedModel?: string }
   | { type: "settingSaved"; key: string; ok: boolean; error?: string }
   | { type: "openTabs"; tabs: ChatTab[] };
 
@@ -171,6 +171,7 @@ export type ChatToExt = (
   | { type: "reorderQueuedMessages"; ids: string[] }
   | { type: "removeQueuedMessage"; id: string }
   | { type: "editMessage"; messageTs: number; text: string; mode: ChatMode; removeAttachmentIds?: string[] }
+  | { type: "deleteMessage"; messageTs: number }
   | { type: "selectAttachment" }
   | { type: "pasteAttachments"; files: { fileName: string; dataUrl: string }[] }
   | { type: "pasteText"; text: string }
@@ -199,7 +200,7 @@ export type ChatToExt = (
   | { type: "openFile"; path: string; line?: number }
   | { type: "reviewFile"; path: string }
   | { type: "reviewProposedFile"; path: string; content: string }
-  | { type: "reviewWorkspaceChanges" }
+  | { type: "undoResponseFiles"; userMessageTs: number }
   | { type: "requestToolDiff"; toolId: string }
   | { type: "saveDraft"; text: string }
   | { type: "closeChatTab"; id: string }
@@ -207,6 +208,7 @@ export type ChatToExt = (
   | { type: "deleteCurrent" }) & { chatId?: string };
 
 export type ExtToChat = UiEvent
+  | { type: "fileUndoFinished"; userMessageTs: number }
   | { type: "chatTabs"; tabs: ChatTab[]; activeId?: string }
   | { type: "chatSnapshot"; id: string; events: ExtToChat[]; busy: boolean; draft: string }
   | { type: "settings"; mode: ChatMode; showThinking: boolean; steerWithEnter: boolean; autoCompact: boolean; autoCompactThresholdPercent: number; workspaceRoot?: string }

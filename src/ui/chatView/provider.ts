@@ -22,6 +22,7 @@ import { assertInsideWorkspace } from "../../tools/workspaceGuard.js";
 import { readGitHeadContent, type GitExtensionApi } from "../../scm/gitApi.js";
 import type { ChatToExt, ExtToChat, SideTab, UiAttachment, ChatTab } from "../messaging.js";
 import { reorderItemsById, shouldDrainMessageQueue } from "./queuedMessages.js";
+import { fileUndoPlan, turnFileEdits } from "../../chat/fileUndo.js";
 import { classifyWorkspacePath } from "./workspacePathTypes.js";
 
 interface ChatRuntime {
@@ -40,13 +41,14 @@ interface ChatRuntime {
   removed: boolean;
   running: boolean;
   compacting: boolean;
+  runningProcesses: Set<string>;
   memoryRefreshGeneration: number;
 }
 
 function newRuntime(): ChatRuntime {
   return { queuedMessages: [], stagedAttachmentIds: new Set(), pendingAttachments: new Map(),
     messageLoopRunning: false, sessionCreationPending: false, attachmentSelectionPending: false,
-    events: [], draft: "", open: true, removed: false, running: false, compacting: false, memoryRefreshGeneration: 0 };
+    events: [], draft: "", open: true, removed: false, running: false, compacting: false, runningProcesses: new Set(), memoryRefreshGeneration: 0 };
 }
 
 export class ChatViewProvider implements vscode.WebviewViewProvider {
@@ -60,6 +62,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private visionEndpointKey?: string;
   private deleting = new Map<string, ChatStorage>();
   private clearingStorage?: ChatStorage;
+  private fileUndoTask?: Promise<void>;
 
   isClearingWorkspace(): boolean { return !!this.clearingStorage && this.clearingStorage === this.getStorage(); }
   private active = newRuntime();
@@ -152,10 +155,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         contextMessageCount: contextMessages?.length ?? transcript.messages.length,
         record: {
           ...transcript,
-          messages: msg.record.messages.map(message => ({
-            ...message,
-            attachments: message.attachments?.map(attachment => this.toUiAttachment(attachment))
-          }))
+          messages: msg.record.messages.map(message => {
+            const toolCall = message.toolCall ? { ...message.toolCall } : undefined;
+            if (toolCall) delete toolCall.fileUndo;
+            return { ...message, toolCall, attachments: message.attachments?.map(attachment => this.toUiAttachment(attachment)) };
+          })
         }
       };
     }
@@ -355,6 +359,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           runtime.running = true;
           this.pushTabs();
         }
+        // Keep process activity across event-log baselines and subsequent turns.
+        if (event.kind === "processJobState") {
+          if (event.running) runtime.runningProcesses.add(event.jobId);
+          else runtime.runningProcesses.delete(event.jobId);
+        } else if ((event.kind === "toolCallProposed" || event.kind === "toolCallResolved") && event.processJobId) {
+          if (event.processRunning) runtime.runningProcesses.add(event.processJobId);
+          else if (event.processRunning === false) runtime.runningProcesses.delete(event.processJobId);
+        }
         if (event.kind === "compactStart" || event.kind === "compactEnd") {
           runtime.compacting = event.kind === "compactStart";
           this.pushTabs();
@@ -473,6 +485,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async onMessage(m: ChatToExt): Promise<void> {
+    // Serialize new webview actions behind Undo, including decisions in other tabs.
+    if (this.fileUndoTask) {
+      if (m.type === "undoResponseFiles") return;
+      await this.fileUndoTask;
+    }
     const navigation = ["openChat", "closeChatTab", "openChats", "openSettings", "newChat", "openMemory", "ready"].includes(m.type) || (m.type === "renameChat" && !!m.id);
     if (!navigation && m.chatId && m.chatId !== this.session?.getRecord().id) {
       if (m.type === "saveDraft") { const runtime = this.runtimes.get(m.chatId); if (runtime) runtime.draft = m.text; }
@@ -606,6 +623,31 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         this.drainMessageQueueIfIdle(runtime);
         break;
       }
+      case "deleteMessage": {
+        const runtime = this.active;
+        const session = runtime.session;
+        if (!session || runtime.messageLoopRunning || runtime.compacting || session.isTurnActive()) break;
+        const messages = session.getRecord().messages;
+        const count = messages.length;
+        if (!messages.some(message => message.role === "user" && message.ts === m.messageTs)) break;
+        const choice = await vscode.window.showWarningMessage(
+          "Delete this message and everything after it?",
+          { modal: true, detail: "The selected message and all later messages will be permanently removed from this chat. Workspace file changes will remain." },
+          "Delete"
+        );
+        // A dialog can outlive its chat or workspace, or a newly started turn.
+        if (choice !== "Delete" || runtime !== this.active || runtime.removed || runtime.storage !== this.getStorage()
+          || runtime.messageLoopRunning || runtime.compacting || session.isTurnActive()
+          || session.getRecord().messages !== messages || messages.length !== count) break;
+        if (await session.deleteUserMessage(m.messageTs)) {
+          if (runtime.removed) break;
+          this.onChatOpened(session.getRecord());
+          this.onChatListChanged();
+          this.pushTabs();
+          await this.pushRecentChats();
+        }
+        break;
+      }
       case "forkChat": {
         const storage = this.getStorage();
         const record = this.session?.getRecord();
@@ -706,15 +748,67 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       case "reviewProposedFile":
         await this.openProposedReviewDiff(m.path, m.content);
         break;
-      case "reviewWorkspaceChanges":
-        await vscode.commands.executeCommand("workbench.view.scm");
+      case "undoResponseFiles": {
+        const runtime = this.active;
+        this.fileUndoTask = this.undoResponseFiles(runtime, m.userMessageTs);
+        try { await this.fileUndoTask; }
+        finally {
+          this.fileUndoTask = undefined;
+          if (runtime === this.active && !runtime.removed) this.post({ type: "fileUndoFinished", userMessageTs: m.userMessageTs });
+          for (const item of this.runtimes.values()) this.drainMessageQueueIfIdle(item);
+        }
         break;
+      }
       case "requestToolDiff":
         this.session?.requestToolDiff(m.toolId);
         break;
       case "renameChat":
         if (m.id ?? this.session?.getRecord().id) await this.renameChat(m.id ?? this.session!.getRecord().id, m.title);
         break;
+    }
+  }
+
+  private async undoResponseFiles(runtime: ChatRuntime, userMessageTs: number): Promise<void> {
+    const session = runtime.session;
+    const storage = runtime.storage;
+    const workspaceRoot = this.getWorkspaceRoot();
+    if (!session || !storage || !workspaceRoot) return;
+    let attempted = false;
+    const available = (): void => {
+      if (runtime !== this.active || runtime.removed || storage !== this.getStorage() || workspaceRoot !== this.getWorkspaceRoot()) throw new Error("The workspace or chat changed. Undo was cancelled.");
+      if ([...this.runtimes.values()].some(item => item.messageLoopRunning || item.compacting || item.runningProcesses?.size || item.session?.isTurnActive())) {
+        throw new Error("Wait for all responses and managed processes in this workspace to finish before undoing file edits.");
+      }
+    };
+    try {
+      available();
+      const plan = fileUndoPlan(turnFileEdits(session.getRecord().messages, userMessageTs));
+      const choice = await vscode.window.showWarningMessage(
+        `Undo edits to ${plan.length} file${plan.length === 1 ? "" : "s"}?`,
+        { modal: true, detail: "Restore the files to their contents before this response. Files created by the response will be removed. Undo will stop if a file has newer changes or unsaved edits.\n\n" + plan.map(change => change.path).join("\n") },
+        "Undo"
+      );
+      if (choice !== "Undo") return;
+      available();
+      attempted = true;
+      await session.undoResponseFiles(userMessageTs, async absolute => {
+        available();
+        for (const document of vscode.workspace.textDocuments) {
+          if (document.uri.scheme !== "file" || !document.isDirty) continue;
+          let documentPath: string;
+          try { documentPath = await fs.realpath(document.uri.fsPath); }
+          catch { documentPath = path.resolve(document.uri.fsPath); }
+          if (documentPath === absolute) throw new Error(`Save or discard unsaved edits in ${path.basename(absolute)} before undoing.`);
+        }
+      });
+    } catch (error) { await vscode.window.showErrorMessage((error as Error).message); }
+    finally {
+      if (attempted && !runtime.removed && storage === this.getStorage()) {
+        if (runtime === this.active) this.onChatOpened(session.getRecord());
+        this.onChatListChanged();
+        this.pushTabs();
+        await this.pushRecentChats();
+      }
     }
   }
 
@@ -725,7 +819,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       ? { text: firstMessage?.trim() ?? "", mode: firstMode, attachments: firstAttachments.length ? firstAttachments : undefined }
       : undefined;
     if (priority && first) runtime.planResponse = first;
-    if (runtime.messageLoopRunning || session.isTurnActive() || (session.isPlanning() && !runtime.planResponse)) {
+    if (this.fileUndoTask || runtime.messageLoopRunning || session.isTurnActive() || (session.isPlanning() && !runtime.planResponse)) {
       const text = firstMessage?.trim() ?? "";
       if (!priority && (text || firstAttachments.length)) {
         const message = {
@@ -777,7 +871,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   private drainMessageQueueIfIdle(runtime = this.active): void {
     const session = runtime.session;
-    if (runtime.removed || !session || (session.isPlanning() && !runtime.planResponse) || !shouldDrainMessageQueue({
+    if (this.fileUndoTask || runtime.removed || !session || (session.isPlanning() && !runtime.planResponse) || !shouldDrainMessageQueue({
       queueLength: runtime.queuedMessages.length + (runtime.planResponse ? 1 : 0),
       messageLoopRunning: runtime.messageLoopRunning,
       sessionCreationPending: runtime.sessionCreationPending,

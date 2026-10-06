@@ -11,6 +11,8 @@ export interface TrackedFileWrite {
   path: string;
   previous: string;
   next: string;
+  createsNewFile?: boolean;
+  undoAvailable?: boolean;
   diffPreview?: string;
 }
 

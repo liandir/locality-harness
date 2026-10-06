@@ -143,6 +143,18 @@ label becomes **Thought for N seconds**.
 Workspace files mentioned by the assistant can appear as clickable file links.
 Click one to open it in the editor, or hover it to see the full workspace path.
 
+The **Edited files** summary includes **Undo** for responses with saved file
+snapshots. After confirmation, Undo restores the contents from before that
+response and removes files it created. It preserves the conversation and marks
+the edits **Undone**. Later file changes or unsaved editor contents prevent Undo;
+older responses without snapshots show an unavailable Undo action. This applies
+to the harness's file-edit tools, not changes made by shell commands.
+
+History disclosures support Tab, Enter, and Space. Pending decisions say
+**Awaiting approval** or **Awaiting your answer**; activity animation indicates
+ongoing work. Completed todos use checkmarks, and cloud icons identify
+workspace-local memories.
+
 ## Chat modes
 
 The mode menu in the chat composer offers three ways to work:

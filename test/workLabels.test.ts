@@ -192,11 +192,23 @@ describe("work session labels", () => {
     expect(liveWorkSummary(activities)).toBe("Editing file, thought");
   });
 
+  it("keeps approval and question waits static and out of completed-work summaries", () => {
+    const pending: WorkActivity = { kind: "tool", toolName: "edit_file", status: "pending" };
+    expect(liveWorkSummary([pending])).toBe("Awaiting approval");
+    expect(finishedWorkSummary([pending])).toBeUndefined();
+    expect(workSummaryIcons([pending], true)).toEqual([{ activityIndex: 0, active: false }]);
+    expect(liveWorkSummary([{ kind: "tool", toolName: "read_file", status: "executed" }, pending]))
+      .toBe("Read file, awaiting approval");
+    expect(liveWorkSummary([{ kind: "tool", toolName: "ask_user_question", status: "pending" }]))
+      .toBe("Awaiting your answer");
+    expect(toolActivityIsActive("compact_context", "pending")).toBe(true);
+  });
+
   it("uses settled wording when a live session's latest tool has finished", () => {
     expect(toolActivityIsActive("list_dir", "executed")).toBe(false);
     expect(toolActivityIsActive("list_dir", "failed")).toBe(false);
     expect(toolActivityIsActive("list_dir", "rejected")).toBe(false);
-    expect(toolActivityIsActive("list_dir", "pending")).toBe(true);
+    expect(toolActivityIsActive("list_dir", "pending")).toBe(false);
     expect(liveWorkSummary([
       { kind: "tool", toolName: "list_dir", resource: "src", status: "executed", active: false }
     ])).toBe("Listed directory");
