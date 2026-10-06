@@ -357,7 +357,9 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 }
 .disclosure-trigger:is(:hover, :focus-within) > .disclosure-icon { opacity: 1; }
 /* Keep the collapse affordance visible for expanded tools and native details. */
-.tool-card:is(.open, [open]) > .tool-head > .disclosure-icon { opacity: 1; }
+.tool-card:is(.open, [open]) > .tool-head > .disclosure-icon,
+.change-summary.open > .change-summary-head .disclosure-icon,
+.change-file-item.open > .change-file-row > .disclosure-icon { opacity: 1; }
 .tool-icon { margin-right: 8px; }
 .active-tool-head > .tool-icon { color: var(--tool-idle); }
 .active-tool-head > .tool-icon svg {
@@ -416,11 +418,15 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .diff-stat.del { color: var(--error-highlight-foreground); }
 /* Settled edit/create counts stay colored for an open diff or row hover.
    Active counts share the heading's shimmer. */
-.tool-head .diff-stat { color: inherit; }
+.tool-head .diff-stat, .change-file-row .diff-stat { color: inherit; }
 .tool-card:not(.failed):not(.rejected) > .tool-head:hover .diff-stat.add,
-.tool-card.open:not(.failed):not(.rejected) > .tool-head:not(.active-tool-head) .diff-stat.add { color: #3fb950; }
+.tool-card.open:not(.failed):not(.rejected) > .tool-head:not(.active-tool-head) .diff-stat.add,
+.change-summary:is(.open, :hover, :focus-within) > .change-summary-head .diff-stat.add,
+.change-file-item:is(.open, :hover, :focus-within) > .change-file-row .diff-stat.add { color: #3fb950; }
 .tool-card:not(.failed):not(.rejected) > .tool-head:hover .diff-stat.del,
-.tool-card.open:not(.failed):not(.rejected) > .tool-head:not(.active-tool-head) .diff-stat.del { color: var(--error-highlight-foreground); }
+.tool-card.open:not(.failed):not(.rejected) > .tool-head:not(.active-tool-head) .diff-stat.del,
+.change-summary:is(.open, :hover, :focus-within) > .change-summary-head .diff-stat.del,
+.change-file-item:is(.open, :hover, :focus-within) > .change-file-row .diff-stat.del { color: var(--error-highlight-foreground); }
 .tool-expanded { padding: 3px 0 1px 24px; margin-top: 0; font-size: inherit; font-weight: 400; line-height: 1.4; opacity: 0.94; }
 /* Expanded tool payloads inherit from the chat rather than the editor's font
    size setting. Code-oriented payloads step down slightly because the editor
@@ -429,9 +435,10 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .tool-expanded :is(.tool-result, .tool-diff, .copy-code-block) { font-size: 0.92em; }
 .tool-expanded .copy-code-block { margin: 2px 0 0; }
 .tool-expanded .copy-code-block pre { padding: 6px 36px 6px 8px; }
-.tool-card.output-surface-tool > .tool-expanded { padding-left: 0; }
+.tool-card.output-surface-tool > .tool-expanded,
+.change-summary > .tool-expanded { padding-left: 0; }
 /* Tool results, summaries, and notices share one borderless card surface. */
-.tool-output-surface, .card, .notice, .change-summary {
+.tool-output-surface, .card, .notice {
   background: var(--surface-fill);
   border: 1px solid transparent;
   border-radius: var(--control-radius);
@@ -452,12 +459,14 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 }
 /* Commands, process checks, and file diffs use one header layout. Keep text
    and actions in normal flow so both are centered within the same line box. */
-.tool-output-surface:has(> .tool-output-header) { padding: 0; border-width: 0; }
-.tool-output-surface > .tool-output-header {
+.tool-output-surface:has(> .tool-output-header, > .change-file-item > .tool-output-header) { padding: 0; border-width: 0; }
+.tool-output-surface > .tool-output-header,
+.change-file-item > .tool-output-header {
   display: flex;
   align-items: center;
   gap: 6px;
-  min-height: 20px;
+  box-sizing: border-box;
+  min-height: 28px;
   margin: 0;
   padding: 4px 8px;
   background: transparent;
@@ -490,7 +499,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   margin: 0;
   padding: 5px 8px 6px;
 }
-.tool-output-surface > .card-separator + .tool-diff { padding: 0; }
+.tool-output-surface > .card-separator + .tool-diff,
+.change-file-item > .card-separator + .tool-diff { padding: 0; }
 .tool-question-section { overflow-wrap: anywhere; }
 .tool-question-section > :first-child { margin-top: 0; }
 .tool-question-section > :last-child { margin-bottom: 0; }
@@ -549,16 +559,15 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .review-btn { flex: 0 0 auto; background: transparent; color: var(--vscode-descriptionForeground); border: 1px solid transparent; border-radius: var(--control-radius); padding: 2px 9px; font: inherit; font-size: 0.78em; line-height: 1.35; cursor: pointer; text-transform: none; outline: none; }
 .review-btn:hover, .review-btn:focus-visible { background: var(--surface-fill-strong); color: var(--vscode-foreground); border-color: transparent; }
 .tool-diff.edit-preview { background: transparent; border: 0; border-radius: 0; padding: 3px 0; margin: 0; max-height: 240px; line-height: 1.2; }
-.change-summary { overflow: hidden; margin-top: 2px; }
+.change-summary { margin-top: 2px; color: var(--tool-idle); }
 /* Borders keep every file divider equally thin at fractional row positions. */
 .change-summary .card-separator { height: 0; border-top: 1px solid var(--surface-stroke); background: transparent; }
-.change-summary-head { display: flex; align-items: center; gap: 7px; padding: 5px 7px; background: var(--surface-fill-strong); }
-.change-summary-toggle { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; padding: 0; background: transparent; border: 0; color: var(--vscode-foreground); font: inherit; text-align: left; cursor: pointer; }
-.change-summary-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
-.change-summary-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
-.change-summary .review-btn { border: 0; }
-.change-summary .review-btn:hover { background: var(--surface-fill); border-color: transparent; }
-.change-file-row { width: 100%; min-height: 28px; display: flex; align-items: center; gap: 7px; padding: 4px 7px; background: transparent; border: 0; color: var(--vscode-descriptionForeground); font: inherit; text-align: left; cursor: pointer; }
+.change-summary-head { display: flex; align-items: center; gap: 8px; }
+.change-summary-toggle { flex: 0 1 auto; background: transparent; border: 0; color: inherit; font: inherit; text-align: left; }
+.change-summary-title { flex-shrink: 1; }
+.change-summary-toggle > .diff-stat-group { margin-left: 8px; }
+.change-summary .review-btn { margin-left: auto; }
+.change-file-row { width: 100%; border: 0; text-align: left; cursor: pointer; }
 .change-file-row:is(:hover, :focus-visible) { color: var(--vscode-foreground); background: var(--surface-fill); }
 /* Continue the row fill across adjacent dividers, including their side insets. */
 .change-file-list > .card-separator:has(+ .change-file-item > .change-file-row:is(:hover, :focus-visible)),
@@ -568,8 +577,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   border-color: transparent;
   background: var(--surface-fill);
 }
-.change-file-path { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.change-summary .tool-diff.edit-preview { max-height: 320px; }
+.change-file-path { flex: 1; min-width: 0; display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tool-diff .diff-lines { display: grid; width: max-content; min-width: 100%; }
 .tool-diff .diff-line { position: relative; display: grid; width: 100%; min-width: 0; grid-template-columns: 6ch minmax(0, 1fr); min-height: 0; padding: 2px 0; line-height: 1.2; white-space: pre; }
 .tool-diff .diff-line::before { content: ""; position: absolute; inset: 0 auto 0 0; width: 3px; background: transparent; }

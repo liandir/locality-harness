@@ -1168,26 +1168,28 @@ function renderFileChangeSummary(parent: HTMLElement, m: Message): void {
   if (summary.dataset.changeSummary !== m.id) summary.dataset.changeSummary = m.id;
   const totals = totalFileChangeStats(changes);
   setHtml(summary, `<div class="change-summary-head">
-      <button class="change-summary-toggle" type="button" data-file-changes-toggle="${m.id}" aria-expanded="${expanded}">
+      <button class="tool-head disclosure-trigger change-summary-toggle" type="button" data-file-changes-toggle="${m.id}" aria-expanded="${expanded}">
+        <span class="tool-icon">${pencilIcon()}</span>
+        <span class="tool-name change-summary-title">Edited ${changes.length} file${changes.length === 1 ? "" : "s"}</span>
+        ${diffStatHtml(totals)}
         ${chevronIcon()}
-        <span class="change-summary-main">
-          <span class="change-summary-title">Edited ${changes.length} file${changes.length === 1 ? "" : "s"}</span>
-          <span class="diff-stat-group"><span class="diff-stat add">+${totals.added}</span><span class="diff-stat del">-${totals.removed}</span></span>
-        </span>
       </button>
       <button class="review-btn change-review-btn" type="button" data-review-workspace-changes>Review</button>
     </div>
-    ${expanded ? `<div class="change-file-list">${changes.map((change, index) => renderFileChangeRow(m, change, index)).join(CARD_SEPARATOR_HTML)}</div>` : ""}`);
+    ${expanded ? `<div class="tool-expanded">${renderToolOutputSurface(
+      changes.map((change, index) => renderFileChangeRow(m, change, index)).join(CARD_SEPARATOR_HTML),
+      false, " change-file-list"
+    )}</div>` : ""}`);
 }
 
 function renderFileChangeRow(m: Message, change: FileChangeSummary, index: number): string {
   const key = fileChangeKey(index);
   const expanded = m.expandedFileChanges?.has(key) ?? false;
   return `<div class="change-file-item${expanded ? " open" : ""}">
-    <button class="change-file-row" type="button" data-file-change-toggle="${m.id}|${key}" aria-expanded="${expanded}">
+    <button class="tool-output-header tool-change-head disclosure-trigger change-file-row" type="button" data-file-change-toggle="${m.id}|${key}" aria-expanded="${expanded}">
+      <span class="tool-label-main change-file-path">${escapeHtml(change.path)}</span>
+      ${diffStatHtml(change)}
       ${chevronIcon()}
-      <span class="change-file-path">${escapeHtml(change.path)}</span>
-      <span class="diff-stat-group"><span class="diff-stat add">+${change.added}</span><span class="diff-stat del">-${change.removed}</span></span>
     </button>
     ${expanded ? `${CARD_SEPARATOR_HTML}<pre class="tool-diff edit-preview change-diff">${renderDiffLines(change.diffPreview, change.path)}</pre>` : ""}
   </div>`;
