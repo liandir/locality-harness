@@ -1,17 +1,18 @@
 import { safeFetch } from "../../network/safeFetch.js";
 import { searchDestination } from "./providers.js";
 import { additionalPolicy } from "./networkPolicy.js";
+import { DEFAULT_SEARCH_COUNT, DEFAULT_SEARCH_MAX_RESULTS, MAX_SEARCH_RESULTS, normalizeSearchMaxResults } from "./limits.js";
 
 /** Messages from this class are safe to show in tool cards and settings. */
 export class SearchError extends Error {}
 export interface SearchOptions { apiKey?: string; signal?: AbortSignal }
 export interface SearchRequest { query: string; count: number }
 export interface SearchResult { title: string; url: string; snippet: string; published?: string }
-export function searchRequest(args: Record<string, unknown>): SearchRequest {
+export function searchRequest(args: Record<string, unknown>, maxResults = DEFAULT_SEARCH_MAX_RESULTS): SearchRequest {
   if (typeof args.query !== "string" || !args.query.trim() || args.query.length > 500) throw new Error("Search query must contain 1–500 characters.");
-  const count = args.count ?? 5;
-  if (typeof count !== "number" || !Number.isInteger(count) || count < 1 || count > 10) throw new Error("Search count must be 1–10.");
-  return { query: args.query.trim(), count };
+  const count = args.count ?? DEFAULT_SEARCH_COUNT;
+  if (typeof count !== "number" || !Number.isInteger(count) || count < 1 || count > MAX_SEARCH_RESULTS) throw new Error(`Search count must be 1–${MAX_SEARCH_RESULTS}.`);
+  return { query: args.query.trim(), count: Math.min(count, normalizeSearchMaxResults(maxResults)) };
 }
 export async function searchUrl(endpoint: string): Promise<URL> {
   if (!endpoint.trim()) throw new SearchError("Configure the Web search endpoint in Settings first.");

@@ -136,12 +136,16 @@ describe("edition composition", () => {
       + (api.sideFeature.renderSection?.(settings as unknown as Record<string, unknown>, (key, label) => `${key}:${label}`, value => value) ?? "");
     expect(html.includes("Auto-approve safe commands")).toBe(profile === "safe-list");
     expect(html.includes("Auto-approve web requests")).toBe(profile === "advanced");
+    expect(html.includes('id="webSearchMaxResults"')).toBe(profile === "advanced");
     expect(html.includes('id="webSearchEndpoint"')).toBe(profile === "advanced");
     expect(html.includes('id="webSearchApiKey"')).toBe(profile === "advanced");
     expect(typeof api.createSideHost === "function").toBe(profile === "advanced");
     if (profile !== "advanced") {
       expect(text).not.toContain("autoapproveWebSearch");
       expect(text).not.toMatch(/read_webpage|webToolsEnabled|webSearchApiKey|validateWebSearch|webSearchSettings|pinnedTransport|Bearer|api\.search\.brave\.com|X-Subscription-Token/);
+      expect(text).not.toContain("webSearchMaxResults");
+      expect(settings).not.toHaveProperty("webSearchMaxResults");
+      await expect(api.writeSetting("webSearchMaxResults", 20)).rejects.toThrow("unavailable");
       expect(settings).not.toHaveProperty("webSearchEndpoint");
       expect(settings).not.toHaveProperty("autoapproveWebSearch");
       await expect(api.writeSetting("autoapproveWebSearch", true)).rejects.toThrow("unavailable");
@@ -208,6 +212,37 @@ describe("edition composition", () => {
     for (const mode of ["act", "plan", "review"] as const) {
       expect(api.toolsForMode(mode, "native", false, false, configured).map(tool => tool.name)).toContain("web_search");
       expect(api.buildSystemPrompt({ family: "gemma4", mode, nativeTools: true, workspaceRoot: "/tmp", featureSettings: configured })).toContain("The user approves each web request");
+    }
+  });
+
+  it("saves the search result limit from Tools settings and advertises it in every mode", async () => {
+    const values: Record<string, unknown> = { webSearchEndpoint: "https://search.example" };
+    const { api } = await probe("advanced", values);
+    expect(api.readSettings().webSearchMaxResults).toBe(10);
+    const listeners = new Map<string, (event: Event) => void>();
+    const root = { querySelector: (selector: string) => ({ addEventListener: (_event: string, listener: (event: Event) => void) => listeners.set(selector, listener) }) } as unknown as HTMLElement;
+    const messages: unknown[] = [];
+    api.sideFeature.bind(root, message => messages.push(message));
+    for (const [raw, expected] of [["20", 20], ["3", 3], ["30", 20], ["0", 1], ["3.8", 3], ["", 10]] as const) {
+      const input = { value: String(raw) };
+      listeners.get("#webSearchMaxResults")!({ currentTarget: input } as unknown as Event);
+      expect(input.value).toBe(String(expected));
+      expect(messages.at(-1)).toEqual({ type: "saveSetting", key: "webSearchMaxResults", value: expected });
+      await api.writeSetting("webSearchMaxResults", expected);
+      expect(values.webSearchMaxResults).toBe(expected);
+      const settings = api.readSettings();
+      expect(settings.webSearchMaxResults).toBe(expected);
+      const html = api.sideFeature.renderSection!(settings as unknown as Record<string, unknown>, () => "", value => value);
+      expect(html).toContain("Maximum number of search results");
+      expect(html).toContain(`min="1" max="20" step="1" value="${expected}"`);
+      for (const mode of ["act", "plan", "review"] as const) for (const transport of ["native", "legacy"] as const) {
+        const prompt = api.buildSystemPrompt({ family: "gemma4", mode, nativeTools: transport === "native", workspaceRoot: "/tmp", featureSettings: settings });
+        expect(prompt).toContain(`at most ${expected} results per call`);
+      }
+    }
+    for (const [value, expected] of [[undefined, 10], [null, 10], ["20", 10], [NaN, 10], [Infinity, 10], [-1, 1], [50, 20], [4.8, 4]] as const) {
+      await api.writeSetting("webSearchMaxResults", value);
+      expect(api.readSettings().webSearchMaxResults).toBe(expected);
     }
   });
 

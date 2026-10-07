@@ -1,5 +1,6 @@
 import { sideFeature as commands } from "../commands/full/side.js";
 import type { SideFeature } from "../../build/sideContracts.js";
+import { MAX_SEARCH_RESULTS, normalizeSearchMaxResults } from "../webSearch/limits.js";
 
 // Drafts stay in this webview only; never persist the key in getState/setState.
 let endpoint: string | undefined;
@@ -17,7 +18,10 @@ export const sideFeature: SideFeature = {
     + toggle("autoapproveWebSearch", "Auto-approve web requests", settings.autoapproveWebSearch === true, settings.webRequestsEnabled === false || settings.webToolsEnabled !== true),
   renderSection(settings, _toggle, escape) {
     const disabled = testing || !loaded ? "disabled" : "";
-    return `<div class="connection-settings" aria-label="Web search settings">
+    return `<label class="field-label" for="webSearchMaxResults">Maximum number of search results</label>
+      <input id="webSearchMaxResults" type="number" min="1" max="${MAX_SEARCH_RESULTS}" step="1" value="${normalizeSearchMaxResults(settings.webSearchMaxResults)}" aria-describedby="webSearchMaxResultsHelp" />
+      <p id="webSearchMaxResultsHelp" class="setting-help">Caps results per search. The model may request fewer.</p>
+      <div class="connection-settings" aria-label="Web search settings">
         <label class="field-label" for="webSearchEndpoint">Web search endpoint</label>
         <div class="setting-action-row">
           <input id="webSearchEndpoint" type="text" value="${escape(endpoint ?? String(settings.webSearchEndpoint ?? ""))}" placeholder="https://search.example.org" ${disabled} />
@@ -30,6 +34,12 @@ export const sideFeature: SideFeature = {
   },
   bind(root, send, render) {
     commands.bind(root, send);
+    root.querySelector<HTMLInputElement>("#webSearchMaxResults")?.addEventListener("change", event => {
+      const input = event.currentTarget as HTMLInputElement;
+      const value = normalizeSearchMaxResults(input.value.trim() ? Number(input.value) : undefined);
+      input.value = String(value);
+      send({ type: "saveSetting", key: "webSearchMaxResults", value });
+    });
     const endpointInput = root.querySelector<HTMLInputElement>("#webSearchEndpoint");
     const keyInput = root.querySelector<HTMLInputElement>("#webSearchApiKey");
     // Assign as an input property, keeping credentials out of generated markup.

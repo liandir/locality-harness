@@ -49,8 +49,38 @@ describe("SearXNG search", () => {
     await expect(searchWeb("https://search.example", { query: "docs", count: 5 })).rejects.toThrow("invalid JSON");
   });
 
-  it.each([{ query: "" }, { query: "x".repeat(501) }, { query: "x", count: 0 }, { query: "x", count: 11 }])("rejects invalid arguments", args => {
+  it.each([{ query: "" }, { query: "x".repeat(501) }, { query: "x", count: 0 }, { query: "x", count: 21 }, { query: "x", count: 1.5 }])("rejects invalid arguments", args => {
     expect(() => searchRequest(args)).toThrow();
+  });
+
+  it.each([
+    [undefined, undefined, 5],
+    [20, undefined, 10],
+    [undefined, 2, 2],
+    [20, 12, 12],
+    [3, 20, 3],
+    [20, 20, 20]
+  ])("caps requested count %s with setting %s at %s", (count, maximum, expected) => {
+    expect(searchRequest({ query: "docs", count }, maximum).count).toBe(expected);
+  });
+
+  it.each([3, 20])("enforces the current %s-result limit after approval and displays every result", async maximum => {
+    const feature = createSearchFeature();
+    const args = { query: "docs", count: 20 };
+    const settings = { webSearchEndpoint: "https://search.example", webToolsEnabled: true, webSearchMaxResults: 20 } as HarnessSettings;
+    await feature.prepare("web_search", args, settings);
+    mocks.settings.mockReturnValue({ ...settings, webSearchMaxResults: maximum });
+    mocks.fetch.mockImplementation((_endpoint, url: string) => Promise.resolve(
+      new URL(url).hostname === "search.example"
+        ? new Response(JSON.stringify({ results: Array.from({ length: 25 }, (_, i) => ({
+          title: `Result ${i}`, url: `https://example.org/page${i}`, content: "Snippet"
+        })) }))
+        : new Response("", { status: 404 })
+    ));
+    const result = await feature.execute("web_search", args, "limit");
+    expect(JSON.parse(result.result).results).toHaveLength(maximum);
+    const html = chatFeature.renderResult!({ toolId: "limit", toolName: "web_search", status: "executed", resultPreview: result.result }, value => value, "<hr>");
+    expect(html?.match(/class="tool-filelist-item"/g)).toHaveLength(maximum);
   });
 
   it("renders escaped clickable sources, never active provider HTML", () => {
