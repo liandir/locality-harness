@@ -313,9 +313,9 @@ export class ChatSession {
 
   isTurnActive(): boolean { return this.activeTurn !== undefined; }
 
-  async undoResponseFiles(userTs: number, check: (absolute: string) => void | Promise<void>): Promise<void> {
+  async undoResponseFiles(userTs: number, check: (absolute: string) => void | Promise<void>, filePath?: string): Promise<void> {
     if (this.isTurnActive()) throw new Error("Wait for the response to finish before undoing its edits.");
-    const messages = turnFileEdits(this.record.messages, userTs);
+    const messages = turnFileEdits(this.record.messages, userTs, filePath);
     const result = await undoFiles(this.workspaceRoot, fileUndoPlan(messages), check);
     const undone = new Set(result.undonePaths);
     for (const message of messages) {
@@ -924,7 +924,8 @@ export class ChatSession {
 
     if (isFirstMessage) this.queueTitleGeneration(text || `Attachment: ${attachments[0]?.fileName ?? "file"}`, s, text);
 
-    if (!(await this.prepareContextForModelRequest(s, { reload: true }))) return;
+    // Compaction preserves the transcript; keep the live response and its tool timeline.
+    if (!(await this.prepareContextForModelRequest(s, { reload: false }))) return;
 
     await this.runTurn(s, messageId);
   }
@@ -973,7 +974,8 @@ export class ChatSession {
 
     const s = readSettings();
     if (index === 0) this.queueTitleGeneration(text || `Attachment: ${edited.attachments?.[0]?.fileName ?? "file"}`, s, text);
-    if (!(await this.prepareContextForModelRequest(s, { reload: true }))) return;
+    // Compaction preserves the transcript; keep the live response and its tool timeline.
+    if (!(await this.prepareContextForModelRequest(s, { reload: false }))) return;
     await this.runTurn(s, responseMessageId);
   }
 
@@ -1226,7 +1228,7 @@ export class ChatSession {
         resultPreview: latest?.status === "failed" ? latest.processOutput : displayResult ?? resultPreview,
         diffPreview: fileChange?.diffPreview ?? diffPreview,
         fileUndoState,
-        fileUndoPath: fileUndo?.path,
+        fileUndoPath: fileChange?.path,
         added,
         removed,
         createsNewFile,

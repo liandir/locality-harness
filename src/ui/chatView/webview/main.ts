@@ -264,7 +264,7 @@ interface State {
   autoScroll: boolean;
   savedScrollTop: number;
   scrollDownOpacity: number;
-  pendingFileUndoTs?: number;
+  pendingFileUndo?: { userMessageTs: number; path?: string };
   pendingPlanMessageTs?: number;
   planning: boolean;
   compactAvailable: boolean;
@@ -703,11 +703,11 @@ function scheduleFollowScroll(body: HTMLElement): void {
   });
 }
 
-/** Keep horizontal scrollbars below the header's normal text/action row. */
+/** Apply the same overflow spacing to command and file headers. */
 function syncToolHeaderScrollbars(): void {
   // Read all widths before applying spacing so streaming updates need one layout.
   const headers = Array.from(root.querySelectorAll<HTMLElement>(".tool-output-header"), header => {
-    const scroller = header.querySelector<HTMLElement>("pre");
+    const scroller = header.querySelector<HTMLElement>(":scope > pre, :scope > .tool-header-scroll");
     return {
       header,
       overflowing: !!scroller && scroller.clientWidth > 0 && scroller.scrollWidth > scroller.clientWidth
@@ -1170,21 +1170,16 @@ function renderFileChangeSummary(parent: HTMLElement, m: Message): HTMLElement |
   if (summary.className !== cls) summary.className = cls;
   if (summary.dataset.changeSummary !== m.id) summary.dataset.changeSummary = m.id;
   const totals = totalFileChangeStats(changes);
-  const edits = m.toolCards.filter(card => card.status === "executed" && isWriteToolCard(card));
-  const undone = edits.length > 0 && edits.every(card => card.fileUndoState === "undone");
-  const available = edits.length > 0 && edits.every(card => !!card.fileUndoState) && !undone;
-  const undoPending = m.responseToTs !== undefined && state.pendingFileUndoTs === m.responseToTs;
-  const undoTip = undone ? "File edits from this response were undone" : !available
-    ? "Undo is unavailable: complete file snapshots were not saved"
-    : "Undo file edits from this response";
   setHtml(summary, `<div class="change-summary-head">
-      <button class="tool-head disclosure-trigger change-summary-toggle" type="button" data-file-changes-toggle="${m.id}" aria-expanded="${expanded}">
-        <span class="tool-icon">${pencilIcon()}</span>
-        <span class="tool-name change-summary-title">Edited ${changes.length} file${changes.length === 1 ? "" : "s"}</span>
-        ${diffStatHtml(totals)}
-        ${chevronIcon()}
-      </button>
-      <button class="quiet-btn change-undo-btn" type="button" data-undo-response="${m.responseToTs ?? ""}" data-tip="${undoTip}" aria-label="${undoTip}" ${!available || state.busy || undoPending || m.responseToTs === undefined ? "disabled" : ""}>${undone ? "Undone" : undoPending ? "Undoing…" : "Undo"}</button>
+      <div class="tool-header-scroll">
+        <button class="tool-head disclosure-trigger change-summary-toggle" type="button" data-file-changes-toggle="${m.id}" aria-expanded="${expanded}">
+          <span class="tool-icon">${pencilIcon()}</span>
+          <span class="tool-name change-summary-title">Edited ${changes.length} file${changes.length === 1 ? "" : "s"}</span>
+          ${diffStatHtml(totals)}
+          ${chevronIcon()}
+        </button>
+      </div>
+      ${renderFileUndoButton(m)}
     </div>
     ${expanded ? `<div class="tool-expanded">${renderToolOutputSurface(
       changes.map((change, index) => renderFileChangeRow(m, change, index)).join(CARD_SEPARATOR_HTML),
@@ -1197,13 +1192,32 @@ function renderFileChangeRow(m: Message, change: FileChangeSummary, index: numbe
   const key = fileChangeKey(index);
   const expanded = m.expandedFileChanges?.has(key) ?? false;
   return `<div class="change-file-item${expanded ? " open" : ""}">
-    <button class="tool-output-header tool-change-head disclosure-trigger change-file-row" type="button" data-file-change-toggle="${m.id}|${key}" aria-expanded="${expanded}">
-      <span class="tool-label-main change-file-path">${escapeHtml(change.path)}</span>
-      ${diffStatHtml(change)}
-      ${chevronIcon()}
-    </button>
+    <div class="tool-output-header tool-change-head change-file-row">
+      <div class="tool-header-scroll">
+        <button class="tool-header-content disclosure-trigger change-file-toggle" type="button" data-file-change-toggle="${m.id}|${key}" aria-expanded="${expanded}">
+          <span class="tool-label-main change-file-path">${escapeHtml(change.path)}</span>
+          ${diffStatHtml(change)}
+          ${chevronIcon()}
+        </button>
+      </div>
+      ${renderFileUndoButton(m, change.path)}
+    </div>
     ${expanded ? `${CARD_SEPARATOR_HTML}<pre class="tool-diff edit-preview change-diff">${renderDiffLines(change.diffPreview, change.path)}</pre>` : ""}
   </div>`;
+}
+
+function renderFileUndoButton(m: Message, filePath?: string): string {
+  const edits = m.toolCards.filter(card => card.status === "executed" && isWriteToolCard(card)
+    && (filePath === undefined || card.fileUndoPath === filePath));
+  const undone = edits.length > 0 && edits.every(card => card.fileUndoState === "undone");
+  const available = edits.length > 0 && edits.every(card => !!card.fileUndoState) && !undone;
+  const undoPending = m.responseToTs !== undefined && state.pendingFileUndo?.userMessageTs === m.responseToTs
+    && state.pendingFileUndo.path === filePath;
+  const subject = filePath === undefined ? "all files from this response" : filePath;
+  const undoTip = undone ? `Edits to ${subject} were undone` : !available
+    ? "Undo is unavailable: complete file snapshots were not saved"
+    : `Undo edits to ${subject}`;
+  return `<button class="quiet-btn change-undo-btn" type="button" data-undo-response="${m.responseToTs ?? ""}"${filePath === undefined ? "" : ` data-undo-file="${escapeHtml(filePath)}"`} data-tip="${escapeHtml(undoTip)}" aria-label="${escapeHtml(undoTip)}" ${!available || state.busy || state.pendingFileUndo || m.responseToTs === undefined ? "disabled" : ""}>${undone ? "Undone" : undoPending ? "Undoing…" : "Undo"}</button>`;
 }
 
 function totalFileChangeStats(changes: FileChangeSummary[]): { added: number; removed: number } {
@@ -2573,9 +2587,13 @@ function renderChangeCard(tc: ToolCard, errorText?: string): string {
     return `${parsed.marker ? `${parsed.marker} ` : "  "}${parsed.code}`;
   }).join("\n");
   const content = `<div class="tool-output-header tool-change-head">
-      <span class="tool-label-main">${renderToolPathLabel(tc)}</span>
-      ${stats ? diffStatHtml(stats) : ""}
-      ${operation ? `<span class="tool-change-operation">${escapeHtml(operation)}</span>` : ""}
+      <div class="tool-header-scroll">
+        <div class="tool-header-content">
+          <span class="tool-label-main">${renderToolPathLabel(tc)}</span>
+          ${stats ? diffStatHtml(stats) : ""}
+          ${operation ? `<span class="tool-change-operation">${escapeHtml(operation)}</span>` : ""}
+        </div>
+      </div>
       ${hasDiff ? `<button class="icon-btn copy-btn block-code-copy-btn icon-btn-compact tool-change-copy" type="button" data-copy-code aria-label="Copy diff">${copyIcon()}</button>` : ""}
     </div>
     ${hasError || hasDiff || unavailable ? CARD_SEPARATOR_HTML : ""}
@@ -3369,8 +3387,9 @@ function bindOnce(): void {
     const undoButton = target.closest<HTMLButtonElement>("[data-undo-response]");
     if (undoButton && !undoButton.disabled) {
       const userMessageTs = Number(undoButton.dataset.undoResponse);
-      state.pendingFileUndoTs = userMessageTs;
-      send({ type: "undoResponseFiles", userMessageTs });
+      const path = undoButton.dataset.undoFile;
+      state.pendingFileUndo = { userMessageTs, path };
+      send({ type: "undoResponseFiles", userMessageTs, path });
       render();
       return;
     }
@@ -4095,7 +4114,7 @@ function loadFromRecord(rec: ChatRecord): void {
     state.chatModeMenuOpen = false;
   }
   state.messages = [];
-  state.pendingFileUndoTs = undefined;
+  state.pendingFileUndo = undefined;
   state.notices = [];
   const fileChanges = restoredToolFileChanges(rec);
   let currentUserTs: number | undefined;
@@ -4231,7 +4250,7 @@ function handleHostMessage(msg: ExtToChat): void {
       return;
     }
     if (msg.type === "fileUndoFinished") {
-      if (state.pendingFileUndoTs === msg.userMessageTs) state.pendingFileUndoTs = undefined;
+      if (state.pendingFileUndo?.userMessageTs === msg.userMessageTs) state.pendingFileUndo = undefined;
       render();
       return;
     }
@@ -4353,7 +4372,7 @@ function handleHostMessage(msg: ExtToChat): void {
       state.hasChat = false;
       state.chatTitle = "Chat";
       state.messages = [];
-      state.pendingFileUndoTs = undefined;
+      state.pendingFileUndo = undefined;
       state.queuedMessages = [];
       state.editingQueuedMessageId = undefined;
       state.queuedMessageDraft = "";

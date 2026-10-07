@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type * as vscode from "vscode";
+import * as path from "node:path";
 import type { ChatRecord, ChatStorage } from "../src/chat/storage.js";
 import type { ChatToExt, ExtToChat } from "../src/ui/messaging.js";
 
@@ -18,7 +19,7 @@ function fixture() {
       fileChange: { path: "a.ts", added: 1, removed: 1, diffPreview: "" },
       fileUndo: { path: "a.ts", previous: "original secret", next: "modified" }, fileUndoState: "available" } }
   ] } as ChatRecord;
-  const undo = vi.fn(async (_ts: number, check: (path: string) => Promise<void>) => { await check("/tmp/a.ts"); });
+  const undo = vi.fn(async (_ts: number, check: (path: string) => Promise<void>) => { await check(path.resolve("/tmp/a.ts")); });
   const session = { getRecord: () => record, isTurnActive: () => false, isPlanning: () => false, undoResponseFiles: undo };
   const storage = { list: vi.fn(async () => []) } as unknown as ChatStorage;
   let currentStorage: ChatStorage | undefined = storage;
@@ -40,9 +41,36 @@ describe("file Undo host action", () => {
     const f = fixture();
     await f.internal.onMessage({ type: "undoResponseFiles", userMessageTs: 1 });
     expect(mocks.warning).toHaveBeenCalledWith("Undo edits to 1 file?", expect.objectContaining({ modal: true, detail: expect.stringContaining("a.ts") }), "Undo");
-    expect(f.undo).toHaveBeenCalledExactlyOnceWith(1, expect.any(Function));
+    expect(f.undo).toHaveBeenCalledExactlyOnceWith(1, expect.any(Function), undefined);
     expect(f.changed).toHaveBeenCalled();
     expect(mocks.error).not.toHaveBeenCalled();
+  });
+
+  it("confirms and undoes only the selected file, even with unrelated legacy edits", async () => {
+    const f = fixture();
+    const other = structuredClone(f.record.messages[1]);
+    other.ts = 3;
+    other.toolCall!.fileChange!.path = "legacy.ts";
+    delete other.toolCall!.fileUndo;
+    delete other.toolCall!.fileUndoState;
+    f.record.messages.push(other);
+
+    await f.internal.onMessage({ type: "undoResponseFiles", userMessageTs: 1, path: "a.ts" });
+
+    expect(mocks.warning).toHaveBeenCalledWith("Undo edits to 1 file?", expect.objectContaining({
+      detail: expect.stringContaining("a.ts")
+    }), "Undo");
+    expect(mocks.warning.mock.calls[0][1].detail).not.toContain("legacy.ts");
+    expect(f.undo).toHaveBeenCalledExactlyOnceWith(1, expect.any(Function), "a.ts");
+    expect(mocks.error).not.toHaveBeenCalled();
+  });
+
+  it.each(["missing.ts", ""])("refuses an unknown file selection (%s) without undoing the batch", async filePath => {
+    const f = fixture();
+    await f.internal.onMessage({ type: "undoResponseFiles", userMessageTs: 1, path: filePath });
+    expect(f.undo).not.toHaveBeenCalled();
+    expect(mocks.warning).not.toHaveBeenCalled();
+    expect(mocks.error).toHaveBeenCalledWith(expect.stringContaining("no file edits"));
   });
 
   it("does nothing after cancellation", async () => {
@@ -71,7 +99,7 @@ describe("file Undo host action", () => {
 
   it("refuses to replace an editor's unsaved contents", async () => {
     const f = fixture();
-    mocks.documents.push({ uri: { scheme: "file", fsPath: "/tmp/a.ts" }, isDirty: true });
+    mocks.documents.push({ uri: { scheme: "file", fsPath: path.resolve("/tmp/a.ts") }, isDirty: true });
     await f.internal.onMessage({ type: "undoResponseFiles", userMessageTs: 1 });
     expect(mocks.error).toHaveBeenCalledWith(expect.stringContaining("unsaved edits"));
   });

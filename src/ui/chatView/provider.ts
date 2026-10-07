@@ -750,7 +750,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         break;
       case "undoResponseFiles": {
         const runtime = this.active;
-        this.fileUndoTask = this.undoResponseFiles(runtime, m.userMessageTs);
+        this.fileUndoTask = this.undoResponseFiles(runtime, m.userMessageTs, m.path);
         try { await this.fileUndoTask; }
         finally {
           this.fileUndoTask = undefined;
@@ -768,7 +768,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  private async undoResponseFiles(runtime: ChatRuntime, userMessageTs: number): Promise<void> {
+  private async undoResponseFiles(runtime: ChatRuntime, userMessageTs: number, filePath?: string): Promise<void> {
     const session = runtime.session;
     const storage = runtime.storage;
     const workspaceRoot = this.getWorkspaceRoot();
@@ -782,7 +782,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     };
     try {
       available();
-      const plan = fileUndoPlan(turnFileEdits(session.getRecord().messages, userMessageTs));
+      const plan = fileUndoPlan(turnFileEdits(session.getRecord().messages, userMessageTs, filePath));
       const choice = await vscode.window.showWarningMessage(
         `Undo edits to ${plan.length} file${plan.length === 1 ? "" : "s"}?`,
         { modal: true, detail: "Restore the files to their contents before this response. Files created by the response will be removed. Undo will stop if a file has newer changes or unsaved edits.\n\n" + plan.map(change => change.path).join("\n") },
@@ -800,7 +800,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           catch { documentPath = path.resolve(document.uri.fsPath); }
           if (documentPath === absolute) throw new Error(`Save or discard unsaved edits in ${path.basename(absolute)} before undoing.`);
         }
-      });
+      }, filePath);
     } catch (error) { await vscode.window.showErrorMessage((error as Error).message); }
     finally {
       if (attempted && !runtime.removed && storage === this.getStorage()) {
