@@ -1094,7 +1094,7 @@ function renderAttachmentHtml(attachment: UiAttachment, removeAttribute = ""): s
   return `<span class="composer-attachment-item">
     ${renderAttachmentPreview(attachment, "composer-attachment-preview")}
     <span class="composer-attachment-name" data-tip="${escapeHtml(attachment.fileName)}">${escapeHtml(attachment.fileName)}</span>
-    ${removeAttribute ? `<button type="button" class="icon-btn remove composer-attachment-remove" ${removeAttribute}="${escapeHtml(attachment.id)}" aria-label="Remove ${escapeHtml(attachment.fileName)}">&times;</button>` : ""}
+    ${removeAttribute ? `<button type="button" class="action-btn icon-btn icon-btn-compact composer-attachment-remove" ${removeAttribute}="${escapeHtml(attachment.id)}" aria-label="Remove ${escapeHtml(attachment.fileName)}">${closeIcon()}</button>` : ""}
   </span>`;
 }
 
@@ -2264,7 +2264,7 @@ function updateContextPill(): void {
   const pct = Math.round(ratio * 100);
   const dangerAt = state.autoCompact ? 0.9 : state.autoCompactThresholdPercent / 100;
   const pctClass = ratio >= dangerAt ? "danger" : "ok";
-  const contextHint = compacting ? "Compacting context…"
+  const contextHint = compacting ? "Compaction in progress..."
     : state.compactHintOverride ?? `Context: ${state.tokens} / ${state.limit} tokens. Click to compact.`;
   const compact = root.querySelector("#compact") as HTMLElement | null;
   compact?.classList.toggle("danger", !compacting && pctClass === "danger");
@@ -2273,7 +2273,7 @@ function updateContextPill(): void {
   compact?.classList.toggle("active-menu", state.compactMenuOpen);
   compact?.setAttribute("aria-disabled", String(compacting || !state.compactAvailable));
   compact?.setAttribute("aria-busy", String(compacting));
-  compact?.setAttribute("aria-label", compacting ? "Compacting context" : "Compact context");
+  compact?.setAttribute("aria-label", compacting ? contextHint : "Compact context");
   compact?.setAttribute("aria-expanded", String(state.compactMenuOpen));
   if (compact) compact.dataset.tip = contextHint;
   const hint = root.querySelector("#compactHint") as HTMLElement | null;

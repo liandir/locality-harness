@@ -25,6 +25,7 @@ body:is(.vscode-light, .vscode-high-contrast-light) {
 :where(button) { background: transparent; color: inherit; border: 1px solid transparent; border-radius: var(--control-radius); font: inherit; cursor: pointer; outline: none; transition: background 0.12s, color 0.12s; }
 :where(button):disabled { opacity: 0.55; cursor: default; }
 :where(.action-btn) { background: var(--surface-fill); color: var(--button-foreground, var(--vscode-foreground)); padding: 5px 14px; text-align: center; }
+:where(.action-btn.icon-btn) { --button-foreground: var(--vscode-foreground); --button-hover-fill: var(--surface-fill-strong); }
 .action-btn:is(:hover, :focus-visible):not(:disabled) { background: var(--button-hover-fill, var(--surface-fill-strong)); }
 .cancel-btn { --button-foreground: var(--error-foreground); --button-hover-fill: color-mix(in srgb, var(--vscode-errorForeground) 26%, transparent); background: color-mix(in srgb, var(--vscode-errorForeground) 16%, transparent); }
 .quiet-btn { color: var(--button-foreground, var(--vscode-descriptionForeground)); }

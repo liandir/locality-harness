@@ -658,7 +658,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .text-attachment-preview .workspace-file-link-icon { font-size: 22px; margin: 0; }
 .composer-attachment-name { min-width: 0; max-width: 145px; overflow: hidden; color: var(--vscode-descriptionForeground); font-size: 0.82em; line-height: 1.3; text-overflow: ellipsis; white-space: nowrap; }
 .composer-attachment-name:last-child { margin-right: 6px; }
-.composer-attachment-remove { --action-size: calc(var(--icon-action-size) - 2px); font-size: 17px; }
+.composer-attachment-remove { margin-inline-end: 3px; }
 .message-attachments { display: flex; flex-wrap: wrap; gap: 4px; min-width: 0; }
 .image-preview { position: fixed; inset: 0; z-index: 90; display: flex; align-items: center; justify-content: center; box-sizing: border-box; padding: 48px 18px 20px; background: color-mix(in srgb, var(--vscode-editor-background) 88%, transparent); }
 .image-preview[hidden] { display: none; }
