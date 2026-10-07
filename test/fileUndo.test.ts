@@ -26,6 +26,10 @@ describe("response file undo", () => {
       { role: "user", content: "next", ts: 5 }, edit({ path: "a", previous: "new", next: "later" }, 6)
     ];
     expect(turnFileEdits(messages, 1)).toEqual([first, second]);
+    expect(turnFileEdits(messages, 1, "a")).toEqual([first]);
+    expect(turnFileEdits(messages, 1, "b")).toEqual([second]);
+    expect(turnFileEdits(messages, 1, "missing")).toEqual([]);
+    expect(turnFileEdits(messages, 1, "")).toEqual([]);
     expect(turnFileEdits(messages, 3)).toEqual([]);
     expect(turnFileEdits(messages, 99)).toEqual([]);
   });
@@ -49,6 +53,7 @@ describe("response file undo", () => {
 
   it("restores exact contents and executable permissions, preserves empty files, and removes creations", async () => {
     await fs.writeFile(path.join(root, "script"), "new", { mode: 0o755 });
+    const originalMode = (await fs.stat(path.join(root, "script"))).mode & 0o777;
     await fs.writeFile(path.join(root, "empty"), "new");
     await fs.writeFile(path.join(root, "created"), "new");
     const result = await undoFiles(root, [
@@ -57,7 +62,7 @@ describe("response file undo", () => {
     ]);
     expect(result).toEqual({ undonePaths: ["script", "empty", "created"] });
     expect(await fs.readFile(path.join(root, "script"), "utf8")).toBe("#!/bin/sh\r\necho old\r\n");
-    expect((await fs.stat(path.join(root, "script"))).mode & 0o777).toBe(0o755);
+    expect((await fs.stat(path.join(root, "script"))).mode & 0o777).toBe(originalMode);
     expect(await fs.readFile(path.join(root, "empty"), "utf8")).toBe("");
     await expect(fs.stat(path.join(root, "created"))).rejects.toMatchObject({ code: "ENOENT" });
   });
@@ -76,7 +81,7 @@ describe("response file undo", () => {
     await fs.writeFile(path.join(root, "a"), "new");
     const changes = [{ path: "a", previous: "old", next: "new" }];
     await expect(undoFiles(root, changes, () => { throw new Error("Unsaved edits"); })).rejects.toThrow("Unsaved edits");
-    await fs.symlink(os.tmpdir(), path.join(root, "outside"));
+    await fs.symlink(os.tmpdir(), path.join(root, "outside"), process.platform === "win32" ? "junction" : "dir");
     for (const file of ["../outside", "outside/file"]) {
       await expect(undoFiles(root, [{ ...changes[0], path: file }])).rejects.toThrow("outside the workspace");
     }

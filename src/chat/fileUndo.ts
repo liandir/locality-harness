@@ -11,12 +11,13 @@ export interface FileUndoSnapshot {
   next: string;
 }
 
-export function turnFileEdits(messages: ChatMessage[], userTs: number): ChatMessage[] {
+export function turnFileEdits(messages: ChatMessage[], userTs: number, filePath?: string): ChatMessage[] {
   const start = messages.findIndex(message => message.role === "user" && !message.steering && message.ts === userTs);
   if (start < 0) return [];
   const end = messages.findIndex((message, index) => index > start && message.role === "user" && !message.steering);
   return messages.slice(start + 1, end < 0 ? undefined : end)
-    .filter(message => message.role === "tool" && message.toolCall?.status === "executed" && message.toolCall.fileChange);
+    .filter(message => message.role === "tool" && message.toolCall?.status === "executed" && message.toolCall.fileChange
+      && (filePath === undefined || message.toolCall.fileChange.path === filePath));
 }
 
 /** Refuse incomplete legacy history and intervening edits, rather than guessing. */

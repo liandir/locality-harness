@@ -3981,6 +3981,62 @@ describe("length-limited generation recovery", () => {
 });
 
 describe("separate transcript and model context", () => {
+  it.each(["new", "edited"])("keeps preflight auto-compaction in the %s response timeline", async input => {
+    mocks.settings.toolCallingMode = "native";
+    mocks.settings.autoCompact = true;
+    mocks.settings.autoCompactThresholdPercent = 50;
+    mocks.tokenize.mockImplementation(async (_endpoint: string, text: string) =>
+      text.includes("TRIGGER_COMPACTION") ? 20_000 : 1
+    );
+    mocks.streamChat.mockImplementation(async function* () {
+      yield { kind: "text", text: "Answer" };
+    });
+    const { ChatSession } = await import("../src/chat/session.js");
+    const record = newRecord();
+    record.toolCallingMode = "native";
+    record.title = "Existing chat";
+    record.messages = Array.from({ length: 8 }, (_, index) => ({
+      role: index % 2 === 0 ? "user" as const : "assistant" as const,
+      content: index === 0 ? "TRIGGER_COMPACTION" : `history ${index}`,
+      ts: index + 1
+    }));
+    if (input === "edited") record.messages.push(
+      { role: "user", content: "Original request", ts: 9 },
+      { role: "assistant", content: "Original answer", ts: 10 }
+    );
+    const events: UiEvent[] = [];
+    const session = new ChatSession({
+      storage: { save: vi.fn(async () => undefined) } as never,
+      workspaceRoot: "/tmp/workspace", record, emit: event => events.push(event)
+    });
+    try {
+      if (input === "edited") await session.editUserMessage(9, "Continue");
+      else await session.sendUserMessage("Continue");
+
+      const workIndex = events.findIndex(event => event.kind === "turnWorkStarted");
+      const compactIndex = events.findIndex(event => event.kind === "compactStart");
+      const compactEndIndex = events.findIndex(event => event.kind === "compactEnd");
+      const turnIndex = events.findIndex(event => event.kind === "turnStart");
+      expect(workIndex).toBeGreaterThan(-1);
+      expect(compactIndex).toBeGreaterThan(workIndex);
+      expect(compactEndIndex).toBeGreaterThan(compactIndex);
+      expect(turnIndex).toBeGreaterThan(compactEndIndex);
+      expect(events[compactEndIndex]).toMatchObject({ source: "auto", status: "executed" });
+      // Reloading here clears the live assistant message and strands compaction
+      // in a standalone row, outside the response's normal tool sub-sessions.
+      expect(events.slice(workIndex).filter(event => event.kind === "chatLoaded")).toEqual([]);
+      expect(events.slice(0, workIndex).filter(event => event.kind === "chatLoaded"))
+        .toHaveLength(input === "edited" ? 1 : 0);
+      const work = events.find(event => event.kind === "turnWorkStarted")!;
+      expect(events[turnIndex]).toEqual({ kind: "turnStart", messageId: work.messageId });
+      expect(events).toContainEqual({ kind: "text", messageId: work.messageId, delta: "Answer" });
+      expect(events).toContainEqual(expect.objectContaining({ kind: "turnEnd", messageId: work.messageId }));
+      expect(events.some(event => event.kind === "abort")).toBe(false);
+    } finally {
+      await session.shutdown();
+    }
+  });
+
   it.each(["complete", "cancel", "error"])("attributes an idle manual compaction to the next prompt, including %s", async outcome => {
     const { ChatSession } = await import("../src/chat/session.js");
     const record = newRecord();
@@ -4603,7 +4659,7 @@ describe("steering an active turn", () => {
 });
 
 describe("saved response file Undo", () => {
-  it.each([true, false])("persists snapshots across reopening and informs the next request (existing file: %s)", async existed => {
+  it.each([[true, false], [false, false], [true, true], [false, true]])("persists snapshots across reopening and informs the next request (existing file: %s, individual undo first: %s)", async (existed, individualFirst) => {
     const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "locality-session-undo-"));
     const { ChatSession } = await import("../src/chat/session.js");
     const { ChatStorage } = await import("../src/chat/storage.js");
@@ -4629,12 +4685,23 @@ describe("saved response file Undo", () => {
       const restored = (await storage.load(record.id))!;
       expect(restored.messages.filter(message => message.role === "tool").map(message => message.toolCall?.fileUndo?.previous)).toEqual([existed ? "" : null, null]);
       session = new ChatSession({ storage, workspaceRoot, record: restored, emit: event => events.push(event) });
+      if (individualFirst) {
+        await session.undoResponseFiles(userTs, () => undefined, "existing.txt");
+        if (existed) expect(await fs.readFile(path.join(workspaceRoot, "existing.txt"), "utf8")).toBe("");
+        else await expect(fs.stat(path.join(workspaceRoot, "existing.txt"))).rejects.toMatchObject({ code: "ENOENT" });
+        expect(await fs.readFile(path.join(workspaceRoot, "created.txt"), "utf8")).toBe("created");
+        expect((await storage.load(record.id))!.messages.filter(message => message.role === "tool").map(message => message.toolCall?.fileUndoState))
+          .toEqual(["undone", "available"]);
+        expect(events).toContainEqual({ kind: "fileEditsUndone", userMessageTs: userTs, paths: ["existing.txt"] });
+        await expect(session.undoResponseFiles(userTs, () => undefined, "existing.txt")).rejects.toThrow("already been undone");
+        await expect(session.undoResponseFiles(userTs, () => undefined, "unknown.txt")).rejects.toThrow("no file edits");
+      }
       await session.undoResponseFiles(userTs, () => undefined);
       if (existed) expect(await fs.readFile(path.join(workspaceRoot, "existing.txt"), "utf8")).toBe("");
       else await expect(fs.stat(path.join(workspaceRoot, "existing.txt"))).rejects.toMatchObject({ code: "ENOENT" });
       await expect(fs.stat(path.join(workspaceRoot, "created.txt"))).rejects.toMatchObject({ code: "ENOENT" });
       expect((await storage.load(record.id))!.messages.filter(message => message.role === "tool").map(message => message.toolCall?.fileUndoState)).toEqual(["undone", "undone"]);
-      expect(events).toContainEqual({ kind: "fileEditsUndone", userMessageTs: userTs, paths: ["existing.txt", "created.txt"] });
+      expect(events).toContainEqual({ kind: "fileEditsUndone", userMessageTs: userTs, paths: individualFirst ? ["created.txt"] : ["existing.txt", "created.txt"] });
       await expect(session.undoResponseFiles(userTs, () => undefined)).rejects.toThrow("already been undone");
       mocks.streamChat.mockImplementation(async function* (_endpoint, request) {
         expect(request.messages).toEqual(expect.arrayContaining([expect.objectContaining({ role: "user", content: expect.stringContaining("The user undid this response's file edits") })]));

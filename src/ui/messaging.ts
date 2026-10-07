@@ -200,7 +200,7 @@ export type ChatToExt = (
   | { type: "openFile"; path: string; line?: number }
   | { type: "reviewFile"; path: string }
   | { type: "reviewProposedFile"; path: string; content: string }
-  | { type: "undoResponseFiles"; userMessageTs: number }
+  | { type: "undoResponseFiles"; userMessageTs: number; path?: string }
   | { type: "requestToolDiff"; toolId: string }
   | { type: "saveDraft"; text: string }
   | { type: "closeChatTab"; id: string }

@@ -40,6 +40,15 @@ describe("Brave Web Search adapter", () => {
     expect(endpoint + request + JSON.stringify(results)).not.toContain("private-brave-key");
   });
 
+  it.each([3, 20])("sends the configured %s-result limit to Brave and bounds its response", async maximum => {
+    mocks.fetch.mockResolvedValue(result({ type: "search", web: { results: Array.from({ length: 25 }, (_, i) => ({
+      title: `Result ${i}`, url: `https://example.org/page${i}`
+    })) } }));
+    const results = await searchWeb(BRAVE_SEARCH_ENDPOINT, searchRequest({ query: "docs", count: 20 }, maximum), { apiKey: "key" });
+    expect(new URL(mocks.fetch.mock.calls[0][1]).searchParams.get("count")).toBe(String(maximum));
+    expect(results).toHaveLength(maximum);
+  });
+
   it.each([{ type: "search", web: { results: [] } }, { type: "search", web: null }, { type: "search", query: { original: query.query } }])("accepts empty Brave search responses", async body => {
     mocks.fetch.mockResolvedValue(result(body));
     expect(await searchWeb(BRAVE_SEARCH_ENDPOINT, query, { apiKey: "key" })).toEqual([]);
