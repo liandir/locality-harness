@@ -13,14 +13,12 @@
   --code-fill: color-mix(in srgb, var(--vscode-foreground) 14%, transparent);
   --code-inline-fill: var(--code-fill);
   --hover-help-fill: color-mix(in srgb, var(--vscode-foreground) 18%, var(--vscode-sideBar-background, var(--vscode-editor-background)));
-  /* Readable history foreground; only active work receives a shimmer. */
-  --tool-idle: var(--vscode-descriptionForeground);
+  /* Reduce foreground contrast equally in every theme. Mix with the actual
+     background so the shimmer's overlapping paint layers stay opaque. */
+  --tool-idle: color-mix(in srgb, var(--vscode-foreground) 70%, var(--vscode-sideBar-background, var(--vscode-editor-background)));
   --shimmer-edge: var(--tool-idle);
-  --shimmer-peak: color-mix(in srgb, var(--vscode-foreground) 82%, white);
+  --shimmer-peak: var(--vscode-foreground);
   --shimmer-band-width: 48px;
-}
-body:is(.vscode-light, .vscode-high-contrast-light) {
-  --shimmer-peak: color-mix(in srgb, var(--vscode-foreground) 82%, black);
 }
 
 body { font-family: var(--vscode-font-family); color: var(--vscode-foreground); background: var(--vscode-sideBar-background, var(--vscode-editor-background)); margin: 0; padding: 0; font-size: var(--vscode-font-size); }
@@ -185,7 +183,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .katex-display { margin: 0.6em 0; padding: 2px 0; overflow-x: auto; overflow-y: hidden; }
 .katex-display > .katex { white-space: nowrap; }
 
-.work-section, .thinking { color: var(--vscode-descriptionForeground); padding: 4px 0; }
+.work-section, .thinking { color: var(--tool-idle); padding: 4px 0; }
 .server-status-fallback[hidden], .server-status-part[hidden] { display: none; }
 .work-head, .thinking-head, .tool-head {
   display: inline-flex;
@@ -689,6 +687,8 @@ body.image-preview-open .chat-body { overflow: hidden; }
 .inline-hint { min-width: 0; max-width: 0; color: var(--vscode-descriptionForeground); font-size: 0.86em; line-height: 1.35; opacity: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; pointer-events: none; transition: opacity 0.12s, max-width 0.12s; }
 .mode-selector { position: relative; display: inline-flex; align-items: center; }
 .mode-icon-toggle span { display: inline-flex; align-items: center; justify-content: center; }
+/* Optically align the mode glyph with the adjacent attachment icon. */
+#chatModeIcon { transform: translateY(1px); }
 .mode-icon-toggle svg, .mode-select-option-icon svg, .thinking-icon svg, .work-type-icon svg { display: block; }
 .mode-select-menu {
   font-size: var(--vscode-font-size);
