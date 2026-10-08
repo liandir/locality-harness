@@ -1194,11 +1194,13 @@ function renderFileChangeRow(m: Message, change: FileChangeSummary, index: numbe
   return `<div class="change-file-item${expanded ? " open" : ""}">
     <div class="tool-output-header tool-change-head change-file-row">
       <div class="tool-header-scroll">
-        <button class="tool-header-content disclosure-trigger change-file-toggle" type="button" data-file-change-toggle="${m.id}|${key}" aria-expanded="${expanded}">
-          <span class="tool-label-main change-file-path">${escapeHtml(change.path)}</span>
-          ${diffStatHtml(change)}
-          ${chevronIcon()}
-        </button>
+        <div class="tool-header-content">
+          <span class="tool-label-main change-file-path">${renderFilePathLink(change.path)}</span>
+          <button class="disclosure-trigger change-file-toggle" type="button" data-file-change-toggle="${m.id}|${key}" aria-expanded="${expanded}" aria-label="${escapeHtml(`${expanded ? "Hide" : "Show"} diff for ${change.path}`)}">
+            ${diffStatHtml(change)}
+            ${chevronIcon()}
+          </button>
+        </div>
       </div>
       ${renderFileUndoButton(m, change.path)}
     </div>
@@ -2809,11 +2811,14 @@ function readRangeNumber(value: unknown): number | undefined {
 
 function renderToolPathLabel(tc: ToolCard): string {
   const filePath = toolPath(tc);
-  if (!filePath) return `<span class="tool-label-text"></span>`;
   const compactFilePath = isWriteToolCard(tc) || tc.toolName === "read_file" || tc.toolName === "view_image";
   const displayPath = compactFilePath ? workspaceFileName(filePath) : filePath;
-  const tooltip = compactFilePath ? ` data-tip="${escapeHtml(toolFilePathTooltip(filePath))}"` : "";
-  return `<button class="tool-path-link tool-label-text" type="button" data-open-file="${escapeHtml(filePath)}"${tooltip}>${escapeHtml(displayPath)}</button>`;
+  return renderFilePathLink(filePath, displayPath);
+}
+
+function renderFilePathLink(filePath: string, displayPath = filePath): string {
+  if (!filePath) return `<span class="tool-label-text"></span>`;
+  return `<button class="tool-path-link tool-label-text" type="button" data-open-file="${escapeHtml(filePath)}" data-tip="${escapeHtml(toolFilePathTooltip(filePath))}">${escapeHtml(displayPath)}</button>`;
 }
 
 function toolFilePathTooltip(filePath: string): string {

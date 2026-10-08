@@ -543,7 +543,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .tool-change-summary { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; color: var(--vscode-foreground); }
 .tool-change-card .tool-change-row { cursor: default; }
 .tool-change-card .tool-change-row:hover { color: var(--vscode-descriptionForeground); background: transparent; }
-.change-undo-btn { flex: 0 0 auto; padding: 2px 9px; font-size: 0.78em; line-height: 1.35; text-transform: none; }
+.change-undo-btn { flex: 0 0 auto; padding: 2px 9px; font-family: var(--vscode-font-family); font-size: calc(var(--vscode-font-size) * 0.78); line-height: 1.35; text-transform: none; }
 .tool-diff.edit-preview { background: transparent; border: 0; border-radius: 0; padding: 3px 0; margin: 0; max-height: 240px; line-height: 1.2; }
 .change-summary { margin-top: 2px; color: var(--tool-idle); }
 /* Borders keep every file divider equally thin at fractional row positions. */
@@ -554,10 +554,11 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .change-summary-toggle > .diff-stat-group { margin-left: 8px; }
 .change-summary .change-undo-btn { margin-left: auto; }
 .change-file-row { width: 100%; }
-.change-file-toggle { border: 0; border-radius: 0; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.change-file-toggle { flex: 1; align-self: stretch; display: flex; align-items: center; gap: 6px; padding: 0; border: 0; border-radius: 0; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.change-file-toggle > .diff-stat-group { transform: translateY(1px); }
 .change-file-toggle:focus-visible { outline: none; }
-.change-file-row > .change-undo-btn { font-family: var(--vscode-font-family); font-size: 0.89em; }
 .change-file-row:is(:hover, :focus-within) { color: var(--vscode-foreground); background: var(--surface-fill); }
+.change-file-row:is(:hover, :focus-within) .disclosure-icon { opacity: 1; }
 /* Continue the row fill across adjacent dividers, including their side insets. */
 .change-file-list > .card-separator:has(+ .change-file-item > .change-file-row:is(:hover, :focus-within)),
 .change-file-item:not(.open):has(> .change-file-row:is(:hover, :focus-within)) + .card-separator,
