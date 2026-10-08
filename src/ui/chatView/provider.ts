@@ -150,6 +150,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       const { contextMessages, ...transcript } = msg.record;
       delete transcript.memory;
       delete transcript.recalledMemories;
+      delete transcript.initialMemories;
       payload = {
         ...msg,
         contextMessageCount: contextMessages?.length ?? transcript.messages.length,
@@ -386,7 +387,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           // Decide from the current workspace setting when the answer finishes,
           // so toggles during a running turn apply to both creation and updates.
           if (event.kind === "turnEnd" && event.messageTs !== undefined
-            && (event.mode === "act" || event.mode === "review") && readSettings().memoryEnabled) {
+            && (event.mode === "act" || event.mode === "review") && readSettings().autoGenerateMemories) {
             this.memory?.enqueue(rec.id, false, event.messageTs);
           }
         }

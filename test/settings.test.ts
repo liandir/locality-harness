@@ -141,15 +141,19 @@ describe("workspace memory setting", () => {
     expect(mocks.update).toHaveBeenCalledWith("memoryMaxCount", 12, 2);
   });
 
-  it("is opt-in for this workspace and ignores global activation", async () => {
-    const { readSettings, writeSetting } = await import("../src/config/settings.js");
-    expect(readSettings().memoryEnabled).toBe(false);
-    mocks.values.set("memoryEnabled", true);
-    mocks.explicit.set("memoryEnabled", true);
-    expect(readSettings().memoryEnabled).toBe(false);
-    mocks.workspace.set("memoryEnabled", true);
-    expect(readSettings().memoryEnabled).toBe(true);
-    await writeSetting("memoryEnabled", true);
-    expect(mocks.update).toHaveBeenCalledWith("memoryEnabled", true, 2);
+  const switches = ["memoryEnabled", "memoryLoadOnStart", "autoGenerateMemories"] as const;
+  it.each(switches)("%s is independently opt-in for this workspace and ignores global activation", async key => {
+    const { readSettings, writeSetting, resetAllSettings } = await import("../src/config/settings.js");
+    expect(readSettings()[key]).toBe(false);
+    mocks.values.set(key, true);
+    mocks.explicit.set(key, true);
+    expect(readSettings()[key]).toBe(false);
+    mocks.workspace.set(key, true);
+    expect(readSettings()[key]).toBe(true);
+    for (const other of switches.filter(other => other !== key)) expect(readSettings()[other]).toBe(false);
+    await writeSetting(key, true);
+    expect(mocks.update).toHaveBeenCalledWith(key, true, 2);
+    await resetAllSettings();
+    expect(mocks.update).toHaveBeenCalledWith(key, undefined, 2);
   });
 });

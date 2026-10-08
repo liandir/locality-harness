@@ -13,7 +13,7 @@ let status: { ok?: boolean; text: string } | undefined;
 export const sideFeature: SideFeature = {
   label: "Advanced",
   renderTools: (settings, toggle, escape) => (commands.renderTools?.(settings, toggle, escape) ?? "")
-    + toggle("webRequestsEnabled", "Web requests", settings.webRequestsEnabled !== false),
+    + toggle("webRequestsEnabled", "Activate web requests", settings.webRequestsEnabled !== false),
   render: (settings, toggle, escape) => commands.render(settings, toggle, escape)
     + toggle("autoapproveWebSearch", "Auto-approve web requests", settings.autoapproveWebSearch === true, settings.webRequestsEnabled === false || settings.webToolsEnabled !== true),
   renderSection(settings, _toggle, escape) {

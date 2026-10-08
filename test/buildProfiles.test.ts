@@ -65,10 +65,14 @@ describe("edition composition", () => {
     }
     const settings = api.readSettings();
     for (const mode of ["act", "plan", "review"] as const) for (const transport of ["native", "legacy"] as const) {
-      const names = api.toolsForMode(mode, transport, true, true, settings).map(tool => tool.name);
+      const names = api.toolsForMode(mode, transport, false, true, settings).map(tool => tool.name);
       expect(names).toEqual(mode === "act" ? ["ask_user_question", "update_todos"] : ["ask_user_question"]);
-      const prompt = api.buildSystemPrompt({ family: "gemma4", mode, nativeTools: transport === "native", memoryEnabled: true, supportsVision: true, workspaceRoot: "/tmp", featureSettings: settings });
+      const prompt = api.buildSystemPrompt({ family: "gemma4", mode, nativeTools: transport === "native", memoryEnabled: false, supportsVision: true, workspaceRoot: "/tmp", featureSettings: settings });
       expect(prompt).not.toMatch(/run_command|wait_process|stop_process|web_search|read_webpage|search_memories|recall_memory|view_image is available|declaration:read_file|declaration:write_file/);
+      expect(api.toolsForMode(mode, transport, true, true, settings).map(tool => tool.name))
+        .toEqual(["search_memories", "recall_memory", ...names]);
+      const memoryPrompt = api.buildSystemPrompt({ family: "gemma4", mode, nativeTools: transport === "native", memoryEnabled: true, workspaceRoot: "/tmp", featureSettings: settings });
+      expect(memoryPrompt).toContain("Workspace memories are available through search_memories and recall_memory");
     }
     const disabled: string[] = [];
     api.sideFeature.render(settings as unknown as Record<string, unknown>, (key, _label, _checked, inactive) => { if (inactive) disabled.push(key); return ""; }, value => value);

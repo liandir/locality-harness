@@ -84,7 +84,7 @@ export class WorkspaceMemory {
     this.changed();
   }
   settingsChanged(): void {
-    // Automatic summaries are admitted at turn completion using the memory switch.
+    // Automatic summaries are admitted at turn completion using the generation switch.
     // Once queued, restart generation only when its model or endpoint changes.
     if (this.active && !settingsStillMatch(this.active.endpoint, this.active.model)) this.active.controller.abort();
     this.schedule();

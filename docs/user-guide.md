@@ -414,24 +414,29 @@ trash icon. Deleting cannot be undone.
 
 ## Workspace memory
 
-Enable **Settings → Workspace memory → Use workspace memories** to let the
-agent search and recall active summaries from other chats in the same workspace. It is off by
-default and is stored in workspace settings (`locality.memoryEnabled`);
-user-level activation is ignored. This switch controls memory tool availability
-and automatic memory creation and updates. Manual generation and editing remain
-available when it is off.
+Memory has three independent workspace switches, all off by default. User-level
+activation is ignored; existing `locality.memoryEnabled` settings continue to
+control tool access.
 
-After a final response in **Act** or **Review** mode, the harness checks the current
-workspace switch and queues a short memory summary only if it is enabled. Turning
-the switch off during a response prevents that turn from creating or updating a
-memory; turning it on before the response finishes allows it. This decision is
-made at turn completion, and skipped turns are not queued for later generation.
-Summaries use the configured local model. **Plan** responses and plan
-revisions do not create or update memories automatically. After accepting a
-plan, memory generation waits for the Act implementation response to finish.
-New generated memories are active automatically; existing
-individual exclusions are preserved. The workspace switch still controls whether
-the agent can search and recall them.
+- **Chat → Load memories at chat start** (`locality.memoryLoadOnStart`) loads
+  relevant active summaries using the first user message as a local keyword query.
+  It reads summaries from the workspace index without opening other transcripts.
+  Loaded memories enter model context, count toward the context limit, and can be
+  compacted. They survive reopening; later messages do not trigger another automatic
+  search. Editing the first message replaces that initial context using the new
+  query and current switch. Turning the switch off does not erase already loaded context.
+- **Tools → Activate memories** (`locality.memoryEnabled`) exposes `search_memories`
+  and `recall_memory`. It works independently of **Activate reads** and initial loading.
+- **Automation → Auto-generate memories** (`locality.autoGenerateMemories`) queues a
+  summary after a final **Act** or **Review** response, even when loading and memory
+  tools are off. The setting at turn completion decides whether to queue work;
+  skipped turns are not generated retroactively, and already queued summaries finish.
+
+Summaries use the configured local model. **Plan** responses and plan revisions do
+not generate memories automatically. After accepting a plan, generation waits for
+the Act implementation response. New generated memories are active automatically;
+individual exclusions and manually edited summaries are preserved. Manual generation
+and editing remain available regardless of the three switches.
 
 A **Creating memory** card appears after the answer and becomes **Created memory**
 when finished. If the chat already has a memory, the card shows **Updating memory**
@@ -452,9 +457,9 @@ Summaries are limited to 384 tokens. Raw tool messages, hidden reasoning, and
 imported memories are excluded from summarization input; common credential
 formats are redacted, and the model is instructed to omit secrets.
 
-Memories are retrieved only when the agent calls a tool; no summaries are
-inserted automatically into the system prompt. When enabled, the system prompt
-suggests considering memory retrieval at the beginning of a request:
+In addition to optional loading at chat start, the agent can retrieve memories
+through tools. When **Activate memories** is enabled, the system prompt suggests
+considering retrieval at the beginning of a request:
 
 - **`search_memories`** takes a `query` and returns matching `name`, `id`, and
   `date` fields, plus the total match count and whether results were truncated.
@@ -470,13 +475,14 @@ suggests considering memory retrieval at the beginning of a request:
   fail with a request to search again.
 
 Both tools return full UTC dates with minute precision, such as
-`2026-09-11T14:05Z`. **Maximum search results** sets the per-search limit from
-1 to 100, defaulting to 10 (`locality.memoryMaxCount`). The agent chooses
+`2026-09-11T14:05Z`. **Maximum memories / search results** caps both initial
+loading and per-search results from 1 to 100, defaulting to 10
+(`locality.memoryMaxCount`). The agent chooses
 which matches to recall. The tools work in Act, Plan, and Review modes and follow
-the read-approval setting. When workspace memories are off, both tools and their
+the read-approval setting. When **Activate memories** is off, both tools and their
 system-prompt guidance are omitted, and attempted calls cannot retrieve content.
 
-**Recalled memories** shows the sources read through the tool, with links to
+**Recalled memories** shows sources loaded at chat start or read through tools, with links to
 their editors in Recent Chats. Recalled contents are ordinary tool results in
 chat history and are subject to normal context limits and compaction. Turning
 memories off prevents new retrieval; it does not erase existing tool results.

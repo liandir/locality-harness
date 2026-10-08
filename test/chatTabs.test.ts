@@ -7,7 +7,7 @@ import type { WorkspaceMemory } from "../src/chat/workspaceMemory.js";
 import type { UiEvent } from "../src/chat/session.js";
 import type { ChatToExt, ExtToChat } from "../src/ui/messaging.js";
 
-const mocks = vi.hoisted(() => ({ sessions: new Map<string, FakeSession>(), input: vi.fn(), picker: vi.fn(), warning: vi.fn(), metadata: vi.fn(), settings: { reasoningEfforts: {}, endpoint: "http://127.0.0.1:8080", model: "model-a", memoryEnabled: true } }));
+const mocks = vi.hoisted(() => ({ sessions: new Map<string, FakeSession>(), input: vi.fn(), picker: vi.fn(), warning: vi.fn(), metadata: vi.fn(), settings: { reasoningEfforts: {}, endpoint: "http://127.0.0.1:8080", model: "model-a", memoryEnabled: true, memoryLoadOnStart: false, autoGenerateMemories: true } }));
 vi.mock("vscode", () => ({
   commands: { executeCommand: vi.fn() },
   window: { showInputBox: mocks.input, showOpenDialog: mocks.picker, showWarningMessage: mocks.warning },
@@ -158,6 +158,8 @@ beforeEach(() => {
   mocks.settings.model = "model-a";
   mocks.settings.reasoningEfforts = {};
   mocks.settings.memoryEnabled = true;
+  mocks.settings.memoryLoadOnStart = false;
+  mocks.settings.autoGenerateMemories = true;
   mocks.metadata.mockReset().mockResolvedValue({ modelAlias: "model-a", contextSize: 32768, supportsVision: false });
 });
 
@@ -391,7 +393,9 @@ describe.each(["act", "review"] as const)("automatic %s memories", mode => {
     { startEnabled: false, endEnabled: true },
     { startEnabled: true, endEnabled: true }
   ])("uses the setting at turn completion (start=$startEnabled, end=$endEnabled)", ({ startEnabled, endEnabled }) => {
-    mocks.settings.memoryEnabled = startEnabled;
+    mocks.settings.autoGenerateMemories = startEnabled;
+    mocks.settings.memoryEnabled = !endEnabled;
+    mocks.settings.memoryLoadOnStart = !endEnabled;
     const memory = { enqueue: vi.fn(), creations: vi.fn().mockResolvedValue([]) };
     const { provider } = setup(memory as unknown as WorkspaceMemory);
     provider.openChat(record("a"));
@@ -402,7 +406,7 @@ describe.each(["act", "review"] as const)("automatic %s memories", mode => {
 
     // Settings and the selected tab can change while the model is responding.
     provider.openChat(record("b"));
-    mocks.settings.memoryEnabled = endEnabled;
+    mocks.settings.autoGenerateMemories = endEnabled;
     provider.pushSettings();
     expect(memory.enqueue).not.toHaveBeenCalled();
     session.emit({ kind: "turnEnd", messageId: "answer-a", mode, messageTs: 2 });
@@ -410,7 +414,7 @@ describe.each(["act", "review"] as const)("automatic %s memories", mode => {
     else expect(memory.enqueue).not.toHaveBeenCalled();
 
     // Re-enabling afterward must not schedule a skipped turn retroactively.
-    mocks.settings.memoryEnabled = true;
+    mocks.settings.autoGenerateMemories = true;
     provider.pushSettings();
     expect(memory.enqueue).toHaveBeenCalledTimes(endEnabled ? 1 : 0);
   });

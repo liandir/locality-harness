@@ -9,7 +9,6 @@ const READ_FILE_DESCRIPTION = "Read a UTF-8 text file inside the open workspace,
 export const ALL_TOOLS: ToolSpec[] = [
   {
     name: "search_memories",
-    enabledSetting: "readToolsEnabled",
     description: "Search active memories from other chats in this workspace by deterministic keywords. Returns matching names, IDs, and full UTC dates, ranked by relevance; no memory contents. Use recall_memory to read a match.",
     parameters: objectParameters({
       query: { type: "string", description: "Non-empty keywords, names, paths, or symbols related to the current request." }
@@ -17,7 +16,6 @@ export const ALL_TOOLS: ToolSpec[] = [
   },
   {
     name: "recall_memory",
-    enabledSetting: "readToolsEnabled",
     description: "Read one active workspace memory using the exact name and ID from search_memories. Returns its name, ID, full UTC date, and contents. If the source changed or is no longer active, search again.",
     parameters: objectParameters({
       name: { type: "string", description: "Exact memory name from search_memories." },

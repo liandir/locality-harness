@@ -175,7 +175,7 @@ function renderChats(): string {
         <h3>Chats</h3>
         ${chats.length === 0 ? `<p class="empty-state">${query ? "No matching chats." : "No chats yet."}</p>` :
           `<ul class="chat-list">${chats.map(c => renderChatEntry(c, memories.get(c.id), "recent")).join("")}</ul>`}
-        <p class="setting-help">Memories update after responses when Use workspace memories is enabled. Edited memories are preserved.</p>
+        <p class="setting-help">Memories update after Act and Review responses when Auto-generate memories is enabled. Edited memories are preserved.</p>
         ${state.memoryError ? `<p class="memory-error" role="alert">${esc(state.memoryError)}</p>` : ""}
         ${busy ? '<button id="cancelMemories" class="action-btn wide-button">Cancel generation</button>' : ""}
         <button id="summarizeMemories" class="action-btn wide-button icon-label">${memoryIcon()}<span>Re-generate all memories</span></button>
@@ -187,17 +187,17 @@ function renderChats(): string {
 
 function renderMemorySettings(): string {
   return `<div class="memory-settings">
-    ${switchControl("memoryEnabled", "Use workspace memories", state.settings.memoryEnabled === true)}
-    <label class="field-label" for="memoryMaxCount">Maximum search results</label>
+    ${switchControl("memoryLoadOnStart", "Load memories at chat start", state.settings.memoryLoadOnStart === true)}
+    <p class="setting-help">Load relevant workspace memories from the first message. Independent of memory tools and generation.</p>
+    <label class="field-label" for="memoryMaxCount">Maximum memories / search results</label>
     <input id="memoryMaxCount" type="number" min="1" max="${MAX_MEMORY_COUNT}" step="1" value="${esc(String(state.settings.memoryMaxCount ?? DEFAULT_MEMORY_MAX_COUNT))}" />
-    ${state.memorySettingError ? `<p class="memory-error" role="alert">${esc(state.memorySettingError)}</p>` : ""}
   </div>`;
 }
 
 function renderChatEntry(chat: { id: string; title: string; updatedAt?: number }, memory: MemoryListItem | undefined, group: string): string {
   const panelId = `memory-${group}-${chat.id}`;
   const running = state.openTabs.some(tab => tab.id === chat.id && tab.running);
-  const memoryEnabled = state.settings.memoryEnabled === true;
+  const memoryEnabled = state.settings.memoryEnabled === true || state.settings.memoryLoadOnStart === true;
   const active = memoryEnabled && memory?.usable === true;
   const status = !memoryEnabled ? "off in settings" : memory?.enabled === false ? "excluded" : active ? "active" : memory?.status ?? "missing";
   return `<li class="chat-entry">
@@ -246,6 +246,7 @@ function renderSettings(): string {
 
   return `
     <div class="panel settings-panel">
+      ${state.memorySettingError ? `<p class="memory-error" role="alert">${esc(state.memorySettingError)}</p>` : ""}
       ${settingsSection("model", "Model", `
         <label class="field-label" for="endpoint">Server URL</label>
         <div class="setting-action-row">
@@ -314,13 +315,16 @@ function renderSettings(): string {
         </select>
 
         <div class="tool-toggles">
-          ${switchControl("readToolsEnabled", "Read", s.readToolsEnabled !== false)}
-          ${switchControl("editToolsEnabled", "Edit", s.editToolsEnabled !== false)}
+          ${switchControl("memoryEnabled", "Activate memories", s.memoryEnabled === true)}
+          ${switchControl("readToolsEnabled", "Activate reads", s.readToolsEnabled !== false)}
+          ${switchControl("editToolsEnabled", "Activate edits", s.editToolsEnabled !== false)}
           ${sideFeature.renderTools?.(s, switchControl, esc) ?? ""}
         </div>
         ${sideFeature.renderSection?.(s, switchControl, esc) ?? ""}
       `)}
       ${settingsSection("automation", "Automation", `
+        ${switchControl("autoGenerateMemories", "Auto-generate memories", s.autoGenerateMemories === true)}
+        <p class="setting-help">Create or update a memory after Act and Review responses, independently of memory loading and tools.</p>
         ${switchControl("autoCompact", "Auto-compact context", autoCompact)}
         <label class="range-setting" for="autoCompactThresholdPercent">
           <span class="range-setting-head">
@@ -364,7 +368,7 @@ function updateSettingsSections(): void {
 
 function renderToolAutoApprovals(): string {
   const s = state.settings;
-  return switchControl("autoapproveReads", "Auto-approve reads", !!s.autoapproveReads, s.readToolsEnabled === false)
+  return switchControl("autoapproveReads", "Auto-approve reads", !!s.autoapproveReads, s.readToolsEnabled === false && s.memoryEnabled !== true)
     + switchControl("autoapproveWrites", "Auto-approve edits", !!s.autoapproveWrites, s.editToolsEnabled === false)
     + sideFeature.render(s, switchControl, esc);
 }
@@ -479,7 +483,8 @@ function bind(): void {
     state.reasoningEffort = effort;
     send({ type: "setReasoningEffort", effort });
   });
-  bindSetting("memoryEnabled", "change", (_v, el) => (el as HTMLInputElement).checked);
+  bindSetting("memoryLoadOnStart", "change", (_v, el) => (el as HTMLInputElement).checked);
+  bindSetting("autoGenerateMemories", "change", (_v, el) => (el as HTMLInputElement).checked);
   bindSetting("memoryMaxCount", "change", v => Math.floor(Math.max(1, Math.min(MAX_MEMORY_COUNT, Number(v) || DEFAULT_MEMORY_MAX_COUNT))));
   root.querySelector("#summarizeMemories")?.addEventListener("click", () => send({ type: "summarizeExistingChats" }));
   root.querySelector("#cancelMemories")?.addEventListener("click", () => send({ type: "cancelMemoryGeneration" }));
@@ -635,7 +640,10 @@ window.addEventListener("message", ev => {
       break;
     }
     case "settingSaved":
-      if ((msg.key === "memoryEnabled" || msg.key === "memoryMaxCount") && !msg.ok) { state.memorySettingError = msg.error; render(); }
+      if (["memoryEnabled", "memoryLoadOnStart", "autoGenerateMemories", "memoryMaxCount"].includes(msg.key)) {
+        state.memorySettingError = msg.ok ? undefined : msg.error;
+        render();
+      }
       if (msg.key === "reasoningEffort" && !msg.ok) { state.reasoningEffortError = msg.error; render(); }
       if (msg.key === "reasoningBudget" && !msg.ok) { state.reasoningBudgetError = msg.error; render(); }
       break;

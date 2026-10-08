@@ -99,12 +99,14 @@ export interface ChatRecord {
   reasoningEffort: ReasoningEffort;
   /** Complete saved transcript; compaction never rewrites these messages. */
   messages: ChatMessage[];
-  /** Model-only history after compaction. Absent in uncompacted records. */
+  /** Model-only history after compaction, memory loading, or attachment expansion. */
   contextMessages?: ChatMessage[];
   memory?: ChatMemory;
   memoryCreations?: MemoryCreation[];
   /** Memories explicitly recalled by tools, for the UI disclosure only. */
   recalledMemories?: MemorySnapshot[];
+  /** Memories loaded at chat start, for the UI disclosure; contents live in contextMessages. */
+  initialMemories?: MemorySnapshot[];
   /** Token count of the model context, not the full transcript. */
   totalTokens: number;
   /** Model whose tokenizer produced the cached per-message token counts. */
@@ -352,6 +354,7 @@ export class ChatStorage {
     // A historical fork must not inherit a summary containing later turns.
     if (end === rec.messages.length && rec.contextMessages) {
       forked.contextMessages = structuredClone(rec.contextMessages);
+      forked.initialMemories = rec.initialMemories && structuredClone(rec.initialMemories);
       forked.tokenizerModel = rec.tokenizerModel;
     } else if (rec.contextMessages) {
       // Transcript token caches can predate the model used by the compacted
@@ -433,6 +436,7 @@ export class ChatStorage {
       memory: validMemory(rec.memory) ? rec.memory : undefined,
       memoryCreations: Array.isArray(rec.memoryCreations) ? rec.memoryCreations.filter(validMemoryCreation) : undefined,
       recalledMemories: Array.isArray(rec.recalledMemories) ? rec.recalledMemories.filter(validSnapshot).slice(-MAX_MEMORY_COUNT) : undefined,
+      initialMemories: Array.isArray(rec.initialMemories) ? rec.initialMemories.filter(validSnapshot).slice(-MAX_MEMORY_COUNT) : undefined,
       contextMessages: Array.isArray(rec.contextMessages) ? normalizeMessages(rec.contextMessages) : undefined
     } as ChatRecord;
   }
