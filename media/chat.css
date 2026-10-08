@@ -15,7 +15,8 @@
   --hover-help-fill: color-mix(in srgb, var(--vscode-foreground) 18%, var(--vscode-sideBar-background, var(--vscode-editor-background)));
   /* Reduce foreground contrast equally in every theme. Mix with the actual
      background so the shimmer's overlapping paint layers stay opaque. */
-  --tool-idle: color-mix(in srgb, var(--vscode-foreground) 60%, var(--vscode-sideBar-background, var(--vscode-editor-background)));
+  --tool-idle-weight: 60%;
+  --tool-idle: color-mix(in srgb, var(--vscode-foreground) var(--tool-idle-weight), var(--vscode-sideBar-background, var(--vscode-editor-background)));
   --shimmer-edge: var(--tool-idle);
   --shimmer-peak: var(--vscode-foreground);
   --shimmer-band-width: 48px;
@@ -501,9 +502,14 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .tool-card.list-dir .tool-filelist { margin: 0 0 2px; }
 /* A failed/rejected action colors its complete heading as one error state:
    glyph, operation, target or command, range/stats, and disclosure affordance. */
+.tool-card:is(.failed, .rejected) {
+  --tool-error-idle: color-mix(in srgb, var(--error-foreground) var(--tool-idle-weight), var(--vscode-sideBar-background, var(--vscode-editor-background)));
+  /* Resolve the highlight here so it includes the inherited theme adjustment. */
+  --error-highlight-foreground: var(--error-foreground);
+}
 .tool-card:is(.failed, .rejected) .tool-head,
 .tool-card:is(.failed, .rejected) .tool-head * {
-  color: var(--error-foreground);
+  color: var(--tool-error-idle);
 }
 .tool-card:is(.failed, .rejected) .tool-head:is(:hover, :focus-within),
 .tool-card:is(.failed, .rejected) .tool-head:is(:hover, :focus-within) * {
@@ -524,7 +530,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .tool-change-card { position: relative; }
 .tool-change-head .tool-header-content > .tool-label-main { margin-left: 4px; }
 .tool-change-head .tool-path-link:is(:hover, :focus-visible) { color: var(--vscode-foreground); }
-/* Expanded failures use the same resting/highlight reds as their history row. */
+/* Expanded failures retain the diagnostic red and theme-aware link emphasis. */
 .tool-card:is(.failed, .rejected) > .tool-expanded { opacity: 1; }
 .tool-output-surface.error .tool-change-operation { opacity: 1; }
 .tool-output-surface.error .diff-stat { color: inherit; }
