@@ -940,9 +940,10 @@ function updateServerStatus(): void {
 }
 
 function serverPendingNoticeReady(): boolean {
-  // Ingestion keeps a completed tool active, but must not hide the auxiliary
-  // title request that can prevent ingestion from starting in the first place.
-  const reason = state.contextActivityIds.size && state.serverPending !== "title" ? undefined : state.serverPending;
+  // Tool ingestion owns ordinary waits. Full context loading and title
+  // generation have their own status, even with completed activities pending.
+  const reason = state.contextActivityIds.size && state.serverPending !== "title" && state.serverPending !== "context"
+    ? undefined : state.serverPending;
   if (serverPendingTimingReason !== reason) {
     serverPendingTimingReason = reason;
     serverPendingSince = undefined;
@@ -2686,7 +2687,7 @@ function isActiveToolCard(tc: ToolCard): boolean {
     tc.status,
     tc.processRunning,
     state.contextActivityIds.has(tc.toolId),
-    state.serverPending === "title"
+    state.serverPending === "title" || state.serverPending === "context"
   );
 }
 

@@ -3634,9 +3634,13 @@ describe("ChatSession", () => {
         const ingested = () => !contextActivityIds(events).includes(compacted.compactId);
         expect(ingested()).toBe(false);
         expect(contextActivityIds(events)).toEqual([compacted.compactId]);
+        expect(events.filter(event => event.kind === "turnPreparing").at(-1))
+          .toEqual({ kind: "turnPreparing", reason: "context" });
         if (reportProgress) {
           yield { kind: "promptProgress", processedTokens: 2048, totalTokens: 2048 };
           expect(ingested()).toBe(true);
+          expect(events.filter(event => event.kind === "turnPreparing").at(-1))
+            .toEqual({ kind: "turnPreparing", reason: "server" });
         }
         yield { kind: "text", text: "done" };
         expect(ingested()).toBe(true);
@@ -3675,7 +3679,7 @@ describe("ChatSession", () => {
     expect(compactEndIndex).toBeGreaterThan(compactIndex);
     const continuation = events.slice(compactEndIndex + 1);
     expect(continuation.some(event => event.kind === "turnPreparing" && event.reason === "context"))
-      .toBe(false);
+      .toBe(true);
     expect(continuation).toContainEqual({ kind: "turnPreparing", reason: "server" });
     expect(continuation).toContainEqual(expect.objectContaining({ kind: "text", delta: "done" }));
     expect(events.some(event => event.kind === "abort")).toBe(false);
@@ -4175,17 +4179,20 @@ describe("separate transcript and model context", () => {
       }
       yield { kind: "promptProgress", processedTokens: 128, totalTokens: 2048 };
       expect(events).not.toContainEqual({ kind: "contextActivity", activityIds: [] });
+      expect(events.some(event => event.kind === "turnPreparing" && event.reason === "context")).toBe(needsIngestion);
       if (pass === 1 && outcome !== "complete") {
         if (outcome === "cancel") session.cancel();
         throw new Error(outcome === "cancel" ? "Cancelled" : "Server disconnected");
       }
       yield { kind: "promptProgress", processedTokens: 2048, totalTokens: 2048 };
       if (needsIngestion) expect(events).toContainEqual({ kind: "contextActivity", activityIds: [] });
+      expect(events.filter(event => event.kind === "turnPreparing").at(-1))
+        .toEqual({ kind: "turnPreparing", reason: "server" });
       yield { kind: "text", text: "Answer" };
     });
     await session.sendUserMessage("Continue");
     expect(events).toContainEqual({ kind: "contextActivity", activityIds: [] });
-    expect(events).not.toContainEqual({ kind: "turnPreparing", reason: "context" });
+    expect(events).toContainEqual({ kind: "turnPreparing", reason: "context" });
     if (outcome !== "complete") expect(events).toContainEqual({ kind: "abort", reason: outcome === "cancel" ? "Cancelled" : "Server disconnected", messageTs: expect.any(Number) });
     else expect(events.some(event => event.kind === "abort")).toBe(false);
 
@@ -4193,7 +4200,7 @@ describe("separate transcript and model context", () => {
     await session.sendUserMessage("Continue again");
     expect(pass).toBe(2);
     expect(events.some(event => event.kind === "abort")).toBe(false);
-    expect(events).not.toContainEqual({ kind: "turnPreparing", reason: "context" });
+    expect(events.some(event => event.kind === "turnPreparing" && event.reason === "context")).toBe(outcome !== "complete");
     expect(events.some(event => event.kind === "contextActivity" && event.activityIds.includes(compacted.compactId))).toBe(outcome !== "complete");
   });
 

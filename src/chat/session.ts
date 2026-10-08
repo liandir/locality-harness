@@ -544,7 +544,9 @@ export class ChatSession {
     try {
       const cfg = await this.compactConfig(s);
       const { keptTail } = await compact(s.endpoint, this.record, ac.signal, cfg, s.model);
-      this.loadedChatContextPending = false;
+      // The rewritten prompt must be cached again on the next model request.
+      // Keep this pending across cancellation or failure until prefill completes.
+      this.loadedChatContextPending = true;
       await this.saveRecord();
       if (options.reload) this.emit({ kind: "chatLoaded", record: this.record });
       this.emit({ kind: "tokens", total: this.record.totalTokens + this.cachedSystemPromptTokens(), limit: this.contextLimit() });
