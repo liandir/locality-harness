@@ -208,6 +208,8 @@ export type ChatToExt = (
   | { type: "deleteCurrent" }) & { chatId?: string };
 
 export type ExtToChat = UiEvent
+  /** Server metadata is independent of saved chat history; absent size means unknown. */
+  | { type: "serverContext"; contextSize?: number }
   | { type: "fileUndoFinished"; userMessageTs: number }
   | { type: "chatTabs"; tabs: ChatTab[]; activeId?: string }
   | { type: "chatSnapshot"; id: string; events: ExtToChat[]; busy: boolean; draft: string }

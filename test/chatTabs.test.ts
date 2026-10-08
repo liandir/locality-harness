@@ -155,12 +155,63 @@ beforeEach(() => {
   mocks.sessions.clear();
   vi.clearAllMocks();
   mocks.warning.mockReset();
+  mocks.settings.endpoint = "http://127.0.0.1:8080";
   mocks.settings.model = "model-a";
   mocks.settings.reasoningEfforts = {};
   mocks.settings.memoryEnabled = true;
   mocks.settings.memoryLoadOnStart = false;
   mocks.settings.autoGenerateMemories = true;
   mocks.metadata.mockReset().mockResolvedValue({ modelAlias: "model-a", contextSize: 32768, supportsVision: false });
+});
+
+describe("reopened chat context window", () => {
+  it("loads history immediately and publishes the server window without starting a turn", async () => {
+    const { provider, posted, snapshot } = setup();
+    let resolveMetadata!: (value: { contextSize: number; supportsVision: boolean }) => void;
+    mocks.metadata.mockReturnValueOnce(new Promise(resolve => { resolveMetadata = resolve; }));
+    provider.openChat({ ...record("a"), totalTokens: 48_000 });
+
+    expect(snapshot().events).toContainEqual(expect.objectContaining({
+      kind: "chatLoaded", record: expect.objectContaining({ totalTokens: 48_000 })
+    }));
+    expect(posted).toContainEqual({ type: "serverContext" });
+    expect(mocks.sessions.get("a")!.sent).toEqual([]);
+
+    resolveMetadata({ contextSize: 262_144, supportsVision: false });
+    await vi.waitFor(() => expect(posted).toContainEqual({ type: "serverContext", contextSize: 262_144 }));
+    expect(mocks.metadata).toHaveBeenCalledExactlyOnceWith(mocks.settings.endpoint, { model: mocks.settings.model });
+    expect(mocks.sessions.get("a")!.sent).toEqual([]);
+  });
+
+  it("clears the displayed limit when the server becomes unavailable", async () => {
+    const { provider, posted } = setup();
+    mocks.metadata.mockResolvedValueOnce({ contextSize: 262_144, supportsVision: false });
+    provider.openChat(record("a"));
+    await vi.waitFor(() => expect(posted).toContainEqual({ type: "serverContext", contextSize: 262_144 }));
+
+    mocks.metadata.mockRejectedValueOnce(new Error("offline"));
+    provider.pushSettings();
+    await vi.waitFor(() => expect(posted.filter(message => "type" in message && message.type === "serverContext").at(-1))
+      .toEqual({ type: "serverContext", contextSize: undefined }));
+  });
+
+  it.each(["model", "endpoint"] as const)("ignores late metadata after changing the %s", async key => {
+    const { provider, posted } = setup();
+    let resolveOld!: (value: { contextSize: number; supportsVision: boolean }) => void;
+    mocks.metadata.mockReturnValueOnce(new Promise(resolve => { resolveOld = resolve; }));
+    provider.openChat(record("a"));
+
+    mocks.settings[key] = key === "model" ? "model-b" : "http://127.0.0.1:8081";
+    mocks.metadata.mockResolvedValueOnce({ contextSize: 262_144, supportsVision: false });
+    provider.pushSettings();
+    expect(posted.filter(message => "type" in message && message.type === "serverContext").at(-1))
+      .toEqual({ type: "serverContext" });
+    await vi.waitFor(() => expect(posted).toContainEqual({ type: "serverContext", contextSize: 262_144 }));
+    resolveOld({ contextSize: 32_768, supportsVision: false });
+    await Promise.resolve();
+    expect(posted.filter(message => "type" in message && message.type === "serverContext").at(-1))
+      .toEqual({ type: "serverContext", contextSize: 262_144 });
+  });
 });
 
 describe("edit messages", () => {
@@ -468,7 +519,7 @@ describe("independent chat tabs", () => {
     provider.openChat(record("a"));
     expect(mocks.sessions.size).toBe(1);
     expect(a.cancel).not.toHaveBeenCalled();
-    expect(posted.filter(message => !("type" in message && message.type === "recentChats") && !("kind" in message && message.kind === "visionCapability"))).toEqual([]);
+    expect(posted.filter(message => !("type" in message && ["recentChats", "serverContext"].includes(message.type)) && !("kind" in message && message.kind === "visionCapability"))).toEqual([]);
   });
 
   it("restores streamed text, approvals and accounting without leaking background events", async () => {

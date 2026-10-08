@@ -58,8 +58,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private runtimes = new Map<string, ChatRuntime>();
   private navigationGeneration = 0;
   private recentChatsGeneration = 0;
-  private visionGeneration = 0;
-  private visionEndpointKey?: string;
+  private serverMetadataGeneration = 0;
+  private serverMetadataKey?: string;
   private deleting = new Map<string, ChatStorage>();
   private clearingStorage?: ChatStorage;
   private fileUndoTask?: Promise<void>;
@@ -178,7 +178,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   pushSettings(): void {
     const s = readSettings();
-    void this.refreshVisionCapability();
+    void this.refreshServerCapabilities();
     if (this.memory) this.refreshMemoryVisibility();
     this.post({
       type: "settings",
@@ -191,21 +191,28 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     });
   }
 
-  private async refreshVisionCapability(): Promise<boolean> {
-    const generation = ++this.visionGeneration;
+  private async refreshServerCapabilities(): Promise<boolean> {
+    const generation = ++this.serverMetadataGeneration;
     const { endpoint, model } = readSettings();
     const endpointKey = `${endpoint}\n${model}`;
-    if (this.visionEndpointKey !== endpointKey) {
-      this.visionEndpointKey = endpointKey;
+    if (this.serverMetadataKey !== endpointKey) {
+      this.serverMetadataKey = endpointKey;
+      this.post({ type: "serverContext" });
       this.post({ kind: "visionCapability", supported: false });
     }
     let supported = false;
+    let contextSize: number | undefined;
     try {
-      supported = (await fetchServerMetadata(endpoint, { model })).supportsVision;
+      const metadata = await fetchServerMetadata(endpoint, { model });
+      supported = metadata.supportsVision;
+      contextSize = metadata.contextSize;
     } catch { /* Unknown capabilities keep image input unavailable. */ }
     const current = readSettings();
     if (endpoint !== current.endpoint || model !== current.model) return false;
-    if (generation === this.visionGeneration) this.post({ kind: "visionCapability", supported });
+    if (generation === this.serverMetadataGeneration) {
+      this.post({ type: "serverContext", contextSize });
+      this.post({ kind: "visionCapability", supported });
+    }
     return supported;
   }
 
@@ -973,7 +980,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     runtime.attachmentSelectionPending = true;
     this.post({ type: "attachmentImportState", pending: true });
     try {
-      const allowImages = await this.refreshVisionCapability();
+      const allowImages = await this.refreshServerCapabilities();
       if (runtime.removed) return;
       const selected = clipboardFiles ?? await vscode.window.showOpenDialog({
         canSelectFiles: true,
@@ -993,7 +1000,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       if (runtime.removed) return;
       const available = MAX_ATTACHMENTS_PER_MESSAGE - runtime.stagedAttachmentIds.size;
       for (const uri of selected.slice(0, available)) {
-        const allowImages = await this.refreshVisionCapability();
+        const allowImages = await this.refreshServerCapabilities();
         if (runtime.removed) return;
         const attachment = await runtime.storage!.importAttachment(runtime.session.getRecord().id, uri.fsPath, { allowImages });
         if (runtime.removed) { await runtime.storage!.deleteAttachment(runtime.session!.getRecord().id, attachment); return; }
@@ -1039,7 +1046,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           if (!rec || !runtime.session) throw new Error("Could not create a chat for the pasted files.");
         }
         if (runtime.removed) return;
-        const allowImages = await this.refreshVisionCapability();
+        const allowImages = await this.refreshServerCapabilities();
         if (runtime.removed) return;
         const attachment = await runtime.storage!.importAttachmentBytes(runtime.session.getRecord().id, file.fileName, bytes, { allowImages });
         if (runtime.removed) { await runtime.storage!.deleteAttachment(runtime.session!.getRecord().id, attachment); return; }

@@ -313,7 +313,7 @@ const state: State = {
   queuedMessages: [],
   notices: [],
   tokens: 0,
-  limit: 32768,
+  limit: 0,
   mode: "act",
   chatModeMenuOpen: false,
   serverPending: undefined,
@@ -2277,12 +2277,14 @@ function planTimestamp(value: string | undefined): number | undefined {
 
 function updateContextPill(): void {
   const compacting = state.compactActivity?.status === "pending";
-  const ratio = Math.min(1, state.tokens / Math.max(1, state.limit));
+  const knownLimit = state.limit > 0;
+  const ratio = knownLimit ? Math.min(1, state.tokens / state.limit) : 0;
   const pct = Math.round(ratio * 100);
   const dangerAt = state.autoCompact ? 0.9 : state.autoCompactThresholdPercent / 100;
   const pctClass = ratio >= dangerAt ? "danger" : "ok";
-  const contextHint = compacting ? "Compaction in progress..."
-    : state.compactHintOverride ?? `Context: ${state.tokens} / ${state.limit} tokens. Click to compact.`;
+  const usageHint = knownLimit ? `Context: ${state.tokens} / ${state.limit} tokens. Click to compact.`
+    : `Context: ${state.tokens} tokens. Context window unknown.`;
+  const contextHint = compacting ? "Compaction in progress..." : state.compactHintOverride ?? usageHint;
   const compact = root.querySelector("#compact") as HTMLElement | null;
   compact?.classList.toggle("danger", !compacting && pctClass === "danger");
   compact?.classList.toggle("ok", !compacting && pctClass === "ok");
@@ -2305,7 +2307,7 @@ function updateContextPill(): void {
   if (icon) setHtml(icon, compacting
     ? '<span class="ctx-compacting-ring" aria-hidden="true"></span>'
     : circleIcon(ratio));
-  if (pctEl) pctEl.textContent = compacting ? "" : `${pct}%`;
+  if (pctEl) pctEl.textContent = compacting ? "" : knownLimit ? `${pct}%` : "—";
 }
 
 function updateChatModeControl(): void {
@@ -4204,6 +4206,11 @@ function loadFromRecord(rec: ChatRecord): void {
 
 function handleHostMessage(msg: ExtToChat): void {
   if ("type" in msg) {
+    if (msg.type === "serverContext") {
+      state.limit = msg.contextSize ?? 0;
+      updateContextPill();
+      return;
+    }
     if (msg.type === "chatTabs") { chatTabs = msg.tabs; updateHeaderTitle(); return; }
     if (msg.type === "chatSnapshot") {
       saveChatView();
@@ -4771,7 +4778,13 @@ function handleHostMessage(msg: ExtToChat): void {
       }
       render();
       break;
-    case "tokens": state.tokens = msg.total; state.limit = msg.limit; updateContextPill(); break;
+    case "tokens":
+      state.tokens = msg.total;
+      // Snapshots restore usage, but their old server limit may belong to a
+      // different model. Opening a tab refreshes current server metadata.
+      if (!restoringChat) state.limit = msg.limit;
+      updateContextPill();
+      break;
     case "compactStatus":
       applyCompactStatus(msg.currentMessages, msg.minMessages, msg.available);
       render();
