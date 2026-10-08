@@ -323,8 +323,6 @@ function renderSettings(): string {
         ${sideFeature.renderSection?.(s, switchControl, esc) ?? ""}
       `)}
       ${settingsSection("automation", "Automation", `
-        ${switchControl("autoGenerateMemories", "Auto-generate memories", s.autoGenerateMemories === true)}
-        <p class="setting-help">Create or update a memory after Act and Review responses, independently of memory loading and tools.</p>
         ${switchControl("autoCompact", "Auto-compact context", autoCompact)}
         <label class="range-setting" for="autoCompactThresholdPercent">
           <span class="range-setting-head">
@@ -335,6 +333,8 @@ function renderSettings(): string {
         </label>
 
         <div id="toolAutoApprovals">${renderToolAutoApprovals()}</div>
+        ${switchControl("autoGenerateMemories", "Auto-generate memories", s.autoGenerateMemories === true)}
+        <p class="setting-help">Create or update a memory after Act and Review responses, independently of memory loading and tools.</p>
       `)}
 
       ${settingsSection("user", "User", `
