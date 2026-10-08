@@ -3,7 +3,8 @@ export { generateMemory } from "./memoryGeneration.js";
 import { beginForeground, foregroundBusy, onForegroundChange } from "../llm/activity.js";
 import { readSettings } from "../config/settings.js";
 import { countTokens } from "./contextTracker.js";
-import { ChatStorage, type ChatRecord } from "./storage.js";
+import { ChatStorage } from "./storage.js";
+import type { ChatRecord } from "./types.js";
 import {
   MEMORY_SUMMARY_TOKENS, transcriptRevision, usableMemory, redactMemorySecrets, memoryListItem,
   type ChatMemory, type MemoryCreation, type MemoryListItem, type MemorySnapshot
@@ -133,7 +134,7 @@ export class WorkspaceMemory {
           || transcriptRevision({ ...current, messages: current.messages.slice(0, sourceLength) }) !== revision) return undefined;
         return { text, sourceRevision: revision, generatedAt: Date.now(), enabled: current.memory?.enabled ?? true, manual: false };
       }, messageTs);
-    } catch (error) {
+    } catch {
       if (controller.signal.aborted) {
         if (epoch === this.epoch && !this.disposed) {
           const pending = this.queue.get(id);

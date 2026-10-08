@@ -1,6 +1,6 @@
 import type { FeatureContext, FeatureRuntime } from "../../../build/contracts.js";
 import type { AutoApprovalSetting, HarnessSettings } from "../../../config/settings.js";
-import type { ChatToolProcess } from "../../../ui/messaging.js";
+import type { ChatToolProcess } from "../../../chat/types.js";
 import type { CommandHandle, CommandProgress, CommandResult, CommandWaitResult } from "./process.js";
 import { toolCommandText } from "../../../ui/commandDisplay.js";
 

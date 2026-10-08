@@ -1,7 +1,9 @@
+import type { ChatAttachment, ChatMessage, ChatRecord } from "./types.js";
+export type { Role, StoredToolStatus, ChatAttachment, ChatMessage, ChatRecord } from "./types.js";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { validMemory, validMemoryCreation, validSnapshot, type ChatMemory, type MemoryCreation, type MemorySnapshot } from "./memory.js";
+import { validMemory, validMemoryCreation, validSnapshot, type ChatMemory, type MemoryCreation } from "./memory.js";
 import { WorkspaceChatIndex } from "./chatIndex.js";
 import { makeChatHeader, parseChatRecord, readChatHeader, writeChatFile, type ChatHeader, type IndexedChat } from "./chatFile.js";
 import { isValidChatId, normalizeWorkspaceRoot } from "./storagePaths.js";
@@ -9,12 +11,10 @@ export { isValidChatId } from "./storagePaths.js";
 import { MAX_MEMORY_COUNT } from "./memoryLimits.js";
 import { randomUUID } from "node:crypto";
 import { normalizeToolCallingProfile, type ToolCallingProfile } from "../llm/toolCallingProfile.js";
-import type { ChatToolResultDisplay } from "../ui/messaging.js";
-import type { FileUndoSnapshot } from "./fileUndo.js";
 import type { FileChangeSummary } from "./fileChanges.js";
 import { attachmentFileType, isImageAttachment, MAX_TEXT_ATTACHMENT_BYTES } from "./attachments.js";
 import { MAX_ATTACHMENTS_PER_MESSAGE } from "./attachmentLimits.js";
-import { normalizeChatMode, type ChatMode } from "./mode.js";
+import { normalizeChatMode } from "./mode.js";
 import {
   DEFAULT_REASONING_EFFORT,
   normalizeReasoningEffort,
@@ -25,93 +25,8 @@ export const CHATS_DIR = ".locality";
 export const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
 export const VISION_TOKEN_RESERVE = 4096;
 
-export type Role = "user" | "assistant" | "tool" | "system";
-export type StoredToolStatus = "executed" | "failed" | "rejected";
-
-export interface ChatAttachment {
-  id: string;
-  fileName: string;
-  mimeType: "image/jpeg" | "image/png" | "image/webp" | "text/plain";
-  byteLength: number;
-  /** Safe asset suffix; generic pasted text is stored as txt but has no fileType. */
-  extension: string;
-  /** Original text-file suffix, absent for generic pasted text or extensionless files. */
-  fileType?: string;
-}
-
-export interface ChatMessage {
-  role: Role;
-  /** Harness note about a user-requested file undo; hidden from the transcript UI. */
-  fileUndoNotice?: boolean;
-  content: string;
-  /** Display-only terminal response; never included in model context. */
-  interruption?: { reason: string; mode: ChatMode; reasoningEffort: ReasoningEffort };
-  /** Mode selected when a user message was submitted; absent in older history. */
-  mode?: ChatMode;
-  /** User guidance injected into the current turn without changing its mode. */
-  steering?: boolean;
-  /** Native model reasoning associated with this assistant response. */
-  reasoningContent?: string;
-  /** Parser events captured during this assistant turn (text, thought, toolCall, summary). */
-  events?: unknown[];
-  /** Tool call this message corresponds to (when role === "tool"). */
-  toolCall?: {
-    id?: string;
-    name: string;
-    argsJson: string;
-    /** Final UI outcome, retained so restored summaries do not imply failed work succeeded. */
-    status?: StoredToolStatus;
-    /** Retains the Created/Edited distinction for write_file across reloads. */
-    createsNewFile?: boolean;
-    /** Display command for process checks and stops, retained across reloads. */
-    processCommand?: string;
-    processOutput?: string;
-    processExitCode?: number;
-    /** Exact change made by this call, independent of later edits to the same file. */
-    fileChange?: FileChangeSummary;
-    /** Host-only data, excluded from model prompts and webview payloads. */
-    fileUndo?: FileUndoSnapshot;
-    fileUndoState?: "available" | "undone";
-  } & ChatToolResultDisplay;
-  /** File changes made during this assistant turn. */
-  fileChanges?: FileChangeSummary[];
-  /** Chat-owned image or text assets supplied by the user or a view_image tool result. */
-  attachments?: ChatAttachment[];
-  tokens?: number;
-  ts: number;
-}
-
 export type { FileChangeSummary };
 export type { TodoItem } from "./todos.js";
-
-export interface ChatRecord {
-  id: string;
-  workspaceRoot: string;
-  createdAt: number;
-  updatedAt: number;
-  title: string;
-  toolCallingMode: ToolCallingProfile;
-  mode: ChatMode;
-  /** Completed plan awaiting an explicit acceptance or revision request. */
-  pendingPlanMessageTs?: number;
-  /** Planning holds queued requests through all revisions until acceptance or cancellation. */
-  planning?: boolean;
-  reasoningEffort: ReasoningEffort;
-  /** Complete saved transcript; compaction never rewrites these messages. */
-  messages: ChatMessage[];
-  /** Model-only history after compaction, memory loading, or attachment expansion. */
-  contextMessages?: ChatMessage[];
-  memory?: ChatMemory;
-  memoryCreations?: MemoryCreation[];
-  /** Memories explicitly recalled by tools, for the UI disclosure only. */
-  recalledMemories?: MemorySnapshot[];
-  /** Memories loaded at chat start, for the UI disclosure; contents live in contextMessages. */
-  initialMemories?: MemorySnapshot[];
-  /** Token count of the model context, not the full transcript. */
-  totalTokens: number;
-  /** Model whose tokenizer produced the cached per-message token counts. */
-  tokenizerModel?: string;
-}
 
 export class ChatStorage {
   private index: WorkspaceChatIndex;

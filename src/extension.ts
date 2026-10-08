@@ -2,7 +2,8 @@ import { WorkspaceMemory } from "./chat/workspaceMemory.js";
 import * as vscode from "vscode";
 import { SideViewProvider } from "./ui/sideView/provider.js";
 import { ChatViewProvider } from "./ui/chatView/provider.js";
-import { ChatStorage, type ChatRecord } from "./chat/storage.js";
+import { ChatStorage } from "./chat/storage.js";
+import type { ChatRecord } from "./chat/types.js";
 import { readSettings, onSettingsChange } from "./config/settings.js";
 import { CommitMessageController } from "./scm/commitMessage.js";
 import {

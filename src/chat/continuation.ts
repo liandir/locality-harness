@@ -1,4 +1,5 @@
-import { modelMessages, type ChatMessage, type ChatRecord } from "./storage.js";
+import { modelMessages } from "./storage.js";
+import type { ChatMessage, ChatRecord } from "./types.js";
 
 /** Keep completed work and any compacted summary, dropping the failed tail. */
 export function continuationContext(record: ChatRecord): ChatMessage[] {

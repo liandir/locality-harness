@@ -1,4 +1,5 @@
-import type { ChatRecord, FileChangeSummary, StoredToolStatus } from "../../../chat/storage.js";
+import type { FileChangeSummary } from "../../../chat/storage.js";
+import type { ChatRecord, StoredToolStatus } from "../../../chat/types.js";
 import { normalizeToolArgsForDisplay } from "./toolArgs.js";
 
 /** Restore exact call diffs; older turn diffs are safe only for a single edit of that file. */

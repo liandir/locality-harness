@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { ChatRecord } from "./storage.js";
+import type { ChatRecord } from "./types.js";
 import { DEFAULT_MEMORY_MAX_COUNT, MAX_MEMORY_COUNT } from "./memoryLimits.js";
 
 export const MEMORY_SUMMARY_TOKENS = 384;

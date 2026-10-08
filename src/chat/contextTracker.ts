@@ -1,7 +1,8 @@
 import { isImageAttachment } from "./attachments.js";
 import { tokenize } from "../llm/client.js";
 import type { LlmContent } from "../llm/client.js";
-import { VISION_TOKEN_RESERVE, modelMessages, type ChatMessage, type ChatRecord } from "./storage.js";
+import { VISION_TOKEN_RESERVE, modelMessages } from "./storage.js";
+import type { ChatMessage, ChatRecord } from "./types.js";
 
 /**
  * Exact token counts keyed by the exact string tokenized. Repeated guard and

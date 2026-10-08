@@ -1,5 +1,6 @@
-import type { ChatToExt, ChatToolProcess } from "../ui/messaging.js";
-import type { UiEvent } from "../chat/session.js";
+import type { ChatToExt } from "../ui/messaging.js";
+import type { ChatToolProcess } from "../chat/types.js";
+import type { UiEvent } from "../chat/events.js";
 export interface FeatureCard extends ChatToolProcess {
   toolId: string;
   toolName: string;

@@ -1,10 +1,12 @@
+import { renderSettings, renderToolAutoApprovals, clampPercent } from "./settings.js";
+import type { SideViewState } from "./types.js";
+import { escapeHtml as esc } from "../../html.js";
 import { sideFeature } from "../../../build/side.js";
 import { preserveFormFocus } from "../../formFocus.js";
 import { installTooltips } from "../../tooltips.js";
 import type { MemoryListItem } from "../../../chat/memory.js";
 import { installChatContextMenu } from "../../chatContextMenu.js";
-import type { ChatTab } from "../../messaging.js";
-import { chevronIcon, memoryIcon } from "../../icons.js";
+import { memoryIcon, searchIcon, trashIcon, plusIcon, settingsIcon, historyIcon } from "../../icons.js";
 import { renderMemoryDate } from "../../memoryDate.js";
 import { DEFAULT_MEMORY_MAX_COUNT, MAX_MEMORY_COUNT } from "../../../chat/memoryLimits.js";
 import { isReasoningBudget } from "../../../chat/reasoningBudget.js";
@@ -13,9 +15,6 @@ import type { SettingsSection, SideTab } from "../../messaging.js";
 import {
   DEFAULT_REASONING_EFFORT,
   REASONING_NONE,
-  availableReasoningEffort,
-  normalizeReasoningEfforts,
-  reasoningEffortChoices,
   type ReasoningEffort
 } from "../../../chat/reasoningEffort.js";
 
@@ -27,29 +26,7 @@ declare function acquireVsCodeApi(): {
 
 const vscode = acquireVsCodeApi();
 
-interface State {
-  tab: SideTab;
-  search: string;
-  chats: { id: string; title: string; updatedAt: number }[];
-  settings: Record<string, unknown>;
-  reasoningEffort: ReasoningEffort;
-  reasoningEffortError?: string;
-  reasoningBudgetError?: string;
-  endpointMsg?: { ok?: boolean; text: string };
-  endpointDraft?: string;
-  endpointTesting?: boolean;
-  endpointSubmitted?: string;
-  endpointRequestId?: number;
-  endpointMetadata?: { modelAlias: string; contextSize: number; supportsVision: boolean };
-  serverModels: { id: string }[];
-  openTabs: ChatTab[];
-  version: string;
-  memories: MemoryListItem[];
-  memoryError?: string;
-  memorySettingError?: string;
-}
-
-const state: State = {
+const state: SideViewState = {
   tab: "welcome",
   search: "",
   chats: [],
@@ -88,7 +65,7 @@ function render(preserveDrafts = true): void {
       ${tabBtn("settings", "Settings")}
     </div>
     <div class="tab-body">
-      ${state.tab === "welcome" ? renderWelcome() : state.tab === "chats" ? renderChats() : renderSettings()}
+      ${state.tab === "welcome" ? renderWelcome() : state.tab === "chats" ? renderChats() : renderSettings(state, expandedSettings)}
     </div>
   `;
   bind();
@@ -185,15 +162,6 @@ function renderChats(): string {
   `;
 }
 
-function renderMemorySettings(): string {
-  return `<div class="memory-settings">
-    ${switchControl("memoryLoadOnStart", "Load memories at chat start", state.settings.memoryLoadOnStart === true)}
-    <p class="setting-help">Load relevant workspace memories from the first message. Independent of memory tools and generation.</p>
-    <label class="field-label" for="memoryMaxCount">Maximum memories / search results</label>
-    <input id="memoryMaxCount" type="number" min="1" max="${MAX_MEMORY_COUNT}" step="1" value="${esc(String(state.settings.memoryMaxCount ?? DEFAULT_MEMORY_MAX_COUNT))}" />
-  </div>`;
-}
-
 function renderChatEntry(chat: { id: string; title: string; updatedAt?: number }, memory: MemoryListItem | undefined, group: string): string {
   const panelId = `memory-${group}-${chat.id}`;
   const running = state.openTabs.some(tab => tab.id === chat.id && tab.running);
@@ -226,152 +194,12 @@ function renderChatMemory(memory: MemoryListItem, panelId: string): string {
       </div>`;
 }
 
-function renderSettings(): string {
-  const s = state.settings;
-  const endpoint = state.endpointDraft ?? String(s["endpoint"] ?? "http://localhost:8080/v1");
-  const model = String(s["model"] ?? "local");
-  const toolCallingMode = String(s["toolCallingMode"] ?? "compat-gemma4");
-  const temperature = String(s["temperature"] ?? 0.8);
-  const topK = String(s["topK"] ?? 40);
-  const topP = String(s["topP"] ?? 0.95);
-  const reasoningBudget = String(s["reasoningBudget"] ?? "");
-  const reasoningEfforts = normalizeReasoningEfforts(s["reasoningEfforts"]);
-  const reasoningEffort = availableReasoningEffort(state.reasoningEffort, reasoningEfforts);
-  const reasoningEnabled = reasoningEffort !== REASONING_NONE;
-  const selectedEffort = reasoningEnabled ? reasoningEffort : DEFAULT_REASONING_EFFORT;
-  const showThinking = s["showThinking"] === true;
-  const autoCompact = !!s["autoCompact"];
-  const autoCompactPct = clampPercent(Number(s["autoCompactThresholdPercent"] ?? 80));
-  const validationCls = state.endpointMsg?.ok === true ? "ok" : state.endpointMsg?.ok === false ? "err" : "";
-
-  return `
-    <div class="panel settings-panel">
-      ${state.memorySettingError ? `<p class="memory-error" role="alert">${esc(state.memorySettingError)}</p>` : ""}
-      ${settingsSection("model", "Model", `
-        <label class="field-label" for="endpoint">Server URL</label>
-        <div class="setting-action-row">
-          <input id="endpoint" type="text" value="${esc(endpoint)}" ${state.endpointTesting ? "readonly" : ""} />
-          <button id="saveEndpoint" class="action-btn" ${state.endpointTesting ? "disabled" : ""}>${state.endpointTesting ? "Connecting…" : "Set"}</button>
-        </div>
-        <div class="validation ${validationCls}" role="${state.endpointMsg?.ok === false ? "alert" : "status"}">${esc(state.endpointMsg?.text ?? "")}</div>
-        ${state.serverModels.length > 0 ? `
-          <label class="field-label" for="model">Model</label>
-          <select id="model">
-            ${state.serverModels.map(item => `<option value="${esc(item.id)}" ${item.id === model ? "selected" : ""}>${esc(item.id)}</option>`).join("")}
-          </select>
-        ` : ""}
-        ${state.endpointMetadata ? `<div class="endpoint-metadata">
-          <div><span>Reported model</span><strong>${esc(state.endpointMetadata.modelAlias)}</strong></div>
-          <div><span>Context</span><strong>${esc(state.endpointMetadata.contextSize.toLocaleString())} tokens</strong></div>
-          <div><span>Image input</span><strong>${state.endpointMetadata.supportsVision ? "Supported" : "Unavailable"}</strong></div>
-        </div>` : ""}
-
-        <div class="field-row">
-          <div class="field-cell">
-            <label class="field-label" for="temperature">Temperature</label>
-            <input id="temperature" type="number" min="0" max="2" step="0.05" value="${esc(temperature)}" />
-          </div>
-          <div class="field-cell">
-            <label class="field-label" for="topK">Top-k</label>
-            <input id="topK" type="number" min="0" step="1" value="${esc(topK)}" />
-          </div>
-          <div class="field-cell">
-            <label class="field-label" for="topP">Top-p</label>
-            <input id="topP" type="number" min="0" max="1" step="0.05" value="${esc(topP)}" />
-          </div>
-        </div>
-        ${switchControl("reasoningEnabled", "Activate Reasoning", reasoningEnabled)}
-        <label class="field-label" for="reasoningEffort">Reasoning effort</label>
-        <select id="reasoningEffort" ${reasoningEnabled ? "" : "disabled"}>
-          ${reasoningEffortChoices(reasoningEfforts).map(choice => `<option value="${esc(choice.effort)}" ${choice.effort === selectedEffort ? "selected" : ""}>${esc(choice.label)}</option>`).join("")}
-        </select>
-        ${state.reasoningEffortError ? `<p class="validation err" role="alert">${esc(state.reasoningEffortError)}</p>` : ""}
-        <label class="field-label" for="reasoningBudget">Reasoning budget</label>
-        <div class="number-stepper">
-          <input id="reasoningBudget" type="number" min="1" max="${Number.MAX_SAFE_INTEGER}" step="1" placeholder="Unlimited" value="${esc(reasoningBudget)}" ${reasoningEnabled ? "" : "disabled"} />
-          <div class="number-stepper-actions">
-            <button type="button" data-budget-step="1" aria-label="Increase reasoning budget" ${reasoningEnabled ? "" : "disabled"}>${chevronIcon()}</button>
-            <button type="button" data-budget-step="-1" aria-label="Decrease reasoning budget" ${reasoningEnabled ? "" : "disabled"}>${chevronIcon()}</button>
-          </div>
-        </div>
-        ${state.reasoningBudgetError ? `<p class="validation err" role="alert">${esc(state.reasoningBudgetError)}</p>` : ""}
-      `)}
-
-      ${settingsSection("tools", "Tools", `
-        <label class="field-label" for="toolCallingMode">Tool calling</label>
-        <select id="toolCallingMode">
-          <option value="native" ${toolCallingMode === "native" ? "selected" : ""}>Native server only</option>
-          <option value="compat-gemma4" ${toolCallingMode === "compat-gemma4" ? "selected" : ""}>Gemma 4 compatibility</option>
-          <option value="compat-qwen3" ${toolCallingMode === "compat-qwen3" ? "selected" : ""}>Qwen 3 compatibility</option>
-          <option value="compat-muse-glimmer" ${toolCallingMode === "compat-muse-glimmer" ? "selected" : ""}>Muse Glimmer compatibility</option>
-          <option value="compat-gpt-oss" ${toolCallingMode === "compat-gpt-oss" ? "selected" : ""}>GPT-OSS compatibility</option>
-        </select>
-
-        <div class="tool-toggles">
-          ${switchControl("memoryEnabled", "Activate memories", s.memoryEnabled === true)}
-          ${switchControl("readToolsEnabled", "Activate reads", s.readToolsEnabled !== false)}
-          ${switchControl("editToolsEnabled", "Activate edits", s.editToolsEnabled !== false)}
-          ${sideFeature.renderTools?.(s, switchControl, esc) ?? ""}
-        </div>
-        ${sideFeature.renderSection?.(s, switchControl, esc) ?? ""}
-      `)}
-
-      ${settingsSection("chat", "Chat", `
-        ${switchControl("showThinking", "Show thoughts", showThinking)}
-        ${switchControl("steerWithEnter", "Steer/Queue messages", s.steerWithEnter === true)}
-        <p class="setting-help">${s.steerWithEnter === true ? "Enter steers; Ctrl+Enter queues." : "Enter queues; Ctrl+Enter steers."}</p>
-        ${renderMemorySettings()}
-      `)}
-
-      ${settingsSection("automation", "Automation", `
-        <div id="toolAutoApprovals">${renderToolAutoApprovals()}</div>
-        ${switchControl("autoCompact", "Auto-compact context", autoCompact)}
-        <label class="range-setting" for="autoCompactThresholdPercent">
-          <span class="range-setting-head">
-            <span>Auto-compact threshold</span>
-            <strong id="autoCompactThresholdValue">${autoCompactPct}%</strong>
-          </span>
-          <input id="autoCompactThresholdPercent" type="range" min="50" max="95" step="1" value="${autoCompactPct}" />
-        </label>
-
-        ${switchControl("autoGenerateMemories", "Auto-generate memories", s.autoGenerateMemories === true)}
-        <p class="setting-help">Create or update a memory after Act and Review responses, independently of memory loading and tools.</p>
-      `)}
-
-      ${settingsSection("user", "User", `
-        <button id="editUserSettings" class="action-btn wide-button">Edit User Settings</button>
-        <button id="editWorkspacePrompts" class="action-btn wide-button">Edit workspace prompts</button>
-        <button id="restorePrompts" class="action-btn wide-button">Restore default prompts</button>
-      `)}
-
-      ${settingsSection("reset", "Reset", `
-        <button id="resetDefaults" class="action-btn wide-button danger">Restore all defaults</button>
-      `)}
-    </div>
-  `;
-}
-
-function settingsSection(id: SettingsSection, label: string, content: string): string {
-  const expanded = expandedSettings.has(id);
-  return `<section class="panel-section settings-section">
-    <h3><button type="button" class="settings-section-heading" data-settings-section="${id}" aria-expanded="${expanded}" aria-controls="settings-${id}"><span>${label}</span>${chevronIcon()}</button></h3>
-    <div class="settings-section-content" id="settings-${id}" ${expanded ? "" : "hidden"}>${content}</div>
-  </section>`;
-}
-
 function updateSettingsSections(): void {
   root.querySelectorAll<HTMLButtonElement>("[data-settings-section]").forEach(button => {
     const expanded = expandedSettings.has(button.dataset.settingsSection as SettingsSection);
     button.setAttribute("aria-expanded", String(expanded));
     document.getElementById(button.getAttribute("aria-controls")!)!.hidden = !expanded;
   });
-}
-
-function renderToolAutoApprovals(): string {
-  const s = state.settings;
-  return switchControl("autoapproveReads", "Auto-approve reads", !!s.autoapproveReads, s.readToolsEnabled === false && s.memoryEnabled !== true)
-    + switchControl("autoapproveWrites", "Auto-approve edits", !!s.autoapproveWrites, s.editToolsEnabled === false)
-    + sideFeature.render(s, switchControl, esc);
 }
 
 function bind(): void {
@@ -385,7 +213,7 @@ function bind(): void {
   root.querySelectorAll<HTMLInputElement>(".tool-toggles input").forEach(input => input.addEventListener("change", () => {
     state.settings[input.id] = input.checked;
     const approvals = root.querySelector<HTMLElement>("#toolAutoApprovals")!;
-    approvals.innerHTML = renderToolAutoApprovals();
+    approvals.innerHTML = renderToolAutoApprovals(state.settings);
     bindApprovalSettings();
     sideFeature.bind(approvals, send);
     send({ type: "saveSetting", key: input.id, value: input.checked });
@@ -561,56 +389,6 @@ function bindRangeSetting(id: string): void {
 function updateAutoCompactThresholdLabel(percent: number): void {
   const label = root.querySelector("#autoCompactThresholdValue") as HTMLElement | null;
   if (label) label.textContent = `${percent}%`;
-}
-
-function esc(s: string): string {
-  return s.replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]!));
-}
-
-function clampPercent(value: number): number {
-  if (!Number.isFinite(value)) return 80;
-  return Math.min(95, Math.max(50, Math.round(value)));
-}
-
-function trashIcon(): string {
-  return `<svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true" focusable="false">
-    <path d="M6 2h4l.5 1.5H14v1H2v-1h3.5L6 2Zm-2 4h8l-.5 8h-7L4 6Zm2 1v6h1V7H6Zm3 0v6h1V7H9Z" fill="currentColor"/>
-  </svg>`;
-}
-
-function searchIcon(): string {
-  return `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
-    <circle cx="10.5" cy="10.5" r="5.75"/>
-    <path d="m15 15 4.5 4.5"/>
-  </svg>`;
-}
-
-function plusIcon(): string {
-  return `<svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" focusable="false">
-    <path d="M7.4 2h1.2v5.4H14v1.2H8.6V14H7.4V8.6H2V7.4h5.4V2Z" fill="currentColor"/>
-  </svg>`;
-}
-
-function settingsIcon(): string {
-  return `<svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" focusable="false">
-    <path d="M6.92 1.5h2.16l.34 1.7c.35.12.69.26 1 .43l1.45-.96 1.53 1.53-.96 1.45c.17.32.31.65.43 1l1.63.35v2.16l-1.63.35c-.12.35-.26.68-.43 1l.96 1.45-1.53 1.53-1.45-.96c-.31.17-.65.31-1 .43l-.34 1.54H6.92l-.34-1.54c-.35-.12-.69-.26-1-.43l-1.45.96-1.53-1.53.96-1.45c-.17-.32-.31-.65-.43-1L1.5 9.16V7l1.63-.35c.12-.35.26-.68.43-1L2.6 4.2l1.53-1.53 1.45.96c.31-.17.65-.31 1-.43l.34-1.7ZM8 5.2a2.8 2.8 0 1 0 0 5.6 2.8 2.8 0 0 0 0-5.6Z" fill="currentColor"/>
-  </svg>`;
-}
-
-function historyIcon(): string {
-  return `<svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
-    <path d="M4.05 5.2h-2.2V3"/>
-    <path d="M2.22 5.18A5.7 5.7 0 1 1 2.1 10"/>
-    <path d="M8 5.15v3.1l2.05 1.2"/>
-  </svg>`;
-}
-
-function switchControl(id: string, label: string, checked: boolean, disabled = false): string {
-  return `<label class="switch-row${disabled ? " disabled" : ""}" for="${id}">
-    <span>${esc(label)}</span>
-    <input id="${id}" type="checkbox" ${checked ? "checked" : ""} ${disabled ? "disabled" : ""}/>
-    <span class="switch" aria-hidden="true"></span>
-  </label>`;
 }
 
 function ago(ts: number): string {

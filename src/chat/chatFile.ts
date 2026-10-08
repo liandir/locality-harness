@@ -1,7 +1,7 @@
 import * as fs from "node:fs/promises";
 import type { Stats } from "node:fs";
 import { randomUUID } from "node:crypto";
-import type { ChatRecord } from "./storage.js";
+import type { ChatRecord } from "./types.js";
 import { transcriptRevision, validMemory, type ChatMemory } from "./memory.js";
 import { isValidChatId, normalizeWorkspaceRoot } from "./storagePaths.js";
 

@@ -1,7 +1,8 @@
 import { isImageAttachment } from "./attachments.js";
 import { complete } from "../llm/client.js";
 import { countTokens, recomputeTokens, truncateToTokenBudget } from "./contextTracker.js";
-import { VISION_TOKEN_RESERVE, modelMessages, type ChatRecord, type ChatMessage } from "./storage.js";
+import { VISION_TOKEN_RESERVE, modelMessages } from "./storage.js";
+import type { ChatRecord, ChatMessage } from "./types.js";
 
 /** Nominal minimum tail; the real tail is chosen by token budget (see CompactConfig). */
 export const KEEP_TAIL = 4;
