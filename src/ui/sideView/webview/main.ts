@@ -297,13 +297,6 @@ function renderSettings(): string {
         ${state.reasoningBudgetError ? `<p class="validation err" role="alert">${esc(state.reasoningBudgetError)}</p>` : ""}
       `)}
 
-      ${settingsSection("chat", "Chat", `
-        ${switchControl("showThinking", "Show thoughts", showThinking)}
-        ${switchControl("steerWithEnter", "Steer/Queue messages", s.steerWithEnter === true)}
-        <p class="setting-help">${s.steerWithEnter === true ? "Enter steers; Ctrl+Enter queues." : "Enter queues; Ctrl+Enter steers."}</p>
-        ${renderMemorySettings()}
-      `)}
-
       ${settingsSection("tools", "Tools", `
         <label class="field-label" for="toolCallingMode">Tool calling</label>
         <select id="toolCallingMode">
@@ -322,6 +315,14 @@ function renderSettings(): string {
         </div>
         ${sideFeature.renderSection?.(s, switchControl, esc) ?? ""}
       `)}
+
+      ${settingsSection("chat", "Chat", `
+        ${switchControl("showThinking", "Show thoughts", showThinking)}
+        ${switchControl("steerWithEnter", "Steer/Queue messages", s.steerWithEnter === true)}
+        <p class="setting-help">${s.steerWithEnter === true ? "Enter steers; Ctrl+Enter queues." : "Enter queues; Ctrl+Enter steers."}</p>
+        ${renderMemorySettings()}
+      `)}
+
       ${settingsSection("automation", "Automation", `
         <div id="toolAutoApprovals">${renderToolAutoApprovals()}</div>
         ${switchControl("autoCompact", "Auto-compact context", autoCompact)}

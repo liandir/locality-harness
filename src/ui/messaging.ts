@@ -112,7 +112,7 @@ export interface ChatResponseDiscarded {
 // --- Side view (welcome / chats / settings) ---
 
 export type SideTab = "welcome" | "chats" | "settings";
-export const SETTINGS_SECTIONS = ["model", "chat", "tools", "automation", "user", "reset"] as const;
+export const SETTINGS_SECTIONS = ["model", "tools", "chat", "automation", "user", "reset"] as const;
 export type SettingsSection = typeof SETTINGS_SECTIONS[number];
 export type WorkspacePathType = "file" | "directory" | "other" | "missing";
 
