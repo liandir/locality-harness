@@ -1,10 +1,5 @@
-import { describe, expect, it, vi } from "vitest";
-
-// session.js transitively imports the terminal tool, which imports "vscode".
-// The normalizer under test needs none of it; an empty module satisfies the graph.
-vi.mock("vscode", () => ({}));
-
-import { normalizeAskUserQuestionArgs } from "../src/chat/session.js";
+import { describe, expect, it } from "vitest";
+import { normalizeAskUserQuestionArgs } from "../src/chat/toolArguments.js";
 
 describe("normalizeAskUserQuestionArgs", () => {
   it("accepts a question with two or more suggestions", () => {

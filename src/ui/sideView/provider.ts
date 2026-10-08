@@ -113,7 +113,7 @@ export class SideViewProvider implements vscode.WebviewViewProvider {
 
   async revealMemory(id: string): Promise<void> {
     const storage = this.getStorage();
-    if (!storage || !await storage.load(id) || storage !== this.getStorage()) return;
+    if (!storage || !(await storage.metadata()).some(chat => chat.id === id) || storage !== this.getStorage()) return;
     this.pendingMemory = { id, storage };
     this.activeTab = "chats";
     await vscode.commands.executeCommand("workbench.view.extension.locality");

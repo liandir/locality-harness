@@ -232,20 +232,22 @@ describe("work session labels", () => {
     expect(toolActivityIsActive(toolName, "failed", false, true)).toBe(false);
   });
 
-  it.each(["list_dir", "read_file", "edit_file", "view_image", "wait_process", "compact_context"])(
-    "settles %s while title generation blocks ingestion of its completed result",
-    toolName => {
-      const activity: WorkActivity = {
-        kind: "tool", toolName, status: "executed",
-        active: toolActivityIsActive(toolName, "executed", false, true, true)
-      };
-      expect(activity.active).toBe(false);
-      expect(liveWorkSummary([activity], "Generating title"))
-        .toBe(`${finishedWorkSummary([activity])}, generating title`);
-      expect(workSummaryIcons([activity], true)).toEqual([{ activityIndex: 0, active: false }]);
-      expect(toolActivityIsActive(toolName, "executed", false, true, false)).toBe(true);
-    }
-  );
+  describe.each(["Generating title", "Loading chat context"])("during %s", status => {
+    it.each(["list_dir", "read_file", "edit_file", "view_image", "wait_process", "compact_context"])(
+      "settles %s while the preparation status explains the wait",
+      toolName => {
+        const activity: WorkActivity = {
+          kind: "tool", toolName, status: "executed",
+          active: toolActivityIsActive(toolName, "executed", false, true, true)
+        };
+        expect(activity.active).toBe(false);
+        expect(liveWorkSummary([activity], status))
+          .toBe(`${finishedWorkSummary([activity])}, ${status.toLowerCase()}`);
+        expect(workSummaryIcons([activity], true)).toEqual([{ activityIndex: 0, active: false }]);
+        expect(toolActivityIsActive(toolName, "executed", false, true, false)).toBe(true);
+      }
+    );
+  });
 
   it("preserves actual tool and process activity during a title wait", () => {
     expect(toolActivityIsActive("list_dir", "approved", false, false, true)).toBe(true);
@@ -328,7 +330,7 @@ describe("live statuses in work summaries", () => {
       expect(liveWorkSummary([read], status)).toBe(`Read file, ${suffix}`);
       expect(liveWorkSummary([read, listed], status)).toBe(`Read file, listed directory, ${suffix}`);
       expect(liveWorkSummary([read, listed, command], status)).toBe(
-        "Read file, listed directory, ran command" + (status === "Generating title" ? ", generating title" : "")
+        "Read file, listed directory, ran command" + (["Generating title", "Loading chat context"].includes(status) ? `, ${suffix}` : "")
       );
     }
   );

@@ -15,16 +15,16 @@ export type WorkActivity =
 
 const WRITE_TOOLS = new Set(["write_file", "create_file", "edit_file", "insert_text", "replace_range"]);
 
-/** Include prompt ingestion and running processes, but not ingestion queued behind a title request. */
+/** Show result ingestion on the tool unless a separate preparation status explains the wait. */
 export function toolActivityIsActive(
   toolName: string,
   status: ToolActivityStatus,
   processRunning = false,
   contextPending = false,
-  waitingForTitle = false
+  preparingRequest = false
 ): boolean {
   return (["streaming", "approved"].includes(status) || (status === "pending" && toolName === "compact_context"))
-    || (status === "executed" && contextPending && !waitingForTitle)
+    || (status === "executed" && contextPending && !preparingRequest)
     || toolOwnsRunningProcess(toolName, processRunning);
 }
 
@@ -70,9 +70,9 @@ export function liveWorkSummary(activities: WorkActivity[], liveStatus?: string)
     labels.push(liveStatus === "Thinking" || thoughts.some(workActivityIsActive) ? "thinking" : "thought");
     typeCount++;
   }
-  // A delayed title wait explains why the server is unavailable, even when
-  // the completed-work summary has already filled its three activity slots.
-  if (liveStatus && (typeCount < 3 || liveStatus === "Generating title") && !(liveStatus === "Thinking" && thoughts.length)) {
+  // Keep title generation and full context loading visible even when completed
+  // work has already filled the summary's three activity slots.
+  if (liveStatus && (typeCount < 3 || liveStatus === "Generating title" || liveStatus === "Loading chat context") && !(liveStatus === "Thinking" && thoughts.length)) {
     labels.push(lowerFirst(liveStatus));
   }
   if (waiting?.kind === "tool") labels.push(lowerFirst(waitingToolLabel(waiting.toolName)));

@@ -1,40 +1,19 @@
-import type { MemoryCreation, MemoryListItem } from "../chat/memory.js";
 /**
- * Message types exchanged between the extension host and each webview.
- * Kept in one file so both sides import the same definitions.
+ * Webview commands and presentation messages. Session events and chat data
+ * live in shared chat contracts, independently of their host implementations.
  */
-import type { UiEvent } from "../chat/session.js";
-import type { ChatAttachment } from "../chat/storage.js";
+import type { MemoryListItem } from "../chat/memory.js";
+import type { UiEvent } from "../chat/events.js";
+import type { ChatAttachment } from "../chat/types.js";
 import type { ReasoningEffort } from "../chat/reasoningEffort.js";
 import type { ChatMode } from "../chat/mode.js";
 
-/** Model-context size sent with chatLoaded, independently of the visible transcript. */
-export interface ChatContextState {
-  contextMessageCount?: number;
-}
-
-export interface ChatUserMessage {
-  kind: "userMessage";
-  messageId: string;
-  messageTs: number;
-  text: string;
-  mode: ChatMode;
-  steering?: boolean;
-  attachments?: ChatAttachment[];
-}
-
-export interface ChatPlanFinal {
-  kind: "planFinal";
-  messageId: string;
-  messageTs: number;
-  markdown: string;
-}
-
-export interface ChatPlanningState {
-  kind: "planningState";
-  active: boolean;
-  pendingPlanMessageTs?: number;
-}
+export type {
+  ChatContextState, ChatUserMessage, ChatPlanFinal, ChatPlanningState,
+  ChatTurnPreparation, ChatTurnWorkStarted, ChatMemoryCreations,
+  ChatContextActivity, ChatTurnEnd, ChatTurnAbort, ChatResponseDiscarded
+} from "../chat/events.js";
+export type { ChatToolResultDisplay, ChatToolProcess } from "../chat/types.js";
 
 export interface UiQueuedMessage {
   id: string;
@@ -43,76 +22,10 @@ export interface UiQueuedMessage {
   attachments?: UiAttachment[];
 }
 
-export interface ChatTurnPreparation {
-  kind: "turnPreparing";
-  /** Memory preparation is silent; its creation card remains visible above the new message. */
-  reason: "server" | "title" | "context" | "memory";
-}
-
-export interface ChatTurnWorkStarted {
-  kind: "turnWorkStarted";
-  messageId: string;
-  startedAt: number;
-  /** Reopen the saved response after the host removes its terminal error. */
-  continued?: boolean;
-}
-
-export interface ChatMemoryCreations {
-  kind: "memoryCreations";
-  /** Includes the create/update operation for both live cards and saved history. */
-  creations: MemoryCreation[];
-}
-
-/** Optional presentation payload, never sent to the model as tool content. */
-export interface ChatToolResultDisplay {
-  displayResult?: string;
-}
-
-/** Host-owned process identity, display command, and current Stop availability. */
-export interface ChatToolProcess {
-  processJobId?: string;
-  processCommand?: string;
-  processRunning?: boolean;
-  /** Display-only output, kept separate from the model's stream-labeled result. */
-  processOutput?: string;
-  processExitCode?: number;
-}
-
-/** Authoritative list of activities whose results the model is still consuming. */
-export interface ChatContextActivity {
-  kind: "contextActivity";
-  activityIds: string[];
-}
-
-/** Completed turn metadata; the answer time is absent for turns without a final answer. */
-export interface ChatTurnEnd {
-  kind: "turnEnd";
-  messageId: string;
-  /** Mode captured for this turn, independent of the current composer mode. */
-  mode: ChatMode;
-  messageTs?: number;
-}
-
-/** Terminal response timestamp comes from the saved host transcript. */
-export interface ChatTurnAbort {
-  kind: "abort";
-  reason: string;
-  messageTs?: number;
-}
-
-/** Remove only the unfinished output of a generation that will be retried. */
-export interface ChatResponseDiscarded {
-  kind: "responseDiscarded";
-  messageId: string;
-  textChars: number;
-  thoughtChars: number;
-  toolIds: string[];
-}
-
 // --- Side view (welcome / chats / settings) ---
 
 export type SideTab = "welcome" | "chats" | "settings";
-export const SETTINGS_SECTIONS = ["model", "chat", "tools", "automation", "user", "reset"] as const;
+export const SETTINGS_SECTIONS = ["model", "tools", "chat", "automation", "user", "reset"] as const;
 export type SettingsSection = typeof SETTINGS_SECTIONS[number];
 export type WorkspacePathType = "file" | "directory" | "other" | "missing";
 
@@ -208,6 +121,8 @@ export type ChatToExt = (
   | { type: "deleteCurrent" }) & { chatId?: string };
 
 export type ExtToChat = UiEvent
+  /** Server metadata is independent of saved chat history; absent size means unknown. */
+  | { type: "serverContext"; contextSize?: number }
   | { type: "fileUndoFinished"; userMessageTs: number }
   | { type: "chatTabs"; tabs: ChatTab[]; activeId?: string }
   | { type: "chatSnapshot"; id: string; events: ExtToChat[]; busy: boolean; draft: string }

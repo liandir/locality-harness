@@ -37,4 +37,4 @@ export function serverPendingLabel(
     default: return undefined;
   }
 }
-import type { ChatTurnPreparation } from "../../messaging.js";
+import type { ChatTurnPreparation } from "../../../chat/events.js";

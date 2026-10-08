@@ -32,3 +32,29 @@ export function pawnIcon(): string {
     <path d="M6.7 14.15h10.6l1.25 3.1a1.05 1.05 0 0 1-.98 1.45H6.43a1.05 1.05 0 0 1-.98-1.45Z"/>
   </svg>`;
 }
+
+export function plusIcon(): string {
+  return `<svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" focusable="false">
+    <path d="M7.4 2h1.2v5.4H14v1.2H8.6V14H7.4V8.6H2V7.4h5.4V2Z" fill="currentColor"/>
+  </svg>`;
+}
+
+export function settingsIcon(): string {
+  return `<svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" focusable="false">
+    <path d="M6.92 1.5h2.16l.34 1.7c.35.12.69.26 1 .43l1.45-.96 1.53 1.53-.96 1.45c.17.32.31.65.43 1l1.63.35v2.16l-1.63.35c-.12.35-.26.68-.43 1l.96 1.45-1.53 1.53-1.45-.96c-.31.17-.65.31-1 .43l-.34 1.54H6.92l-.34-1.54c-.35-.12-.69-.26-1-.43l-1.45.96-1.53-1.53.96-1.45c-.17-.32-.31-.65-.43-1L1.5 9.16V7l1.63-.35c.12-.35.26-.68.43-1L2.6 4.2l1.53-1.53 1.45.96c.31-.17.65-.31 1-.43l.34-1.7ZM8 5.2a2.8 2.8 0 1 0 0 5.6 2.8 2.8 0 0 0 0-5.6Z" fill="currentColor"/>
+  </svg>`;
+}
+
+export function historyIcon(): string {
+  return `<svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+    <path d="M4.05 5.2h-2.2V3"/>
+    <path d="M2.22 5.18A5.7 5.7 0 1 1 2.1 10"/>
+    <path d="M8 5.15v3.1l2.05 1.2"/>
+  </svg>`;
+}
+
+export function trashIcon(): string {
+  return `<svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true" focusable="false">
+    <path d="M6 2h4l.5 1.5H14v1H2v-1h3.5L6 2Zm-2 4h8l-.5 8h-7L4 6Zm2 1v6h1V7H6Zm3 0v6h1V7H9Z" fill="currentColor"/>
+  </svg>`;
+}

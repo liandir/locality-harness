@@ -1,4 +1,4 @@
-import type { ChatAttachment } from "./storage.js";
+import type { ChatAttachment } from "./types.js";
 
 export const LARGE_PASTE_CHARACTERS = 10_000;
 export const LARGE_PASTE_LINES = 200;

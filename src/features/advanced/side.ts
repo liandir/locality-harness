@@ -13,15 +13,12 @@ let status: { ok?: boolean; text: string } | undefined;
 export const sideFeature: SideFeature = {
   label: "Advanced",
   renderTools: (settings, toggle, escape) => (commands.renderTools?.(settings, toggle, escape) ?? "")
-    + toggle("webRequestsEnabled", "Web requests", settings.webRequestsEnabled !== false),
+    + toggle("webRequestsEnabled", "Activate web requests", settings.webRequestsEnabled !== false),
   render: (settings, toggle, escape) => commands.render(settings, toggle, escape)
     + toggle("autoapproveWebSearch", "Auto-approve web requests", settings.autoapproveWebSearch === true, settings.webRequestsEnabled === false || settings.webToolsEnabled !== true),
   renderSection(settings, _toggle, escape) {
     const disabled = testing || !loaded ? "disabled" : "";
-    return `<label class="field-label" for="webSearchMaxResults">Maximum number of search results</label>
-      <input id="webSearchMaxResults" type="number" min="1" max="${MAX_SEARCH_RESULTS}" step="1" value="${normalizeSearchMaxResults(settings.webSearchMaxResults)}" aria-describedby="webSearchMaxResultsHelp" />
-      <p id="webSearchMaxResultsHelp" class="setting-help">Caps results per search. The model may request fewer.</p>
-      <div class="connection-settings" aria-label="Web search settings">
+    return `<fieldset id="webSearchSettings" class="connection-settings" aria-label="Web search settings" ${settings.webRequestsEnabled === false ? "disabled" : ""}>
         <label class="field-label" for="webSearchEndpoint">Web search endpoint</label>
         <div class="setting-action-row">
           <input id="webSearchEndpoint" type="text" value="${escape(endpoint ?? String(settings.webSearchEndpoint ?? ""))}" placeholder="https://search.example.org" ${disabled} />
@@ -30,11 +27,19 @@ export const sideFeature: SideFeature = {
         <label class="field-label" for="webSearchApiKey">API-key</label>
         <input id="webSearchApiKey" type="password" autocomplete="off" spellcheck="false" placeholder="Required for some endpoints" ${disabled} />
         ${status ? `<div class="validation ${status.ok === false ? "err" : status.ok ? "ok" : ""}" role="${status.ok === false ? "alert" : "status"}">${escape(status.text)}</div>` : ""}
-      </div>`;
+        <label class="field-label" for="webSearchMaxResults">Maximum number of search results</label>
+        <input id="webSearchMaxResults" type="number" min="1" max="${MAX_SEARCH_RESULTS}" step="1" value="${normalizeSearchMaxResults(settings.webSearchMaxResults)}" aria-describedby="webSearchMaxResultsHelp" />
+        <p id="webSearchMaxResultsHelp" class="setting-help">Caps results per search. The model may request fewer.</p>
+      </fieldset>`;
   },
   bind(root, send, render) {
     commands.bind(root, send);
+    const searchSettings = root.querySelector<HTMLFieldSetElement>("#webSearchSettings");
+    root.querySelector<HTMLInputElement>("#webRequestsEnabled")?.addEventListener("change", event => {
+      if (searchSettings) searchSettings.disabled = !(event.currentTarget as HTMLInputElement).checked;
+    });
     root.querySelector<HTMLInputElement>("#webSearchMaxResults")?.addEventListener("change", event => {
+      if (searchSettings?.disabled) return;
       const input = event.currentTarget as HTMLInputElement;
       const value = normalizeSearchMaxResults(input.value.trim() ? Number(input.value) : undefined);
       input.value = String(value);
@@ -51,7 +56,7 @@ export const sideFeature: SideFeature = {
       apiKey = keyInput.value; dirty = true; status = undefined;
     });
     const submit = (): void => {
-      if (!loaded || testing) return;
+      if (searchSettings?.disabled || !loaded || testing) return;
       endpoint = endpointInput?.value.trim() ?? "";
       apiKey = keyInput?.value.trim() ?? "";
       dirty = true;

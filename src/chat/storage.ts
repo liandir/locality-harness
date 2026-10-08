@@ -1,16 +1,20 @@
+import type { ChatAttachment, ChatMessage, ChatRecord } from "./types.js";
+export type { Role, StoredToolStatus, ChatAttachment, ChatMessage, ChatRecord } from "./types.js";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { validMemory, validMemoryCreation, validSnapshot, type ChatMemory, type MemoryCreation, type MemorySnapshot } from "./memory.js";
+import { validMemory, validMemoryCreation, validSnapshot, type ChatMemory, type MemoryCreation } from "./memory.js";
+import { WorkspaceChatIndex } from "./chatIndex.js";
+import { makeChatHeader, parseChatRecord, readChatHeader, writeChatFile, type ChatHeader, type IndexedChat } from "./chatFile.js";
+import { isValidChatId, normalizeWorkspaceRoot } from "./storagePaths.js";
+export { isValidChatId } from "./storagePaths.js";
 import { MAX_MEMORY_COUNT } from "./memoryLimits.js";
 import { randomUUID } from "node:crypto";
 import { normalizeToolCallingProfile, type ToolCallingProfile } from "../llm/toolCallingProfile.js";
-import type { ChatToolResultDisplay } from "../ui/messaging.js";
-import type { FileUndoSnapshot } from "./fileUndo.js";
 import type { FileChangeSummary } from "./fileChanges.js";
 import { attachmentFileType, isImageAttachment, MAX_TEXT_ATTACHMENT_BYTES } from "./attachments.js";
 import { MAX_ATTACHMENTS_PER_MESSAGE } from "./attachmentLimits.js";
-import { normalizeChatMode, type ChatMode } from "./mode.js";
+import { normalizeChatMode } from "./mode.js";
 import {
   DEFAULT_REASONING_EFFORT,
   normalizeReasoningEffort,
@@ -21,100 +25,17 @@ export const CHATS_DIR = ".locality";
 export const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
 export const VISION_TOKEN_RESERVE = 4096;
 
-export type Role = "user" | "assistant" | "tool" | "system";
-export type StoredToolStatus = "executed" | "failed" | "rejected";
-
-export interface ChatAttachment {
-  id: string;
-  fileName: string;
-  mimeType: "image/jpeg" | "image/png" | "image/webp" | "text/plain";
-  byteLength: number;
-  /** Safe asset suffix; generic pasted text is stored as txt but has no fileType. */
-  extension: string;
-  /** Original text-file suffix, absent for generic pasted text or extensionless files. */
-  fileType?: string;
-}
-
-export interface ChatMessage {
-  role: Role;
-  /** Harness note about a user-requested file undo; hidden from the transcript UI. */
-  fileUndoNotice?: boolean;
-  content: string;
-  /** Display-only terminal response; never included in model context. */
-  interruption?: { reason: string; mode: ChatMode; reasoningEffort: ReasoningEffort };
-  /** Mode selected when a user message was submitted; absent in older history. */
-  mode?: ChatMode;
-  /** User guidance injected into the current turn without changing its mode. */
-  steering?: boolean;
-  /** Native model reasoning associated with this assistant response. */
-  reasoningContent?: string;
-  /** Parser events captured during this assistant turn (text, thought, toolCall, summary). */
-  events?: unknown[];
-  /** Tool call this message corresponds to (when role === "tool"). */
-  toolCall?: {
-    id?: string;
-    name: string;
-    argsJson: string;
-    /** Final UI outcome, retained so restored summaries do not imply failed work succeeded. */
-    status?: StoredToolStatus;
-    /** Retains the Created/Edited distinction for write_file across reloads. */
-    createsNewFile?: boolean;
-    /** Display command for process checks and stops, retained across reloads. */
-    processCommand?: string;
-    processOutput?: string;
-    processExitCode?: number;
-    /** Exact change made by this call, independent of later edits to the same file. */
-    fileChange?: FileChangeSummary;
-    /** Host-only data, excluded from model prompts and webview payloads. */
-    fileUndo?: FileUndoSnapshot;
-    fileUndoState?: "available" | "undone";
-  } & ChatToolResultDisplay;
-  /** File changes made during this assistant turn. */
-  fileChanges?: FileChangeSummary[];
-  /** Chat-owned image or text assets supplied by the user or a view_image tool result. */
-  attachments?: ChatAttachment[];
-  tokens?: number;
-  ts: number;
-}
-
 export type { FileChangeSummary };
 export type { TodoItem } from "./todos.js";
 
-export interface ChatRecord {
-  id: string;
-  workspaceRoot: string;
-  createdAt: number;
-  updatedAt: number;
-  title: string;
-  toolCallingMode: ToolCallingProfile;
-  mode: ChatMode;
-  /** Completed plan awaiting an explicit acceptance or revision request. */
-  pendingPlanMessageTs?: number;
-  /** Planning holds queued requests through all revisions until acceptance or cancellation. */
-  planning?: boolean;
-  reasoningEffort: ReasoningEffort;
-  /** Complete saved transcript; compaction never rewrites these messages. */
-  messages: ChatMessage[];
-  /** Model-only history after compaction. Absent in uncompacted records. */
-  contextMessages?: ChatMessage[];
-  memory?: ChatMemory;
-  memoryCreations?: MemoryCreation[];
-  /** Memories explicitly recalled by tools, for the UI disclosure only. */
-  recalledMemories?: MemorySnapshot[];
-  /** Token count of the model context, not the full transcript. */
-  totalTokens: number;
-  /** Model whose tokenizer produced the cached per-message token counts. */
-  tokenizerModel?: string;
-}
-
-const recordWrites = new Map<string, Promise<unknown>>();
-
 export class ChatStorage {
+  private index: WorkspaceChatIndex;
   constructor(
     private workspaceRoot: string,
     private storageRoot = path.join(os.homedir(), CHATS_DIR)
   ) {
     this.workspaceRoot = normalizeWorkspaceRoot(workspaceRoot);
+    this.index = new WorkspaceChatIndex(path.resolve(storageRoot), this.workspaceRoot, id => this.readHeader(id));
   }
 
   private dir(): string {
@@ -210,25 +131,35 @@ export class ChatStorage {
   }
 
   async list(): Promise<{ id: string; title: string; updatedAt: number }[]> {
-    try {
-      await this.ensureDir();
-      const entries = await fs.readdir(this.dir());
-      const out: { id: string; title: string; updatedAt: number }[] = [];
-      for (const e of entries) {
-        if (!e.endsWith(".json")) continue;
-        const id = e.slice(0, -5);
-        if (!isValidChatId(id)) continue;
-        try {
-          const raw = await fs.readFile(path.join(this.dir(), e), "utf-8");
-          const rec = this.withWorkspace(JSON.parse(raw) as ChatRecord, id);
-          if (!this.belongsToWorkspace(rec)) continue;
-          out.push({ id, title: rec.title, updatedAt: rec.updatedAt });
-        } catch { /* skip malformed */ }
-      }
-      return out.sort((a, b) => b.updatedAt - a.updatedAt);
-    } catch {
-      return [];
+    try { return (await this.metadata()).map(({ id, title, updatedAt }) => ({ id, title, updatedAt })); }
+    catch { return []; }
+  }
+
+  async metadata(reconcile = false): Promise<ChatHeader[]> {
+    if (reconcile) await this.index.reconcile();
+    return this.index.list();
+  }
+
+  async rebuildWorkspaceIndex(): Promise<number> {
+    return (await this.index.rebuild()).chats.length;
+  }
+
+  watch(onChange: () => void): { dispose(): void } { return this.index.watch(onChange); }
+
+  /** Called under the workspace write lock; legacy conversion cannot race a save. */
+  private async readHeader(id: string): Promise<IndexedChat | undefined> {
+    const file = path.join(this.dir(), id + ".json");
+    const indexed = await readChatHeader(file);
+    if (indexed) {
+      if (indexed.header.id !== id) throw new Error("Chat header does not match its filename.");
+      return indexed;
     }
+    const raw = parseChatRecord(await fs.readFile(file, "utf8"));
+    const rec = this.withWorkspace(raw, id);
+    if (!this.belongsToWorkspace(rec)) return undefined;
+    // Preserve all original fields and transcript data during the one-time conversion.
+    await writeChatFile(file, raw, makeChatHeader(rec));
+    return readChatHeader(file);
   }
 
   async load(id: string): Promise<ChatRecord | undefined> {
@@ -236,7 +167,7 @@ export class ChatStorage {
     try {
       await this.ensureDir();
       const raw = await fs.readFile(path.join(this.dir(), id + ".json"), "utf-8");
-      const rec = this.withWorkspace(JSON.parse(raw) as ChatRecord, id);
+      const rec = this.withWorkspace(parseChatRecord(raw), id);
       return this.belongsToWorkspace(rec) ? rec : undefined;
     } catch {
       return undefined;
@@ -244,22 +175,11 @@ export class ChatStorage {
   }
 
   private serialize<T>(id: string, task: () => Promise<T>): Promise<T> {
-    const key = path.resolve(this.dir(), id + ".json");
-    const result = (recordWrites.get(key) ?? Promise.resolve()).catch(() => undefined).then(task);
-    recordWrites.set(key, result);
-    void result.finally(() => { if (recordWrites.get(key) === result) recordWrites.delete(key); }).catch(() => undefined);
-    return result;
+    return this.index.change(id, task);
   }
 
   private async writeRecord(rec: ChatRecord): Promise<void> {
-    const destination = path.join(this.dir(), rec.id + ".json");
-    const temporary = destination + "." + randomUUID() + ".tmp";
-    try {
-      await fs.writeFile(temporary, JSON.stringify(rec, null, 2), { encoding: "utf-8", mode: 0o600 });
-      await fs.rename(temporary, destination);
-    } finally {
-      await fs.unlink(temporary).catch(() => undefined);
-    }
+    await writeChatFile(path.join(this.dir(), rec.id + ".json"), rec);
   }
 
   async save(rec: ChatRecord): Promise<void> {
@@ -300,20 +220,17 @@ export class ChatStorage {
     });
   }
 
+  /** Full records are only for operations that need transcript contents. */
   async records(): Promise<ChatRecord[]> {
-    await this.ensureDir();
-    const entries = await fs.readdir(this.dir());
-    const ids = entries.filter(entry => entry.endsWith(".json"))
-      .map(entry => entry.slice(0, -5)).filter(isValidChatId);
-    const records = await Promise.all(ids.map(id => this.load(id)));
-    return records.filter((rec): rec is ChatRecord => !!rec).sort((a, b) => b.updatedAt - a.updatedAt);
+    const records = await Promise.all((await this.list()).map(chat => this.load(chat.id)));
+    return records.filter((rec): rec is ChatRecord => !!rec);
   }
 
   async delete(id: string): Promise<void> {
     if (!isValidChatId(id)) return;
     await this.serialize(id, async () => {
-      const rec = await this.load(id);
-      if (!rec) return;
+      const entry = await this.readHeader(id);
+      if (!entry || entry.header.workspaceRoot !== this.workspaceRoot) return;
       await fs.unlink(path.join(this.dir(), id + ".json"));
       await fs.rm(path.join(this.attachmentsRoot(), id), { recursive: true, force: true });
     }).catch(() => undefined);
@@ -352,6 +269,7 @@ export class ChatStorage {
     // A historical fork must not inherit a summary containing later turns.
     if (end === rec.messages.length && rec.contextMessages) {
       forked.contextMessages = structuredClone(rec.contextMessages);
+      forked.initialMemories = rec.initialMemories && structuredClone(rec.initialMemories);
       forked.tokenizerModel = rec.tokenizerModel;
     } else if (rec.contextMessages) {
       // Transcript token caches can predate the model used by the compacted
@@ -378,24 +296,16 @@ export class ChatStorage {
     return forked;
   }
 
-  /** Delete every chat record on disk that has zero messages. */
+  /** Delete empty chats in this workspace, rechecking under the write lock. */
   async deleteEmpty(exceptId?: string): Promise<void> {
-    await this.ensureDir();
-    let entries: string[];
-    try { entries = await fs.readdir(this.dir()); } catch { return; }
-    for (const e of entries) {
-      if (!e.endsWith(".json")) continue;
-      const id = e.slice(0, -5);
-      if (!isValidChatId(id)) continue;
-      if (exceptId && id === exceptId) continue;
-      try {
-        const raw = await fs.readFile(path.join(this.dir(), e), "utf-8");
-        const rec = this.withWorkspace(JSON.parse(raw) as ChatRecord, id);
-        if (this.belongsToWorkspace(rec) && rec.messages.length === 0) {
-          await fs.unlink(path.join(this.dir(), e));
-          await fs.rm(path.join(this.attachmentsRoot(), id), { recursive: true, force: true });
-        }
-      } catch { /* skip */ }
+    for (const chat of await this.metadata()) {
+      if (chat.id === exceptId || chat.messageCount) continue;
+      await this.serialize(chat.id, async () => {
+        const current = await this.readHeader(chat.id);
+        if (!current || current.header.workspaceRoot !== this.workspaceRoot || current.header.messageCount) return;
+        await fs.unlink(path.join(this.dir(), chat.id + ".json"));
+        await fs.rm(path.join(this.attachmentsRoot(), chat.id), { recursive: true, force: true });
+      });
     }
   }
 
@@ -441,13 +351,10 @@ export class ChatStorage {
       memory: validMemory(rec.memory) ? rec.memory : undefined,
       memoryCreations: Array.isArray(rec.memoryCreations) ? rec.memoryCreations.filter(validMemoryCreation) : undefined,
       recalledMemories: Array.isArray(rec.recalledMemories) ? rec.recalledMemories.filter(validSnapshot).slice(-MAX_MEMORY_COUNT) : undefined,
+      initialMemories: Array.isArray(rec.initialMemories) ? rec.initialMemories.filter(validSnapshot).slice(-MAX_MEMORY_COUNT) : undefined,
       contextMessages: Array.isArray(rec.contextMessages) ? normalizeMessages(rec.contextMessages) : undefined
     } as ChatRecord;
   }
-}
-
-export function isValidChatId(id: string): boolean {
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id);
 }
 
 function validAttachmentName(name: unknown): name is string {
@@ -508,12 +415,6 @@ export function titleFromFirstMessage(s: string): string {
   if (words.length === 1) return `${words[0]} chat`;
   const fallback = words.join(" ");
   return fallback || "New chat";
-}
-
-function normalizeWorkspaceRoot(root: string): string {
-  if (!root.trim()) return "";
-  const resolved = path.resolve(root);
-  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
 }
 
 /** The transcript and model context share an array until the first compaction. */

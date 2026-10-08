@@ -7,7 +7,7 @@ import type { WorkspaceMemory } from "../src/chat/workspaceMemory.js";
 import type { UiEvent } from "../src/chat/session.js";
 import type { ChatToExt, ExtToChat } from "../src/ui/messaging.js";
 
-const mocks = vi.hoisted(() => ({ sessions: new Map<string, FakeSession>(), input: vi.fn(), picker: vi.fn(), warning: vi.fn(), metadata: vi.fn(), settings: { reasoningEfforts: {}, endpoint: "http://127.0.0.1:8080", model: "model-a", memoryEnabled: true } }));
+const mocks = vi.hoisted(() => ({ sessions: new Map<string, FakeSession>(), input: vi.fn(), picker: vi.fn(), warning: vi.fn(), metadata: vi.fn(), settings: { reasoningEfforts: {}, endpoint: "http://127.0.0.1:8080", model: "model-a", memoryEnabled: true, memoryLoadOnStart: false, autoGenerateMemories: true } }));
 vi.mock("vscode", () => ({
   commands: { executeCommand: vi.fn() },
   window: { showInputBox: mocks.input, showOpenDialog: mocks.picker, showWarningMessage: mocks.warning },
@@ -21,6 +21,7 @@ interface FakeSession {
   approve: ReturnType<typeof vi.fn>;
   approveFutureTools: ReturnType<typeof vi.fn>;
   continueTurn: ReturnType<typeof vi.fn>;
+  editUserMessage: ReturnType<typeof vi.fn>;
   deleteUserMessage: ReturnType<typeof vi.fn>;
   steerUserMessage: ReturnType<typeof vi.fn>;
   shutdown: ReturnType<typeof vi.fn>;
@@ -41,6 +42,13 @@ vi.mock("../src/chat/session.js", () => ({
     cancel = vi.fn(() => this.finish());
     approve = vi.fn();
     approveFutureTools = vi.fn(async () => undefined);
+    editUserMessage = vi.fn(async (messageTs: number, text: string, _removedAttachments: string[], mode: ChatMode) => {
+      const index = this.args.record.messages.findIndex(message => message.role === "user" && message.ts === messageTs);
+      if (this.active || index < 0) return;
+      this.args.record.messages = this.args.record.messages.slice(0, index + 1);
+      this.args.record.messages[index] = { ...this.args.record.messages[index], content: text, mode };
+      this.emitLoaded();
+    });
     deleteUserMessage = vi.fn(async (messageTs: number) => {
       const index = this.args.record.messages.findIndex(message => message.role === "user" && message.ts === messageTs);
       if (this.active || index < 0) return false;
@@ -147,10 +155,150 @@ beforeEach(() => {
   mocks.sessions.clear();
   vi.clearAllMocks();
   mocks.warning.mockReset();
+  mocks.settings.endpoint = "http://127.0.0.1:8080";
   mocks.settings.model = "model-a";
   mocks.settings.reasoningEfforts = {};
   mocks.settings.memoryEnabled = true;
+  mocks.settings.memoryLoadOnStart = false;
+  mocks.settings.autoGenerateMemories = true;
   mocks.metadata.mockReset().mockResolvedValue({ modelAlias: "model-a", contextSize: 32768, supportsVision: false });
+});
+
+describe("reopened chat context window", () => {
+  it("loads history immediately and publishes the server window without starting a turn", async () => {
+    const { provider, posted, snapshot } = setup();
+    let resolveMetadata!: (value: { contextSize: number; supportsVision: boolean }) => void;
+    mocks.metadata.mockReturnValueOnce(new Promise(resolve => { resolveMetadata = resolve; }));
+    provider.openChat({ ...record("a"), totalTokens: 48_000 });
+
+    expect(snapshot().events).toContainEqual(expect.objectContaining({
+      kind: "chatLoaded", record: expect.objectContaining({ totalTokens: 48_000 })
+    }));
+    expect(posted).toContainEqual({ type: "serverContext" });
+    expect(mocks.sessions.get("a")!.sent).toEqual([]);
+
+    resolveMetadata({ contextSize: 262_144, supportsVision: false });
+    await vi.waitFor(() => expect(posted).toContainEqual({ type: "serverContext", contextSize: 262_144 }));
+    expect(mocks.metadata).toHaveBeenCalledExactlyOnceWith(mocks.settings.endpoint, { model: mocks.settings.model });
+    expect(mocks.sessions.get("a")!.sent).toEqual([]);
+  });
+
+  it("clears the displayed limit when the server becomes unavailable", async () => {
+    const { provider, posted } = setup();
+    mocks.metadata.mockResolvedValueOnce({ contextSize: 262_144, supportsVision: false });
+    provider.openChat(record("a"));
+    await vi.waitFor(() => expect(posted).toContainEqual({ type: "serverContext", contextSize: 262_144 }));
+
+    mocks.metadata.mockRejectedValueOnce(new Error("offline"));
+    provider.pushSettings();
+    await vi.waitFor(() => expect(posted.filter(message => "type" in message && message.type === "serverContext").at(-1))
+      .toEqual({ type: "serverContext", contextSize: undefined }));
+  });
+
+  it.each(["model", "endpoint"] as const)("ignores late metadata after changing the %s", async key => {
+    const { provider, posted } = setup();
+    let resolveOld!: (value: { contextSize: number; supportsVision: boolean }) => void;
+    mocks.metadata.mockReturnValueOnce(new Promise(resolve => { resolveOld = resolve; }));
+    provider.openChat(record("a"));
+
+    mocks.settings[key] = key === "model" ? "model-b" : "http://127.0.0.1:8081";
+    mocks.metadata.mockResolvedValueOnce({ contextSize: 262_144, supportsVision: false });
+    provider.pushSettings();
+    expect(posted.filter(message => "type" in message && message.type === "serverContext").at(-1))
+      .toEqual({ type: "serverContext" });
+    await vi.waitFor(() => expect(posted).toContainEqual({ type: "serverContext", contextSize: 262_144 }));
+    resolveOld({ contextSize: 32_768, supportsVision: false });
+    await Promise.resolve();
+    expect(posted.filter(message => "type" in message && message.type === "serverContext").at(-1))
+      .toEqual({ type: "serverContext", contextSize: 262_144 });
+  });
+});
+
+describe("edit messages", () => {
+  const chat = (): ChatRecord => ({ ...record("a"), messages: [
+    { role: "user" as const, content: "Request", ts: 1 },
+    { role: "tool" as const, content: "Unfinished read", ts: 2 },
+    { role: "assistant" as const, content: "", reasoningContent: "Unfinished thinking", ts: 3 }
+  ] });
+  const edit: Extract<ChatToExt, { type: "editMessage" }> = { type: "editMessage", chatId: "a", messageTs: 1, text: "Revised request", mode: "review", removeAttachmentIds: ["removed"] };
+
+  it("confirms discarded tool results and thinking before resending and refreshing chat lists", async () => {
+    const { provider, send, posted, storage, onChatOpened, onChatListChanged } = setup();
+    provider.openChat(chat());
+    mocks.warning.mockResolvedValue("Resend");
+    await send(edit);
+    expect(mocks.warning).toHaveBeenCalledWith(
+      "Resend this message and discard everything after it?",
+      expect.objectContaining({ modal: true, detail: expect.stringContaining("tool results and thinking") }), "Resend"
+    );
+    expect(mocks.sessions.get("a")!.editUserMessage).toHaveBeenCalledWith(1, "Revised request", ["removed"], "review");
+    expect(posted).toContainEqual(expect.objectContaining({ kind: "chatLoaded", record: expect.objectContaining({
+      messages: [expect.objectContaining({ content: "Revised request", ts: 1 })]
+    }) }));
+    expect(onChatOpened).toHaveBeenLastCalledWith(expect.objectContaining({ id: "a" }));
+    expect(onChatListChanged).toHaveBeenCalled();
+    expect(storage.list).toHaveBeenCalled();
+    await provider.closeAll();
+  });
+
+  it("leaves history untouched when confirmation is dismissed", async () => {
+    const { provider, send, posted } = setup();
+    const rec = chat();
+    provider.openChat(rec);
+    posted.length = 0;
+    await send({ ...edit, removeAttachmentIds: [] });
+    expect(mocks.sessions.get("a")!.editUserMessage).not.toHaveBeenCalled();
+    expect(rec.messages).toEqual(chat().messages);
+    expect(posted.some(message => "kind" in message && message.kind === "chatLoaded")).toBe(false);
+    await provider.closeAll();
+  });
+
+  it("resends without confirmation when no messages follow the edited message", async () => {
+    const { provider, send } = setup();
+    const rec = chat();
+    rec.messages = rec.messages.slice(0, 1);
+    provider.openChat(rec);
+    await send({ ...edit, removeAttachmentIds: [] });
+    expect(mocks.warning).not.toHaveBeenCalled();
+    expect(mocks.sessions.get("a")!.editUserMessage).toHaveBeenCalledOnce();
+    await provider.closeAll();
+  });
+
+  it.each(["switch chat", "new turn", "changed history", "appended message", "close chats"])("ignores resend confirmation after %s", async action => {
+    const { provider, send } = setup();
+    const rec = chat();
+    provider.openChat(rec);
+    const session = mocks.sessions.get("a")!;
+    let confirm!: (choice: string) => void;
+    mocks.warning.mockImplementation(() => new Promise<string>(resolve => { confirm = resolve; }));
+    const editing = send({ ...edit, removeAttachmentIds: [] });
+    expect(mocks.warning).toHaveBeenCalledOnce();
+    let nextTurn: Promise<void> | undefined;
+    if (action === "switch chat") provider.openChat(record("b"));
+    else if (action === "new turn") {
+      nextTurn = send({ type: "send", chatId: "a", text: "Next", mode: "act" });
+      await vi.waitFor(() => expect(session.sent).toEqual(["Next"]));
+    }
+    else if (action === "changed history") rec.messages = rec.messages.slice();
+    else if (action === "appended message") rec.messages.push({ role: "assistant", content: "Later answer", ts: 4 });
+    else await provider.closeAll();
+    confirm("Resend");
+    await editing;
+    expect(session.editUserMessage).not.toHaveBeenCalled();
+    session.finish();
+    await nextTurn;
+    await provider.closeAll();
+  });
+
+  it("ignores stale chat requests and non-user messages", async () => {
+    const { provider, send } = setup();
+    provider.openChat(chat());
+    await send({ ...edit, chatId: "b", removeAttachmentIds: [] });
+    await send({ ...edit, messageTs: 2, removeAttachmentIds: [] });
+    expect(mocks.warning).not.toHaveBeenCalled();
+    expect(mocks.sessions.get("a")!.editUserMessage).not.toHaveBeenCalled();
+    await provider.closeAll();
+  });
 });
 
 describe("delete messages", () => {
@@ -296,7 +444,9 @@ describe.each(["act", "review"] as const)("automatic %s memories", mode => {
     { startEnabled: false, endEnabled: true },
     { startEnabled: true, endEnabled: true }
   ])("uses the setting at turn completion (start=$startEnabled, end=$endEnabled)", ({ startEnabled, endEnabled }) => {
-    mocks.settings.memoryEnabled = startEnabled;
+    mocks.settings.autoGenerateMemories = startEnabled;
+    mocks.settings.memoryEnabled = !endEnabled;
+    mocks.settings.memoryLoadOnStart = !endEnabled;
     const memory = { enqueue: vi.fn(), creations: vi.fn().mockResolvedValue([]) };
     const { provider } = setup(memory as unknown as WorkspaceMemory);
     provider.openChat(record("a"));
@@ -307,7 +457,7 @@ describe.each(["act", "review"] as const)("automatic %s memories", mode => {
 
     // Settings and the selected tab can change while the model is responding.
     provider.openChat(record("b"));
-    mocks.settings.memoryEnabled = endEnabled;
+    mocks.settings.autoGenerateMemories = endEnabled;
     provider.pushSettings();
     expect(memory.enqueue).not.toHaveBeenCalled();
     session.emit({ kind: "turnEnd", messageId: "answer-a", mode, messageTs: 2 });
@@ -315,7 +465,7 @@ describe.each(["act", "review"] as const)("automatic %s memories", mode => {
     else expect(memory.enqueue).not.toHaveBeenCalled();
 
     // Re-enabling afterward must not schedule a skipped turn retroactively.
-    mocks.settings.memoryEnabled = true;
+    mocks.settings.autoGenerateMemories = true;
     provider.pushSettings();
     expect(memory.enqueue).toHaveBeenCalledTimes(endEnabled ? 1 : 0);
   });
@@ -369,7 +519,7 @@ describe("independent chat tabs", () => {
     provider.openChat(record("a"));
     expect(mocks.sessions.size).toBe(1);
     expect(a.cancel).not.toHaveBeenCalled();
-    expect(posted.filter(message => !("type" in message && message.type === "recentChats") && !("kind" in message && message.kind === "visionCapability"))).toEqual([]);
+    expect(posted.filter(message => !("type" in message && ["recentChats", "serverContext"].includes(message.type)) && !("kind" in message && message.kind === "visionCapability"))).toEqual([]);
   });
 
   it("restores streamed text, approvals and accounting without leaking background events", async () => {

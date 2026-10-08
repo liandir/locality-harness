@@ -2,7 +2,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { randomUUID } from "node:crypto";
 import { assertInsideWorkspace } from "../tools/workspaceGuard.js";
-import type { ChatMessage } from "./storage.js";
+import type { ChatMessage } from "./types.js";
 
 /** Full, host-only snapshots; null distinguishes a new file from an empty file. */
 export interface FileUndoSnapshot {

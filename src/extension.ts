@@ -2,7 +2,8 @@ import { WorkspaceMemory } from "./chat/workspaceMemory.js";
 import * as vscode from "vscode";
 import { SideViewProvider } from "./ui/sideView/provider.js";
 import { ChatViewProvider } from "./ui/chatView/provider.js";
-import { ChatStorage, type ChatRecord } from "./chat/storage.js";
+import { ChatStorage } from "./chat/storage.js";
+import type { ChatRecord } from "./chat/types.js";
 import { readSettings, onSettingsChange } from "./config/settings.js";
 import { CommitMessageController } from "./scm/commitMessage.js";
 import {
@@ -15,6 +16,7 @@ let sideProvider: SideViewProvider;
 let chatProvider: ChatViewProvider;
 let storage: ChatStorage | undefined;
 let memory: WorkspaceMemory;
+let storageWatcher: { dispose(): void } | undefined;
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   let ws = currentWorkspaceRoot();
@@ -51,8 +53,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       set: effort => chatProvider.setReasoningEffort(effort)
     }
   );
+  watchStorage();
   context.subscriptions.push(
     memory,
+    { dispose: () => storageWatcher?.dispose() },
     { dispose: () => { void chatProvider.closeAll(); } },
     onSettingsChange(() => memory.settingsChanged()),
     memory.onChange(() => { void sideProvider.pushMemories(); chatProvider.refreshMemoryVisibility(); }),
@@ -65,6 +69,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand("locality.renameChat", (id: string) => chatProvider.renameChat(id)),
     vscode.commands.registerCommand("locality.deleteChat", (id?: string) => deleteChat(id)),
     vscode.commands.registerCommand("locality.clearChats", () => clearChats()),
+    vscode.commands.registerCommand("locality.rebuildChatIndex", async () => {
+      const target = storage;
+      if (!target) return;
+      try {
+        const count = await target.rebuildWorkspaceIndex();
+        if (target !== storage) return;
+        await refreshChatLists();
+        void vscode.window.showInformationMessage(`Locality: rebuilt the workspace index (${count} chats).`);
+      } catch (error) {
+        void vscode.window.showErrorMessage(`Locality: could not rebuild the chat index. ${(error as Error).message}`);
+      }
+    }),
     vscode.commands.registerCommand("locality.openSettings", () => {
       sideProvider.focusTab("settings");
       return vscode.commands.executeCommand("workbench.view.extension.locality");
@@ -79,7 +95,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       memory.reset();
       void chatProvider.closeAll();
       storage = r ? new ChatStorage(r) : undefined;
+      watchStorage();
       chatProvider.pushSettings();
+      void chatProvider.pushRecentChats();
       void sideProvider.pushChats();
       sideProvider.refreshOpenTabs();
       void sideProvider.pushMemories();
@@ -88,6 +106,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 }
 
 export function deactivate(): void { /* noop */ }
+
+async function refreshChatLists(): Promise<void> {
+  await Promise.all([sideProvider.pushChats(), chatProvider.pushRecentChats(), sideProvider.pushMemories()]);
+}
+
+function watchStorage(): void {
+  storageWatcher?.dispose();
+  const target = storage;
+  storageWatcher = target?.watch(() => { if (target === storage) void refreshChatLists(); });
+}
 
 function currentWorkspaceRoot(): string | undefined {
   const folders = vscode.workspace.workspaceFolders;
@@ -131,9 +159,9 @@ async function deleteChat(id?: string): Promise<void> {
   const targetStorage = storage;
   const targetId = id ?? chatProvider.getCurrentRecord()?.id;
   if (!targetId) return;
-  const rec = await targetStorage.load(targetId);
+  const rec = (await targetStorage.metadata(true)).find(chat => chat.id === targetId);
   // Only prompt for non-empty chats — empty ones aren't worth confirming.
-  if (rec && rec.messages.length > 0) {
+  if (rec && rec.messageCount > 0) {
     const choice = await vscode.window.showWarningMessage(
       `Delete chat "${rec.title}"? This cannot be undone.`,
       { modal: true },

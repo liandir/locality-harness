@@ -1,7 +1,7 @@
 import type { SecretStorage } from "vscode";
 import type { AutoApprovalSetting, HarnessSettings } from "../config/settings.js";
-import type { UiEvent } from "../chat/session.js";
-import type { ChatToolProcess, ChatToolResultDisplay } from "../ui/messaging.js";
+import type { UiEvent } from "../chat/events.js";
+import type { ChatToolProcess, ChatToolResultDisplay } from "../chat/types.js";
 
 export type FeatureResultUpdate = ChatToolProcess & { status?: "failed" };
 

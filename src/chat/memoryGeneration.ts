@@ -1,6 +1,6 @@
 import { complete, fetchServerContextSize } from "../llm/client.js";
 import { countTokens, truncateToTokenBudget } from "./contextTracker.js";
-import type { ChatRecord } from "./storage.js";
+import type { ChatRecord } from "./types.js";
 import { MEMORY_SUMMARY_TOKENS, redactMemorySecrets } from "./memory.js";
 
 const INSTRUCTION = "Write a compact workspace memory from this coding conversation. "

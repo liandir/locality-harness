@@ -1,4 +1,4 @@
-import type { ChatResponseDiscarded } from "../../messaging.js";
+import type { ChatResponseDiscarded } from "../../../chat/events.js";
 
 type ResponsePart =
   | { kind: "text" | "thought"; text: string }

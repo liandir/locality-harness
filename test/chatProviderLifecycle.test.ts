@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type * as vscode from "vscode";
+import * as vscode from "vscode";
 import type { ChatRecord, ChatStorage } from "../src/chat/storage.js";
 import type { UiEvent } from "../src/chat/session.js";
 import type { WorkspaceMemory } from "../src/chat/workspaceMemory.js";
@@ -8,7 +8,7 @@ import type { MemoryCreation } from "../src/chat/memory.js";
 const mocks = vi.hoisted(() => ({
   sessions: [] as { cancel: ReturnType<typeof vi.fn>; emit: (event: UiEvent) => void }[]
 }));
-vi.mock("vscode", () => ({ commands: { executeCommand: vi.fn() } }));
+vi.mock("vscode", () => ({ commands: { executeCommand: vi.fn() }, window: { showErrorMessage: vi.fn() } }));
 vi.mock("../src/config/settings.js", () => ({ readSettings: () => ({ reasoningEfforts: {} }) }));
 vi.mock("../src/chat/session.js", () => ({
   ChatSession: class {
@@ -25,6 +25,15 @@ vi.mock("../src/chat/session.js", () => ({
 import { ChatViewProvider } from "../src/ui/chatView/provider.js";
 
 describe("chat provider lifecycle", () => {
+  it("reports unreadable transcripts without deleting or opening a chat", async () => {
+    const storage = { load: vi.fn().mockResolvedValue(undefined), delete: vi.fn() } as unknown as ChatStorage;
+    const provider = new ChatViewProvider({} as vscode.ExtensionContext, () => storage, () => "/workspace", vi.fn(), vi.fn(), vi.fn(), vi.fn());
+    await provider.openChatById("unreadable");
+    expect(vscode.window.showErrorMessage).toHaveBeenCalledWith(expect.stringContaining("saved file has been kept"));
+    expect(storage.delete).not.toHaveBeenCalled();
+    expect(provider.getCurrentRecord()).toBeUndefined();
+  });
+
   it("retains memory cards for inactive tabs and drops late updates after closing", async () => {
     const created: MemoryCreation = { messageTs: 2, status: "created", text: "Parser decision", generatedAt: 10 };
     const creations = vi.fn(async (id: string): Promise<MemoryCreation[]> => id === "first" ? [created] : []);

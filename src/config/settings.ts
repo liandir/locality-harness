@@ -27,6 +27,8 @@ export interface HarnessSettings {
   steerWithEnter: boolean;
   autoCompact: boolean;
   memoryEnabled: boolean;
+  memoryLoadOnStart: boolean;
+  autoGenerateMemories: boolean;
   memoryMaxCount: number;
   autoCompactThresholdPercent: number;
   tailBudgetPercent: number;
@@ -67,6 +69,8 @@ export function readSettings(): HarnessSettings {
     showThinking: cfg.get<boolean>("showThinking") ?? false,
     steerWithEnter: cfg.get<boolean>("steerWithEnter") === true,
     memoryEnabled: cfg.inspect?.<boolean>("memoryEnabled")?.workspaceValue === true,
+    memoryLoadOnStart: cfg.inspect?.<boolean>("memoryLoadOnStart")?.workspaceValue === true,
+    autoGenerateMemories: cfg.inspect?.<boolean>("autoGenerateMemories")?.workspaceValue === true,
     memoryMaxCount: Math.floor(clampNumber(cfg.get<number>("memoryMaxCount") ?? DEFAULT_MEMORY_MAX_COUNT, 1, MAX_MEMORY_COUNT, DEFAULT_MEMORY_MAX_COUNT)),
     autoCompact: cfg.get<boolean>("autoCompact") ?? true,
     autoCompactThresholdPercent: clampPercent(cfg.get<number>("autoCompactThresholdPercent") ?? 80),
@@ -101,7 +105,8 @@ export async function writeSetting<K extends keyof HarnessSettings>(
     throw new Error("Enter a positive whole number or leave the reasoning budget empty for unlimited reasoning.");
   }
   const cfg = vscode.workspace.getConfiguration(NS);
-  let target = key === "memoryEnabled" || key === "memoryMaxCount" ? vscode.ConfigurationTarget.Workspace : vscode.ConfigurationTarget.Global;
+  let target = ["memoryEnabled", "memoryLoadOnStart", "autoGenerateMemories", "memoryMaxCount"].includes(key)
+    ? vscode.ConfigurationTarget.Workspace : vscode.ConfigurationTarget.Global;
   if (scope === "effective") {
     const inspected = cfg.inspect(key);
     if (inspected?.workspaceFolderValue !== undefined) target = vscode.ConfigurationTarget.WorkspaceFolder;
@@ -126,6 +131,8 @@ export const SETTING_KEYS: (keyof HarnessSettings)[] = [
   "steerWithEnter",
   "autoCompact",
   "memoryEnabled",
+  "memoryLoadOnStart",
+  "autoGenerateMemories",
   "memoryMaxCount",
   "autoCompactThresholdPercent",
   "tailBudgetPercent",

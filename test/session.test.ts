@@ -22,6 +22,8 @@ const mocks = vi.hoisted(() => ({
     showThinking: true,
     autoCompact: false,
     memoryEnabled: false,
+    memoryLoadOnStart: false,
+    autoGenerateMemories: false,
     memoryMaxCount: 10,
     autoCompactThresholdPercent: 80,
     autoapproveReads: true,
@@ -47,7 +49,8 @@ vi.mock("vscode", () => ({
   workspace: {
     getConfiguration: () => ({
       get: (key: string) => (mocks.settings as Record<string, unknown>)[key],
-      inspect: (key: string) => key === "memoryEnabled" ? { workspaceValue: mocks.settings.memoryEnabled } : undefined,
+      inspect: (key: string) => ["memoryEnabled", "memoryLoadOnStart", "autoGenerateMemories"].includes(key)
+        ? { workspaceValue: (mocks.settings as Record<string, unknown>)[key] } : undefined,
       update: mocks.updateSetting
     }),
     onDidChangeConfiguration: (listener: (event: { affectsConfiguration(key: string): boolean }) => void) => {
@@ -114,6 +117,8 @@ beforeEach(() => {
   mocks.settings.commandToolsEnabled = true;
   mocks.settings.autoCompact = false;
   mocks.settings.memoryEnabled = false;
+  mocks.settings.memoryLoadOnStart = false;
+  mocks.settings.autoGenerateMemories = false;
   mocks.settings.memoryMaxCount = 10;
   mocks.settings.autoCompactThresholdPercent = 80;
   mocks.settings.toolCallingMode = "compat-gemma4";
@@ -3436,6 +3441,107 @@ describe("ChatSession", () => {
     expect(toolResult?.content).toBe("[lines 2-3 of 4]\n2\ttwo\n3\tthree");
   });
 
+  it.each([false, true])("updates streaming context at most every 250ms without tokenization requests (legacy=%s)", async legacy => {
+    const { ChatSession } = await import("../src/chat/session.js");
+    const events: UiEvent[] = [];
+    const tokens = () => events.filter((event): event is Extract<UiEvent, { kind: "tokens" }> => event.kind === "tokens");
+    const observations: { total: number; count: number; tokenizerCalls: number }[] = [];
+    const observe = () => observations.push({ total: tokens().at(-1)!.total, count: tokens().length, tokenizerCalls: mocks.tokenize.mock.calls.length });
+    let now = 1000;
+    let calls = 0;
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+    mocks.streamChat.mockImplementation(async function* () {
+      if (legacy && calls++ === 0) throw new mocks.NativeToolsUnsupportedError("tools param requires --jinja flag");
+      observe();
+      yield { kind: "thought", text: "a".repeat(40) };
+      observe();
+      yield { kind: "thought", text: "b".repeat(40) };
+      observe();
+      now += 250;
+      yield { kind: "text", text: "c".repeat(40) };
+      observe();
+      now += 250;
+      yield { kind: "text", text: "d".repeat(40) };
+      observe();
+      yield { kind: "usage", promptTokens: 777, completionTokens: 45 };
+      observe();
+    });
+    const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record: newRecord(), emit: event => events.push(event) });
+    try {
+      await session.sendUserMessage("Stream a response");
+      expect(observations).toHaveLength(6);
+      const base = observations[0];
+      expect(observations.slice(0, 5).map(value => value.total - base.total)).toEqual([0, 10, 10, 30, 40]);
+      expect(observations.slice(0, 5).map(value => value.count - base.count)).toEqual([0, 1, 1, 2, 3]);
+      expect(observations.every(value => value.tokenizerCalls === base.tokenizerCalls)).toBe(true);
+      expect(tokens().at(-1)?.total).toBe(822);
+      expect(events.some(event => event.kind === "abort")).toBe(false);
+    } finally {
+      await session.shutdown();
+      clock.mockRestore();
+    }
+  });
+
+  it("uses prompt progress as the live baseline and counts cumulative streamed tool content once", async () => {
+    const { ChatSession } = await import("../src/chat/session.js");
+    const events: UiEvent[] = [];
+    const observations: number[] = [];
+    const observe = () => observations.push(events.filter((event): event is Extract<UiEvent, { kind: "tokens" }> => event.kind === "tokens").at(-1)!.total);
+    let now = 1000;
+    let pass = 0;
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+    mocks.streamChat.mockImplementation(async function* () {
+      if (pass++ > 0) {
+        yield { kind: "text", text: "Done." };
+        return;
+      }
+      yield { kind: "promptProgress", processedTokens: 0, totalTokens: 1000 };
+      observe();
+      yield { kind: "toolCallProgress", id: "write-live", name: "write_file", path: "live.txt", content: "x".repeat(40), contentBytes: 40, contentLines: 1 };
+      observe();
+      now += 250;
+      yield { kind: "toolCallProgress", id: "write-live", name: "write_file", path: "live.txt", content: "x".repeat(80), contentBytes: 80, contentLines: 1 };
+      observe();
+      now += 250;
+      yield { kind: "text", text: "Skipped the write." };
+      observe();
+      yield { kind: "usage", promptTokens: 1000, completionTokens: 24 };
+    });
+    const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record: newRecord(), emit: event => events.push(event) });
+    try {
+      await session.sendUserMessage("Prepare a file");
+      expect(observations).toEqual([1000, 1010, 1020, 1025]);
+      expect(events.some(event => event.kind === "abort")).toBe(false);
+    } finally {
+      await session.shutdown();
+      clock.mockRestore();
+    }
+  });
+
+  it("resets the live baseline after a tool round trip when only the first request reports usage", async () => {
+    const { ChatSession } = await import("../src/chat/session.js");
+    const events: UiEvent[] = [];
+    const record = newRecord();
+    let calls = 0;
+    mocks.streamChat.mockImplementation(async function* () {
+      if (calls++ === 0) {
+        yield { kind: "toolCall", id: "todo-live", name: "update_todos", argsJson: '{"todos":[]}' };
+        yield { kind: "usage", promptTokens: 30000, completionTokens: 400 };
+      } else {
+        yield { kind: "text", text: "Done." };
+      }
+    });
+    const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record, emit: event => events.push(event) });
+    try {
+      await session.sendUserMessage("Update tasks");
+      expect(calls).toBe(2);
+      const counts = events.filter((event): event is Extract<UiEvent, { kind: "tokens" }> => event.kind === "tokens");
+      expect(counts.some(event => event.total === 30400)).toBe(true);
+      expect(counts.at(-1)!.total).toBeLessThan(100);
+      expect(events.some(event => event.kind === "abort")).toBe(false);
+    } finally { await session.shutdown(); }
+  });
+
   it("uses the context window reported by the server", async () => {
     mocks.fetchServerContextSize.mockResolvedValue(8192);
     mocks.streamChat.mockImplementation(async function* (): AsyncGenerator<{ kind: "text"; text: string }, void, void> {
@@ -3528,9 +3634,13 @@ describe("ChatSession", () => {
         const ingested = () => !contextActivityIds(events).includes(compacted.compactId);
         expect(ingested()).toBe(false);
         expect(contextActivityIds(events)).toEqual([compacted.compactId]);
+        expect(events.filter(event => event.kind === "turnPreparing").at(-1))
+          .toEqual({ kind: "turnPreparing", reason: "context" });
         if (reportProgress) {
           yield { kind: "promptProgress", processedTokens: 2048, totalTokens: 2048 };
           expect(ingested()).toBe(true);
+          expect(events.filter(event => event.kind === "turnPreparing").at(-1))
+            .toEqual({ kind: "turnPreparing", reason: "server" });
         }
         yield { kind: "text", text: "done" };
         expect(ingested()).toBe(true);
@@ -3569,7 +3679,7 @@ describe("ChatSession", () => {
     expect(compactEndIndex).toBeGreaterThan(compactIndex);
     const continuation = events.slice(compactEndIndex + 1);
     expect(continuation.some(event => event.kind === "turnPreparing" && event.reason === "context"))
-      .toBe(false);
+      .toBe(true);
     expect(continuation).toContainEqual({ kind: "turnPreparing", reason: "server" });
     expect(continuation).toContainEqual(expect.objectContaining({ kind: "text", delta: "done" }));
     expect(events.some(event => event.kind === "abort")).toBe(false);
@@ -4069,17 +4179,20 @@ describe("separate transcript and model context", () => {
       }
       yield { kind: "promptProgress", processedTokens: 128, totalTokens: 2048 };
       expect(events).not.toContainEqual({ kind: "contextActivity", activityIds: [] });
+      expect(events.some(event => event.kind === "turnPreparing" && event.reason === "context")).toBe(needsIngestion);
       if (pass === 1 && outcome !== "complete") {
         if (outcome === "cancel") session.cancel();
         throw new Error(outcome === "cancel" ? "Cancelled" : "Server disconnected");
       }
       yield { kind: "promptProgress", processedTokens: 2048, totalTokens: 2048 };
       if (needsIngestion) expect(events).toContainEqual({ kind: "contextActivity", activityIds: [] });
+      expect(events.filter(event => event.kind === "turnPreparing").at(-1))
+        .toEqual({ kind: "turnPreparing", reason: "server" });
       yield { kind: "text", text: "Answer" };
     });
     await session.sendUserMessage("Continue");
     expect(events).toContainEqual({ kind: "contextActivity", activityIds: [] });
-    expect(events).not.toContainEqual({ kind: "turnPreparing", reason: "context" });
+    expect(events).toContainEqual({ kind: "turnPreparing", reason: "context" });
     if (outcome !== "complete") expect(events).toContainEqual({ kind: "abort", reason: outcome === "cancel" ? "Cancelled" : "Server disconnected", messageTs: expect.any(Number) });
     else expect(events.some(event => event.kind === "abort")).toBe(false);
 
@@ -4087,7 +4200,7 @@ describe("separate transcript and model context", () => {
     await session.sendUserMessage("Continue again");
     expect(pass).toBe(2);
     expect(events.some(event => event.kind === "abort")).toBe(false);
-    expect(events).not.toContainEqual({ kind: "turnPreparing", reason: "context" });
+    expect(events.some(event => event.kind === "turnPreparing" && event.reason === "context")).toBe(outcome !== "complete");
     expect(events.some(event => event.kind === "contextActivity" && event.activityIds.includes(compacted.compactId))).toBe(outcome !== "complete");
   });
 
@@ -4115,6 +4228,96 @@ describe("separate transcript and model context", () => {
     expect(saved!.messages[0].content).toBe("ORIGINAL_REQUEST_SENTINEL");
     expect(saved!.messages.at(-1)?.content).toBe("new answer");
     expect(saved!.contextMessages!.at(-1)?.content).toBe("new answer");
+  });
+
+  it.each(["edit", "delete"])("preserves earlier compacted context when a later request is removed by %s", async action => {
+    mocks.settings.autoCompact = true;
+    mocks.settings.toolCallingMode = "native";
+    mocks.tokenize.mockImplementation(async (_endpoint: string, text: string) => text.includes("ARCHIVED_LARGE_READ") ? 6000 : 1);
+    const { ChatSession } = await import("../src/chat/session.js");
+    const record = newRecord();
+    record.messages = [
+      { role: "user", content: "Earlier task", ts: 1 },
+      ...Array.from({ length: 6 }, (_, i) => ({ role: "tool" as const, content: `ARCHIVED_LARGE_READ_${action}_${i}`, ts: i + 2 })),
+      { role: "assistant", content: "Earlier answer", ts: 8 },
+      { role: "user", content: "REPLACED_REQUEST", ts: 9 },
+      { role: "tool", content: "DISCARDED_READ", tokens: 25000, ts: 10 },
+      { role: "assistant", content: "", reasoningContent: "DISCARDED_THINKING", tokens: 15000, ts: 11 },
+      { role: "assistant", content: "DISCARDED_INTERRUPTION", interruption: { reason: "Stopped", mode: "act", reasoningEffort: "default" }, ts: 12 }
+    ];
+    record.contextMessages = [
+      { role: "system", content: "[context summary] Earlier task is done", tokens: 1, ts: 100 },
+      ...structuredClone(record.messages.slice(8, 11))
+    ];
+    record.tokenizerModel = mocks.settings.model;
+    record.totalTokens = 40002;
+    record.memoryCreations = [8, 11].map(messageTs => ({ messageTs, status: "created", text: "Memory", generatedAt: 13 }));
+    const events: UiEvent[] = [];
+    let saved!: ChatRecord;
+    const save = vi.fn(async (rec: ChatRecord) => { saved = structuredClone(rec); });
+    const session = new ChatSession({ storage: { save } as never, workspaceRoot: "/tmp/workspace", record, emit: event => events.push(event) });
+    mocks.streamChat.mockImplementation(async function* () { yield { kind: "text", text: "Revised answer" }; });
+    if (action === "edit") await session.editUserMessage(9, "Revised request");
+    else {
+      expect(await session.deleteUserMessage(9)).toBe(true);
+      expect(record.totalTokens).toBe(1);
+      await session.sendUserMessage("Revised request");
+    }
+    expect(events.some(event => event.kind === "compactStart")).toBe(false);
+    expect(mocks.streamChat).toHaveBeenCalledOnce();
+    const request = JSON.stringify(mocks.streamChat.mock.calls[0][1].messages);
+    expect(request).toContain("Earlier task is done");
+    expect(request).toContain("Revised request");
+    expect(request).not.toMatch(/ARCHIVED_LARGE_READ|REPLACED_REQUEST|DISCARDED_/);
+    expect(record.totalTokens).toBeLessThan(100);
+    expect(record.memoryCreations?.map(creation => creation.messageTs)).toEqual([8]);
+    await session.shutdown();
+    const reopened = new ChatSession({ storage: { save } as never, workspaceRoot: "/tmp/workspace", record: saved, emit: event => events.push(event) });
+    await reopened.sendUserMessage("Continue after reopening");
+    const replay = JSON.stringify(mocks.streamChat.mock.calls.at(-1)![1].messages);
+    expect(replay).toContain("Earlier task is done");
+    expect(replay).not.toMatch(/ARCHIVED_LARGE_READ|REPLACED_REQUEST|DISCARDED_/);
+    expect(events.some(event => event.kind === "compactStart")).toBe(false);
+    await reopened.shutdown();
+  });
+
+  it.each(["uncompacted", "interrupted", "summarized"])("recounts only retained context when resending a request in an %s chat", async context => {
+    mocks.settings.autoCompact = true;
+    mocks.settings.toolCallingMode = "native";
+    const { ChatSession } = await import("../src/chat/session.js");
+    const record = newRecord();
+    record.messages = [
+      { role: "user", content: "Keep this request", tokens: 7, ts: 1 },
+      { role: "assistant", content: "Keep this answer", tokens: 8, ts: 2 },
+      { role: "user", content: "DISCARDED_REQUEST", tokens: 15000, ts: 3 },
+      { role: "tool", content: "DISCARDED_READ", tokens: 20000, ts: 4 },
+      { role: "assistant", content: "", reasoningContent: "DISCARDED_THINKING", tokens: 10000, ts: 5 }
+    ];
+    if (context === "interrupted") {
+      record.contextMessages = structuredClone(record.messages);
+      record.messages.push({ role: "assistant", content: "DISCARDED_INTERRUPTION", interruption: { reason: "Stopped", mode: "act", reasoningEffort: "default" }, ts: 6 });
+    } else if (context === "summarized") {
+      record.contextMessages = [{ role: "system", content: "[context summary] DISCARDED_REQUEST and DISCARDED_READ", tokens: 45015, ts: 100 }];
+    }
+    record.tokenizerModel = mocks.settings.model;
+    record.totalTokens = 45015;
+    const events: UiEvent[] = [];
+    const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record, emit: event => events.push(event) });
+    mocks.streamChat.mockImplementation(async function* () { yield { kind: "text", text: "New answer" }; });
+    await session.editUserMessage(3, "Small revised request");
+    expect(mocks.streamChat).toHaveBeenCalledOnce();
+    const request = JSON.stringify(mocks.streamChat.mock.calls[0][1].messages);
+    expect(request).toContain("Keep this request");
+    expect(request).toContain("Keep this answer");
+    expect(request).toContain("Small revised request");
+    expect(request).not.toContain("DISCARDED_");
+    expect(mocks.tokenize.mock.calls.some(call => String(call[1]).includes("DISCARDED_"))).toBe(false);
+    expect(record.totalTokens).toBeLessThan(100);
+    expect(events.some(event => event.kind === "compactStart")).toBe(false);
+    const counts = events.filter((event): event is Extract<UiEvent, { kind: "tokens" }> => event.kind === "tokens");
+    expect(counts.length).toBeGreaterThan(0);
+    expect(counts.every(event => event.total < 100)).toBe(true);
+    await session.shutdown();
   });
 
   it("discards a stale summary when editing an archived user message", async () => {
@@ -4269,6 +4472,7 @@ describe("workspace memory tools", () => {
   ] as const)("searches then recalls within the active workspace in %s/%s", async (profile, mode) => {
     mocks.settings.memoryEnabled = true;
     mocks.settings.toolCallingMode = profile;
+    mocks.settings.readToolsEnabled = false;
     const { ChatStorage } = await import("../src/chat/storage.js");
     const { transcriptRevision, searchMemories } = await import("../src/chat/memory.js");
     const { ChatSession } = await import("../src/chat/session.js");
@@ -4376,6 +4580,114 @@ describe("workspace memory tools", () => {
     await turn;
     expect(records).not.toHaveBeenCalled();
     expect(record.messages.find(m => m.role === "tool")?.content).toContain("Workspace memories are disabled");
+  });
+});
+
+describe("initial workspace memory loading", () => {
+  it.each(["native", "compat-qwen3"] as const)("loads once, persists, and replaces memories on first-message edits in %s", async profile => {
+    mocks.settings.memoryLoadOnStart = true;
+    mocks.settings.readToolsEnabled = false;
+    mocks.settings.memoryMaxCount = 1;
+    mocks.settings.toolCallingMode = profile;
+    const { ChatStorage } = await import("../src/chat/storage.js");
+    const { transcriptRevision } = await import("../src/chat/memory.js");
+    const { ChatSession } = await import("../src/chat/session.js");
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "locality-initial-memory-"));
+    const sessions: ChatSession[] = [];
+    try {
+      const storage = new ChatStorage(path.join(dir, "workspace"), path.join(dir, "chats"));
+      const neighbor = new ChatStorage(path.join(dir, "other"), path.join(dir, "chats"));
+      const source = async (title: string, text: string, owner = storage, enabled = true, stale = false) => {
+        const rec = owner.newRecord(profile);
+        rec.title = title;
+        rec.messages = [{ role: "user", content: title, ts: 1 }];
+        rec.memory = { text, sourceRevision: stale ? "0".repeat(64) : transcriptRevision(rec), generatedAt: 1, manual: false, enabled };
+        await owner.save(rec);
+        return rec;
+      };
+      const parser = await source("Parser", "PARSER_MEMORY_SENTINEL");
+      await source("Parser alternative", "LIMITED_MEMORY_SENTINEL");
+      const colors = await source("Colors", "COLORS_MEMORY_SENTINEL");
+      await source("Parser", "FOREIGN_MEMORY_SENTINEL", neighbor);
+      await source("Parser", "DISABLED_MEMORY_SENTINEL", storage, false);
+      await source("Parser", "STALE_MEMORY_SENTINEL", storage, true, true);
+      const requests: { messages: { role: string; content: unknown }[]; tools?: { function: { name: string } }[] }[] = [];
+      mocks.streamChat.mockImplementation(async function* (_endpoint, request) {
+        if (profile !== "native" && request.tools) throw new mocks.NativeToolsUnsupportedError("tools param requires --jinja flag");
+        requests.push(request);
+        yield { kind: "text", text: "Done." };
+      });
+      const events: UiEvent[] = [];
+      const record = storage.newRecord(profile);
+      const session = new ChatSession({ storage, workspaceRoot: record.workspaceRoot, record, emit: e => events.push(e) });
+      sessions.push(session);
+      await session.sendUserMessage("Parser");
+      expect(record.initialMemories?.map(memory => memory.sourceId)).toEqual([parser.id]);
+      expect(JSON.stringify(record.messages)).not.toContain("PARSER_MEMORY_SENTINEL");
+      expect(JSON.stringify(requests.at(-1))).toContain("PARSER_MEMORY_SENTINEL");
+      expect(JSON.stringify(requests.at(-1))).not.toMatch(/LIMITED_MEMORY_SENTINEL|COLORS_MEMORY_SENTINEL|FOREIGN_MEMORY_SENTINEL|DISABLED_MEMORY_SENTINEL|STALE_MEMORY_SENTINEL|search_memories|recall_memory/);
+      expect(record.contextMessages?.[0].tokens).toBeGreaterThan(0);
+      expect(mocks.tokenize.mock.calls.some(call => String(call[1]).includes("PARSER_MEMORY_SENTINEL"))).toBe(true);
+      expect(events).toContainEqual(expect.objectContaining({ kind: "memoriesUsed", memories: [expect.objectContaining({ sourceId: parser.id })] }));
+      await session.shutdown();
+
+      const saved = (await storage.load(record.id))!;
+      expect(saved.initialMemories).toEqual(record.initialMemories);
+      const reopened = new ChatSession({ storage, workspaceRoot: saved.workspaceRoot, record: saved, emit: e => events.push(e) });
+      sessions.push(reopened);
+      await reopened.refreshMemoryVisibility();
+      expect(events.at(-1)).toMatchObject({ kind: "memoriesUsed", memories: [{ sourceId: parser.id }] });
+      await reopened.sendUserMessage("Colors");
+      expect(JSON.stringify(requests.at(-1))).toContain("PARSER_MEMORY_SENTINEL");
+      expect(JSON.stringify(requests.at(-1))).not.toContain("COLORS_MEMORY_SENTINEL");
+
+      await reopened.editUserMessage(saved.messages[0].ts, "Colors");
+      expect(saved.initialMemories?.map(memory => memory.sourceId)).toEqual([colors.id]);
+      expect(JSON.stringify(requests.at(-1))).toContain("COLORS_MEMORY_SENTINEL");
+      expect(JSON.stringify(requests.at(-1))).not.toContain("PARSER_MEMORY_SENTINEL");
+      mocks.settings.memoryLoadOnStart = false;
+      await reopened.sendUserMessage("Next");
+      expect(JSON.stringify(requests.at(-1))).toContain("COLORS_MEMORY_SENTINEL");
+      await reopened.editUserMessage(saved.messages[0].ts, "Parser");
+      expect(saved.initialMemories).toBeUndefined();
+      expect(JSON.stringify(requests.at(-1))).not.toContain("MEMORY_SENTINEL");
+    } finally {
+      await Promise.all(sessions.map(session => session.shutdown()));
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it.each([false, true])("does not preload with the Chat switch off, regardless of tools and generation (%s)", async enabled => {
+    mocks.settings.memoryEnabled = enabled;
+    mocks.settings.autoGenerateMemories = enabled;
+    const { ChatSession } = await import("../src/chat/session.js");
+    const metadata = vi.fn();
+    mocks.streamChat.mockImplementation(async function* () { yield { kind: "text", text: "Done." }; });
+    const session = new ChatSession({ storage: { save: vi.fn(), metadata } as never, workspaceRoot: "/tmp/workspace", record: newRecord(), emit: () => {} });
+    await session.sendUserMessage("Parser");
+    expect(metadata).not.toHaveBeenCalled();
+    await session.shutdown();
+  });
+
+  it.each(["disabled", "unreadable"])("continues without loading when memories become %s during index access", async outcome => {
+    mocks.settings.memoryLoadOnStart = true;
+    const { ChatSession } = await import("../src/chat/session.js");
+    const events: UiEvent[] = [];
+    const metadata = vi.fn().mockImplementationOnce(async () => {
+      if (outcome === "unreadable") throw new Error("unreadable index");
+      mocks.settings.memoryLoadOnStart = false;
+      return [{ id: "source", title: "Parser", revision: "revision", memory: {
+        text: "PARSER_MEMORY_SENTINEL", enabled: true, manual: true, generatedAt: 1, sourceRevision: "revision"
+      } }];
+    });
+    mocks.streamChat.mockImplementation(async function* () { yield { kind: "text", text: "Done." }; });
+    const record = newRecord();
+    const session = new ChatSession({ storage: { save: vi.fn(), metadata } as never, workspaceRoot: "/tmp/workspace", record, emit: e => events.push(e) });
+    await session.sendUserMessage("Parser");
+    if (outcome === "unreadable") expect(events).toContainEqual({ kind: "notice", text: "Could not load workspace memories for this chat." });
+    expect(record.messages.at(-1)?.content).toBe("Done.");
+    expect(record.initialMemories).toBeUndefined();
+    await session.shutdown();
   });
 });
 
