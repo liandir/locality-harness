@@ -434,7 +434,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .tool-output-surface.error {
   background: color-mix(in srgb, var(--vscode-errorForeground) 12%, transparent);
   border-color: transparent;
-  color: var(--error-foreground);
+  color: var(--tool-error-idle);
 }
 /* Commands, process checks, and file diffs use one header layout. Keep text
    and actions in normal flow so both are centered within the same line box. */
@@ -502,7 +502,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .tool-card.list-dir .tool-filelist { margin: 0 0 2px; }
 /* A failed/rejected action colors its complete heading as one error state:
    glyph, operation, target or command, range/stats, and disclosure affordance. */
-.tool-card:is(.failed, .rejected) {
+.tool-card:is(.failed, .rejected),
+.tool-output-surface.error {
   --tool-error-idle: color-mix(in srgb, var(--error-foreground) var(--tool-idle-weight), var(--vscode-sideBar-background, var(--vscode-editor-background)));
   /* Resolve the highlight here so it includes the inherited theme adjustment. */
   --error-highlight-foreground: var(--error-foreground);
@@ -530,7 +531,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .tool-change-card { position: relative; }
 .tool-change-head .tool-header-content > .tool-label-main { margin-left: 4px; }
 .tool-change-head .tool-path-link:is(:hover, :focus-visible) { color: var(--vscode-foreground); }
-/* Expanded failures retain the diagnostic red and theme-aware link emphasis. */
+/* Expanded failures share the muted red; only hovered/focused links emphasize it. */
 .tool-card:is(.failed, .rejected) > .tool-expanded { opacity: 1; }
 .tool-output-surface.error .tool-change-operation { opacity: 1; }
 .tool-output-surface.error .diff-stat { color: inherit; }
