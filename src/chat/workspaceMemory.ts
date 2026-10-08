@@ -5,7 +5,7 @@ import { readSettings } from "../config/settings.js";
 import { countTokens } from "./contextTracker.js";
 import { ChatStorage, type ChatRecord } from "./storage.js";
 import {
-  MEMORY_SUMMARY_TOKENS, transcriptRevision, usableMemory, redactMemorySecrets,
+  MEMORY_SUMMARY_TOKENS, transcriptRevision, usableMemory, redactMemorySecrets, memoryListItem,
   type ChatMemory, type MemoryCreation, type MemoryListItem, type MemorySnapshot
 } from "./memory.js";
 
@@ -153,23 +153,18 @@ export class WorkspaceMemory {
   }
   async list(): Promise<MemoryListItem[]> {
     const storage = this.getStorage();
-    const records = await storage?.records() ?? [];
+    const records = await storage?.metadata() ?? [];
     if (storage !== this.getStorage()) return [];
-    return records.filter(r => r.messages.length).map(rec => ({
-      sourceId: rec.id, title: rec.title, sourceRevision: rec.memory?.sourceRevision ?? transcriptRevision(rec),
-      generatedAt: rec.memory?.generatedAt ?? 0, text: rec.memory?.text ?? "", enabled: rec.memory?.enabled ?? false,
-      usable: usableMemory(rec),
-      error: rec.memory?.error,
-      status: this.active?.id === rec.id ? "generating" : this.queue.has(rec.id) ? "queued"
-        : rec.memory?.error ? "failed" : rec.memory?.manual ? "manual" : usableMemory({ ...rec, memory: rec.memory && { ...rec.memory, enabled: true } })
-          ? "ready" : rec.memory ? "stale" : "missing"
-    }));
+    return records.filter(r => r.messageCount).map(rec => {
+      const item = memoryListItem(rec);
+      return { ...item, status: this.active?.id === rec.id ? "generating" : this.queue.has(rec.id) ? "queued" : item.status };
+    });
   }
   async summarizeExisting(): Promise<void> {
     const epoch = this.epoch;
-    const records = await this.getStorage()?.records() ?? [];
+    const records = await this.getStorage()?.metadata() ?? [];
     if (epoch !== this.epoch) return;
-    for (const rec of records) if (rec.messages.length && !rec.memory?.manual && rec.memory?.enabled !== false) this.enqueue(rec.id);
+    for (const rec of records) if (rec.messageCount && !rec.memory?.manual && rec.memory?.enabled !== false) this.enqueue(rec.id);
   }
   async edit(id: string, text: string): Promise<void> {
     const storage = this.getStorage();
@@ -208,10 +203,11 @@ function settingsStillMatch(endpoint: string, model: string): boolean {
 }
 
 export async function activeSnapshots(storage: ChatStorage, snapshots: MemorySnapshot[]): Promise<MemorySnapshot[]> {
-  const active = await Promise.all(snapshots.map(async snapshot => {
-    const source = await storage.load(snapshot.sourceId);
+  if (!snapshots.length) return [];
+  const sources = new Map((await storage.metadata(true)).map(source => [source.id, source]));
+  return snapshots.filter(snapshot => {
+    const source = sources.get(snapshot.sourceId);
     return source && usableMemory(source)
-      && (source.memory!.manual || transcriptRevision(source) === snapshot.sourceRevision) ? snapshot : undefined;
-  }));
-  return active.filter((snapshot): snapshot is MemorySnapshot => !!snapshot);
+      && (source.memory!.manual || source.revision === snapshot.sourceRevision);
+  });
 }

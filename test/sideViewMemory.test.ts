@@ -44,7 +44,7 @@ beforeEach(() => {
 
 describe("Recent Chats memory management", () => {
   it("opens the source memory editor after its chats and summaries are loaded", async () => {
-    storage = { load: vi.fn().mockResolvedValue({ id: "source" }), list: vi.fn().mockResolvedValue([{ id: "source", title: "Parser", updatedAt: 1 }]) } as unknown as ChatStorage;
+    storage = { metadata: vi.fn().mockResolvedValue([{ id: "source" }]), list: vi.fn().mockResolvedValue([{ id: "source", title: "Parser", updatedAt: 1 }]) } as unknown as ChatStorage;
     await receive({ type: "ready" });
     postMessage.mockClear();
     await provider.revealMemory("source");
@@ -53,19 +53,19 @@ describe("Recent Chats memory management", () => {
   });
 
   it("defers source navigation until the webview is ready and rejects unavailable sources", async () => {
-    storage = { load: vi.fn().mockResolvedValue({ id: "source" }), list: vi.fn().mockResolvedValue([]) } as unknown as ChatStorage;
+    storage = { metadata: vi.fn().mockResolvedValue([{ id: "source" }]), list: vi.fn().mockResolvedValue([]) } as unknown as ChatStorage;
     await provider.revealMemory("source");
     expect(postMessage).not.toHaveBeenCalledWith({ type: "revealMemory", id: "source" });
     await receive({ type: "ready" });
     expect(postMessage).toHaveBeenLastCalledWith({ type: "revealMemory", id: "source" });
-    vi.mocked(storage.load).mockResolvedValue(undefined);
+    vi.mocked(storage.metadata).mockResolvedValue([]);
     postMessage.mockClear();
     await provider.revealMemory("foreign-source");
     expect(postMessage).not.toHaveBeenCalled();
   });
 
   it("drops pending source navigation if the workspace changes before the webview loads", async () => {
-    storage = { load: vi.fn().mockResolvedValue({ id: "source" }), list: vi.fn().mockResolvedValue([]) } as unknown as ChatStorage;
+    storage = { metadata: vi.fn().mockResolvedValue([{ id: "source" }]), list: vi.fn().mockResolvedValue([]) } as unknown as ChatStorage;
     await provider.revealMemory("source");
     storage = undefined;
     await receive({ type: "ready" });

@@ -373,6 +373,19 @@ attachment directory and are removed when their chat or source message is
 deleted, including when editing an earlier message discards later turns.
 Compaction alone does not delete saved attachments.
 
+Chat and memory lists load a small workspace index from `~/.locality/indexes/`.
+They do not load conversation transcripts. Each chat file also has a versioned
+metadata header, so its listing can be recovered independently of the transcript.
+The index is updated when chats change, and changes from other windows are
+reconciled in the background. Existing chat files are converted once, preserving
+their contents and attachments, when their workspace index is first built.
+
+Use **Locality: Rebuild Chat Index** from the Command Palette to recreate the
+current workspace's index from the chat headers. Missing or invalid indexes are
+also rebuilt automatically. This repairs listings; it does not repair damaged
+transcript contents. A chat with a readable header remains listed even if its
+transcript cannot be opened, and its saved file is kept.
+
 You can delete a chat by hovering its row in the Welcome list and clicking the
 trash icon. Deleting cannot be undone.
 

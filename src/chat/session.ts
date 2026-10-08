@@ -2289,7 +2289,7 @@ export class ChatSession {
       }
       if (isMemoryToolName(e.name)) {
         if (!readSettings().memoryEnabled) throw new Error("Workspace memories are disabled.");
-        const records = await this.storage.records();
+        const records = await this.storage.metadata(true);
         // The workspace switch can change while storage or approval is pending.
         if (!readSettings().memoryEnabled) throw new Error("Workspace memories are disabled.");
         if (e.name === "search_memories") {

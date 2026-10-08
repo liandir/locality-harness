@@ -324,6 +324,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     const storage = this.getStorage();
     const record = await storage?.load(id);
     if (record && storage === this.getStorage() && generation === this.navigationGeneration) this.openChat(record);
+    else if (storage && storage === this.getStorage() && generation === this.navigationGeneration) {
+      void vscode.window.showErrorMessage("Locality: this chat could not be read. Its saved file has been kept. Use Locality: Rebuild Chat Index to refresh the listing.");
+    }
   }
 
   openChat(rec: ChatRecord): void {

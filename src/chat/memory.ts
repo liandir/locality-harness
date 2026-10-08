@@ -53,10 +53,29 @@ export function transcriptRevision(rec: ChatRecord): string {
     attachments: m.attachments, toolCall: m.toolCall, fileChanges: m.fileChanges
   })))).digest("hex");
 }
-export function usableMemory(rec: ChatRecord): boolean {
+/** Headers carry the revision so memory browsing never needs a transcript. */
+export type MemorySource = Pick<ChatRecord, "id" | "title" | "memory"> &
+  ({ messages: ChatRecord["messages"] } | { revision: string });
+
+export function usableMemory(rec: MemorySource): boolean {
   const memory = rec.memory;
   return !!memory?.enabled && !!memory.text.trim() && !memory.error
-    && (memory.manual || memory.sourceRevision === transcriptRevision(rec));
+    && (memory.manual || memory.sourceRevision === sourceRevision(rec));
+}
+
+function sourceRevision(rec: MemorySource): string {
+  return "revision" in rec ? rec.revision : transcriptRevision(rec as ChatRecord);
+}
+
+export function memoryListItem(rec: MemorySource): MemoryListItem {
+  return {
+    sourceId: rec.id, title: rec.title, sourceRevision: rec.memory?.sourceRevision ?? sourceRevision(rec),
+    generatedAt: rec.memory?.generatedAt ?? 0, text: rec.memory?.text ?? "", enabled: rec.memory?.enabled ?? false,
+    usable: usableMemory(rec), error: rec.memory?.error,
+    status: rec.memory?.error ? "failed" : rec.memory?.manual ? "manual"
+      : usableMemory({ ...rec, memory: rec.memory && { ...rec.memory, enabled: true } }) ? "ready"
+        : rec.memory ? "stale" : "missing"
+  };
 }
 export function validMemory(value: unknown): value is ChatMemory {
   if (!value || typeof value !== "object") return false;
@@ -84,7 +103,7 @@ function terms(text: string): string[] {
     .filter(word => word.length > 1 && !STOP_WORDS.has(word));
 }
 /** BM25 over local titles and summaries; no network request for retrieval. */
-export function rankMemories(query: string, records: ChatRecord[], currentId: string): MemorySnapshot[] {
+export function rankMemories(query: string, records: MemorySource[], currentId: string): MemorySnapshot[] {
   const candidates = records.filter(r => r.id !== currentId && usableMemory(r));
   const docs = candidates.map(r => terms(`${r.title} ${r.memory!.text}`));
   const words = [...new Set(terms(query))];
@@ -118,7 +137,7 @@ export function memoryMetadata(memory: MemorySnapshot): { id: string; name: stri
   return { id: memoryId(memory), name: memory.title, date: new Date(memory.generatedAt).toISOString().replace(/:\d{2}\.\d{3}Z$/, "Z") };
 }
 
-export function searchMemories(query: string, records: ChatRecord[], currentId: string, limit = DEFAULT_MEMORY_MAX_COUNT): {
+export function searchMemories(query: string, records: MemorySource[], currentId: string, limit = DEFAULT_MEMORY_MAX_COUNT): {
   memories: ReturnType<typeof memoryMetadata>[]; total: number; truncated: boolean;
 } {
   if (typeof query !== "string" || !query.trim()) throw new Error("search_memories requires a non-empty query.");
@@ -128,7 +147,7 @@ export function searchMemories(query: string, records: ChatRecord[], currentId: 
 }
 
 /** Re-resolve both fields against live eligible sources; never recall a cached search result. */
-export function recallMemory(name: string, id: string, records: ChatRecord[], currentId: string): MemorySnapshot {
+export function recallMemory(name: string, id: string, records: MemorySource[], currentId: string): MemorySnapshot {
   if (typeof name !== "string" || !name.trim() || typeof id !== "string" || !id.trim()) {
     throw new Error("recall_memory requires the exact name and id returned by search_memories.");
   }

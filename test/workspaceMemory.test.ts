@@ -381,6 +381,18 @@ describe("memory generation", () => {
   });
 });
 describe("workspace memory persistence", () => {
+  it("lists memories and validates recalled snapshots without loading transcripts", async () => {
+    const rec = await chat();
+    await storage.updateMemory(rec.id, current => ({ text: "Parser decision", sourceRevision: transcriptRevision(current), generatedAt: 1, enabled: true, manual: false }));
+    const load = vi.spyOn(storage, "load");
+    const items = await memory.list();
+    expect(items[0]).toMatchObject({ status: "ready", usable: true });
+    const sources = await storage.metadata(true);
+    const snapshots = rankMemories("parser", sources, "other");
+    expect(await activeSnapshots(storage, snapshots)).toHaveLength(1);
+    expect(load).not.toHaveBeenCalled();
+  });
+
   it("reports eligibility for the cloud icon using the same rules as retrieval", async () => {
     const rec = await chat();
     expect((await memory.list())[0]).toMatchObject({ enabled: false, status: "missing", usable: false });

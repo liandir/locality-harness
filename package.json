@@ -48,6 +48,10 @@
     },
     "commands": [
       {
+        "command": "locality.rebuildChatIndex",
+        "title": "Locality: Rebuild Chat Index"
+      },
+      {
         "command": "locality.newChat",
         "title": "Locality: New Chat"
       },
