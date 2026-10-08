@@ -1052,9 +1052,8 @@ export class ChatSession {
   }
 
   /**
-   * Cheap, network-free token estimate emitted at mid-turn checkpoints
-   * (thought→text transitions, tool round-trips) so the context ring
-   * updates without waiting for the authoritative /tokenize call at turnEnd.
+   * Cheap, network-free token estimate emitted at tool/retry checkpoints so
+   * the context ring updates without waiting for /tokenize at turnEnd.
    * Cached message tokens are exact; uncached and live buffer use char/4.
    */
   private emitLiveTokenEstimate(liveText: string): void {
@@ -1144,7 +1143,7 @@ export class ChatSession {
   private async buildPromptMessagesForRequest(
     s: HarnessSettings,
     options: { reload: boolean; repairNote?: string }
-  ): Promise<PromptMessage[] | undefined> {
+  ): Promise<{ messages: PromptMessage[]; tokens: number } | undefined> {
     if (!(await this.prepareContextForModelRequest(s, options))) return undefined;
 
     const limit = this.contextLimit();
@@ -1177,7 +1176,7 @@ export class ChatSession {
       return undefined;
     }
 
-    return messages;
+    return { messages, tokens: promptTok };
   }
 
   private messagesForTokenCount(messages: PromptMessage[]): PromptMessage[] {
@@ -1443,16 +1442,37 @@ export class ChatSession {
       this.staleLineEdits.clear();
       this.lineEditRanThisPass = false;
       this.writeRanThisPass = false;
-      const messages = await this.buildPromptMessagesForRequest(s, {
+      const request = await this.buildPromptMessagesForRequest(s, {
         reload: false,
         repairNote
       });
       repairNote = undefined;
-      if (!messages) {
+      if (!request) {
         break;
       }
       // Guidance can arrive during context preparation or compaction.
       if (this.pendingSteering.length) continue;
+
+      const { messages } = request;
+      serverUsageTotal = undefined;
+      let promptTokenCount = request.tokens;
+      let generatedChars = 0;
+      let reportedCompletionTokens = 0;
+      let charsAtUsage = 0;
+      let lastTokenUpdateAt = -Infinity;
+      const generatedToolChars = new Map<string, number>();
+      // Reuse the measured prompt, including tool schemas and attachments.
+      // Streaming estimates are display-only and never trigger compaction.
+      const emitStreamingTokens = (): void => {
+        const now = Date.now();
+        if (now - lastTokenUpdateAt < 250) return;
+        lastTokenUpdateAt = now;
+        this.emit({
+          kind: "tokens",
+          total: promptTokenCount + reportedCompletionTokens + Math.ceil((generatedChars - charsAtUsage) / 4),
+          limit: this.contextLimit()
+        });
+      };
 
       const loadingChatContext = this.loadedChatContextPending;
       const pendingActivityIds = this.activeContextActivityIds();
@@ -1503,6 +1523,10 @@ export class ChatSession {
         )) {
           if (this.pendingSteering.length) break;
           if (chunk.kind === "promptProgress") {
+            if (promptTokenCount !== chunk.totalTokens) {
+              promptTokenCount = chunk.totalTokens;
+              this.emit({ kind: "tokens", total: promptTokenCount, limit: this.contextLimit() });
+            }
             const processing = chunk.processedTokens < chunk.totalTokens;
             if (!receivedPromptProgress || (loadingChatContext && processing !== processingPrompt)) {
               this.emit({ kind: "turnPreparing", reason: loadingChatContext && processing ? "context" : "server" });
@@ -1513,13 +1537,29 @@ export class ChatSession {
             continue;
           }
           if (chunk.kind === "usage") {
-            serverUsageTotal = chunk.promptTokens + (chunk.completionTokens ?? 0);
+            promptTokenCount = chunk.promptTokens;
+            reportedCompletionTokens = chunk.completionTokens ?? Math.ceil(generatedChars / 4);
+            charsAtUsage = generatedChars;
+            serverUsageTotal = chunk.promptTokens + reportedCompletionTokens;
             this.emit({
               kind: "tokens",
               total: serverUsageTotal,
               limit: this.contextLimit()
             });
             continue;
+          }
+          if (chunk.kind === "text" || chunk.kind === "thought") {
+            serverUsageTotal = undefined;
+            generatedChars += chunk.text.length;
+            emitStreamingTokens();
+          } else if (chunk.kind === "toolCallProgress" || chunk.kind === "toolCall") {
+            serverUsageTotal = undefined;
+            const key = chunk.id ?? chunk.name;
+            const previous = generatedToolChars.get(key) ?? 0;
+            const chars = chunk.kind === "toolCall" ? chunk.argsJson.length : chunk.content?.length ?? chunk.contentBytes;
+            generatedToolChars.set(key, Math.max(previous, chars));
+            generatedChars += Math.max(0, chars - previous);
+            emitStreamingTokens();
           }
           // First output also proves prefill has finished on servers that do
           // not send progress, or omit the final progress update.
@@ -1625,10 +1665,6 @@ export class ChatSession {
           const continueAfter = await this.handleEvents(events, messageId, s);
           let sawToolInBatch = false;
           for (const e of events) {
-            const prev = turnEvents[turnEvents.length - 1];
-            if (prev?.kind === "thought" && e.kind !== "thought" && e.kind !== "done") {
-              this.emitLiveTokenEstimate(assistantBuf + thoughtBuf);
-            }
             if (e.kind === "toolCall") sawToolInBatch = true;
             if (!sawToolInBatch && e.kind === "text") assistantBuf += e.text;
             if (!sawToolInBatch && e.kind === "thought") thoughtBuf += e.text;
@@ -1652,10 +1688,6 @@ export class ChatSession {
           const continueAfterTail = await this.handleEvents(tail, messageId, s);
           let sawToolInTail = false;
           for (const e of tail) {
-            const prev = turnEvents[turnEvents.length - 1];
-            if (prev?.kind === "thought" && e.kind !== "thought" && e.kind !== "done") {
-              this.emitLiveTokenEstimate(assistantBuf + thoughtBuf);
-            }
             if (e.kind === "toolCall") sawToolInTail = true;
             if (!sawToolInTail && e.kind === "text") assistantBuf += e.text;
             if (!sawToolInTail && e.kind === "thought") thoughtBuf += e.text;

@@ -275,7 +275,9 @@ The implementation is in the [AGENTS.md loader](../src/llm/agentsMd.ts),
 ## Managing context
 
 A small ring on the composer toggle bar shows how full the model's context
-window is. When it gets close to full:
+window is. It updates during streaming with an estimate for incoming thinking,
+text, and tool content, then uses server-reported usage when available. These
+live estimates do not trigger compaction. When it gets close to full:
 
 - **Auto-compact** (on by default) summarizes older parts of the
   conversation when context reaches the configured threshold (80% by

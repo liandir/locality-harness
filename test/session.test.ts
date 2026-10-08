@@ -3436,6 +3436,107 @@ describe("ChatSession", () => {
     expect(toolResult?.content).toBe("[lines 2-3 of 4]\n2\ttwo\n3\tthree");
   });
 
+  it.each([false, true])("updates streaming context at most every 250ms without tokenization requests (legacy=%s)", async legacy => {
+    const { ChatSession } = await import("../src/chat/session.js");
+    const events: UiEvent[] = [];
+    const tokens = () => events.filter((event): event is Extract<UiEvent, { kind: "tokens" }> => event.kind === "tokens");
+    const observations: { total: number; count: number; tokenizerCalls: number }[] = [];
+    const observe = () => observations.push({ total: tokens().at(-1)!.total, count: tokens().length, tokenizerCalls: mocks.tokenize.mock.calls.length });
+    let now = 1000;
+    let calls = 0;
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+    mocks.streamChat.mockImplementation(async function* () {
+      if (legacy && calls++ === 0) throw new mocks.NativeToolsUnsupportedError("tools param requires --jinja flag");
+      observe();
+      yield { kind: "thought", text: "a".repeat(40) };
+      observe();
+      yield { kind: "thought", text: "b".repeat(40) };
+      observe();
+      now += 250;
+      yield { kind: "text", text: "c".repeat(40) };
+      observe();
+      now += 250;
+      yield { kind: "text", text: "d".repeat(40) };
+      observe();
+      yield { kind: "usage", promptTokens: 777, completionTokens: 45 };
+      observe();
+    });
+    const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record: newRecord(), emit: event => events.push(event) });
+    try {
+      await session.sendUserMessage("Stream a response");
+      expect(observations).toHaveLength(6);
+      const base = observations[0];
+      expect(observations.slice(0, 5).map(value => value.total - base.total)).toEqual([0, 10, 10, 30, 40]);
+      expect(observations.slice(0, 5).map(value => value.count - base.count)).toEqual([0, 1, 1, 2, 3]);
+      expect(observations.every(value => value.tokenizerCalls === base.tokenizerCalls)).toBe(true);
+      expect(tokens().at(-1)?.total).toBe(822);
+      expect(events.some(event => event.kind === "abort")).toBe(false);
+    } finally {
+      await session.shutdown();
+      clock.mockRestore();
+    }
+  });
+
+  it("uses prompt progress as the live baseline and counts cumulative streamed tool content once", async () => {
+    const { ChatSession } = await import("../src/chat/session.js");
+    const events: UiEvent[] = [];
+    const observations: number[] = [];
+    const observe = () => observations.push(events.filter((event): event is Extract<UiEvent, { kind: "tokens" }> => event.kind === "tokens").at(-1)!.total);
+    let now = 1000;
+    let pass = 0;
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+    mocks.streamChat.mockImplementation(async function* () {
+      if (pass++ > 0) {
+        yield { kind: "text", text: "Done." };
+        return;
+      }
+      yield { kind: "promptProgress", processedTokens: 0, totalTokens: 1000 };
+      observe();
+      yield { kind: "toolCallProgress", id: "write-live", name: "write_file", path: "live.txt", content: "x".repeat(40), contentBytes: 40, contentLines: 1 };
+      observe();
+      now += 250;
+      yield { kind: "toolCallProgress", id: "write-live", name: "write_file", path: "live.txt", content: "x".repeat(80), contentBytes: 80, contentLines: 1 };
+      observe();
+      now += 250;
+      yield { kind: "text", text: "Skipped the write." };
+      observe();
+      yield { kind: "usage", promptTokens: 1000, completionTokens: 24 };
+    });
+    const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record: newRecord(), emit: event => events.push(event) });
+    try {
+      await session.sendUserMessage("Prepare a file");
+      expect(observations).toEqual([1000, 1010, 1020, 1025]);
+      expect(events.some(event => event.kind === "abort")).toBe(false);
+    } finally {
+      await session.shutdown();
+      clock.mockRestore();
+    }
+  });
+
+  it("resets the live baseline after a tool round trip when only the first request reports usage", async () => {
+    const { ChatSession } = await import("../src/chat/session.js");
+    const events: UiEvent[] = [];
+    const record = newRecord();
+    let calls = 0;
+    mocks.streamChat.mockImplementation(async function* () {
+      if (calls++ === 0) {
+        yield { kind: "toolCall", id: "todo-live", name: "update_todos", argsJson: '{"todos":[]}' };
+        yield { kind: "usage", promptTokens: 30000, completionTokens: 400 };
+      } else {
+        yield { kind: "text", text: "Done." };
+      }
+    });
+    const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record, emit: event => events.push(event) });
+    try {
+      await session.sendUserMessage("Update tasks");
+      expect(calls).toBe(2);
+      const counts = events.filter((event): event is Extract<UiEvent, { kind: "tokens" }> => event.kind === "tokens");
+      expect(counts.some(event => event.total === 30400)).toBe(true);
+      expect(counts.at(-1)!.total).toBeLessThan(100);
+      expect(events.some(event => event.kind === "abort")).toBe(false);
+    } finally { await session.shutdown(); }
+  });
+
   it("uses the context window reported by the server", async () => {
     mocks.fetchServerContextSize.mockResolvedValue(8192);
     mocks.streamChat.mockImplementation(async function* (): AsyncGenerator<{ kind: "text"; text: string }, void, void> {

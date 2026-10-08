@@ -4770,7 +4770,7 @@ function handleHostMessage(msg: ExtToChat): void {
       }
       render();
       break;
-    case "tokens": state.tokens = msg.total; state.limit = msg.limit; render(); break;
+    case "tokens": state.tokens = msg.total; state.limit = msg.limit; updateContextPill(); break;
     case "compactStatus":
       applyCompactStatus(msg.currentMessages, msg.minMessages, msg.available);
       render();
