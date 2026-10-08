@@ -616,8 +616,25 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         break;
       case "editMessage": {
         const runtime = this.active;
-        await runtime.session?.editUserMessage(m.messageTs, m.text, m.removeAttachmentIds ?? [], normalizeChatMode(m.mode));
-        if (runtime.session && !runtime.removed) this.onChatOpened(runtime.session.getRecord());
+        const session = runtime.session;
+        if (!session || runtime.messageLoopRunning || runtime.compacting || session.isTurnActive()) break;
+        const messages = session.getRecord().messages;
+        const count = messages.length;
+        const index = messages.findIndex(message => message.role === "user" && message.ts === m.messageTs);
+        if (index < 0) break;
+        if (index < count - 1) {
+          const choice = await vscode.window.showWarningMessage(
+            "Resend this message and discard everything after it?",
+            { modal: true, detail: "All later messages, including tool results and thinking, will be permanently removed from this chat and its context. Workspace file changes will remain." },
+            "Resend"
+          );
+          if (choice !== "Resend" || runtime !== this.active || runtime.removed || runtime.storage !== this.getStorage()
+            || runtime.messageLoopRunning || runtime.compacting || session.isTurnActive()
+            || session.getRecord().messages !== messages || messages.length !== count) break;
+        }
+        await session.editUserMessage(m.messageTs, m.text, m.removeAttachmentIds ?? [], normalizeChatMode(m.mode));
+        if (runtime.removed) break;
+        this.onChatOpened(session.getRecord());
         this.onChatListChanged();
         await this.pushRecentChats();
         this.drainMessageQueueIfIdle(runtime);

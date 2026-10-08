@@ -4117,6 +4117,96 @@ describe("separate transcript and model context", () => {
     expect(saved!.contextMessages!.at(-1)?.content).toBe("new answer");
   });
 
+  it.each(["edit", "delete"])("preserves earlier compacted context when a later request is removed by %s", async action => {
+    mocks.settings.autoCompact = true;
+    mocks.settings.toolCallingMode = "native";
+    mocks.tokenize.mockImplementation(async (_endpoint: string, text: string) => text.includes("ARCHIVED_LARGE_READ") ? 6000 : 1);
+    const { ChatSession } = await import("../src/chat/session.js");
+    const record = newRecord();
+    record.messages = [
+      { role: "user", content: "Earlier task", ts: 1 },
+      ...Array.from({ length: 6 }, (_, i) => ({ role: "tool" as const, content: `ARCHIVED_LARGE_READ_${action}_${i}`, ts: i + 2 })),
+      { role: "assistant", content: "Earlier answer", ts: 8 },
+      { role: "user", content: "REPLACED_REQUEST", ts: 9 },
+      { role: "tool", content: "DISCARDED_READ", tokens: 25000, ts: 10 },
+      { role: "assistant", content: "", reasoningContent: "DISCARDED_THINKING", tokens: 15000, ts: 11 },
+      { role: "assistant", content: "DISCARDED_INTERRUPTION", interruption: { reason: "Stopped", mode: "act", reasoningEffort: "default" }, ts: 12 }
+    ];
+    record.contextMessages = [
+      { role: "system", content: "[context summary] Earlier task is done", tokens: 1, ts: 100 },
+      ...structuredClone(record.messages.slice(8, 11))
+    ];
+    record.tokenizerModel = mocks.settings.model;
+    record.totalTokens = 40002;
+    record.memoryCreations = [8, 11].map(messageTs => ({ messageTs, status: "created", text: "Memory", generatedAt: 13 }));
+    const events: UiEvent[] = [];
+    let saved!: ChatRecord;
+    const save = vi.fn(async (rec: ChatRecord) => { saved = structuredClone(rec); });
+    const session = new ChatSession({ storage: { save } as never, workspaceRoot: "/tmp/workspace", record, emit: event => events.push(event) });
+    mocks.streamChat.mockImplementation(async function* () { yield { kind: "text", text: "Revised answer" }; });
+    if (action === "edit") await session.editUserMessage(9, "Revised request");
+    else {
+      expect(await session.deleteUserMessage(9)).toBe(true);
+      expect(record.totalTokens).toBe(1);
+      await session.sendUserMessage("Revised request");
+    }
+    expect(events.some(event => event.kind === "compactStart")).toBe(false);
+    expect(mocks.streamChat).toHaveBeenCalledOnce();
+    const request = JSON.stringify(mocks.streamChat.mock.calls[0][1].messages);
+    expect(request).toContain("Earlier task is done");
+    expect(request).toContain("Revised request");
+    expect(request).not.toMatch(/ARCHIVED_LARGE_READ|REPLACED_REQUEST|DISCARDED_/);
+    expect(record.totalTokens).toBeLessThan(100);
+    expect(record.memoryCreations?.map(creation => creation.messageTs)).toEqual([8]);
+    await session.shutdown();
+    const reopened = new ChatSession({ storage: { save } as never, workspaceRoot: "/tmp/workspace", record: saved, emit: event => events.push(event) });
+    await reopened.sendUserMessage("Continue after reopening");
+    const replay = JSON.stringify(mocks.streamChat.mock.calls.at(-1)![1].messages);
+    expect(replay).toContain("Earlier task is done");
+    expect(replay).not.toMatch(/ARCHIVED_LARGE_READ|REPLACED_REQUEST|DISCARDED_/);
+    expect(events.some(event => event.kind === "compactStart")).toBe(false);
+    await reopened.shutdown();
+  });
+
+  it.each(["uncompacted", "interrupted", "summarized"])("recounts only retained context when resending a request in an %s chat", async context => {
+    mocks.settings.autoCompact = true;
+    mocks.settings.toolCallingMode = "native";
+    const { ChatSession } = await import("../src/chat/session.js");
+    const record = newRecord();
+    record.messages = [
+      { role: "user", content: "Keep this request", tokens: 7, ts: 1 },
+      { role: "assistant", content: "Keep this answer", tokens: 8, ts: 2 },
+      { role: "user", content: "DISCARDED_REQUEST", tokens: 15000, ts: 3 },
+      { role: "tool", content: "DISCARDED_READ", tokens: 20000, ts: 4 },
+      { role: "assistant", content: "", reasoningContent: "DISCARDED_THINKING", tokens: 10000, ts: 5 }
+    ];
+    if (context === "interrupted") {
+      record.contextMessages = structuredClone(record.messages);
+      record.messages.push({ role: "assistant", content: "DISCARDED_INTERRUPTION", interruption: { reason: "Stopped", mode: "act", reasoningEffort: "default" }, ts: 6 });
+    } else if (context === "summarized") {
+      record.contextMessages = [{ role: "system", content: "[context summary] DISCARDED_REQUEST and DISCARDED_READ", tokens: 45015, ts: 100 }];
+    }
+    record.tokenizerModel = mocks.settings.model;
+    record.totalTokens = 45015;
+    const events: UiEvent[] = [];
+    const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record, emit: event => events.push(event) });
+    mocks.streamChat.mockImplementation(async function* () { yield { kind: "text", text: "New answer" }; });
+    await session.editUserMessage(3, "Small revised request");
+    expect(mocks.streamChat).toHaveBeenCalledOnce();
+    const request = JSON.stringify(mocks.streamChat.mock.calls[0][1].messages);
+    expect(request).toContain("Keep this request");
+    expect(request).toContain("Keep this answer");
+    expect(request).toContain("Small revised request");
+    expect(request).not.toContain("DISCARDED_");
+    expect(mocks.tokenize.mock.calls.some(call => String(call[1]).includes("DISCARDED_"))).toBe(false);
+    expect(record.totalTokens).toBeLessThan(100);
+    expect(events.some(event => event.kind === "compactStart")).toBe(false);
+    const counts = events.filter((event): event is Extract<UiEvent, { kind: "tokens" }> => event.kind === "tokens");
+    expect(counts.length).toBeGreaterThan(0);
+    expect(counts.every(event => event.total < 100)).toBe(true);
+    await session.shutdown();
+  });
+
   it("discards a stale summary when editing an archived user message", async () => {
     const { ChatSession } = await import("../src/chat/session.js");
     const record = newRecord();

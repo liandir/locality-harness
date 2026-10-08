@@ -295,8 +295,16 @@ can still cause this failure even when context has room.
 Compaction summarizes older details in the model's context so it has room to
 keep working. The saved chat and visible history retain the original messages
 and file attachments. The model receives the summary and recent context;
-if an older detail matters, quote it in a new message. Editing an earlier
-message rebuilds context from the retained transcript.
+if an older detail matters, quote it in a new message. Resending an edited
+message asks for confirmation before removing later messages, tool results,
+and thinking from both the chat and model context. Canceling keeps your edit
+draft. Workspace file changes remain.
+
+Editing or deleting a message preserves any compacted context preceding it.
+If the message was itself summarized, context is rebuilt from the retained
+transcript so the discarded messages cannot survive in a summary. Context
+usage is recalculated before the next request; compaction can still occur if
+the retained history and system instructions reach the configured threshold.
 
 ## Settings reference
 

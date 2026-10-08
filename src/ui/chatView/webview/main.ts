@@ -3756,11 +3756,9 @@ function submitMessageEdit(): void {
   const retainedAttachments = (message?.attachments ?? [])
     .filter(attachment => !state.editingRemovedAttachmentIds.has(attachment.id));
   if (messageTs === undefined || (!text && retainedAttachments.length === 0) || state.busy) return;
-  state.editingMessageTs = undefined;
-  state.editDraft = "";
+  // The host may ask before discarding later history. Keep the draft and
+  // attachment selections until its accepted edit arrives as chatLoaded.
   send({ type: "editMessage", messageTs, text, mode: state.mode, removeAttachmentIds: [...state.editingRemovedAttachmentIds] });
-  state.editingRemovedAttachmentIds = new Set();
-  render();
 }
 
 const MAX_PASTED_ATTACHMENT_BYTES = 10 * 1024 * 1024;
@@ -4107,6 +4105,7 @@ function circleIcon(ratio: number): string {
 }
 
 function loadFromRecord(rec: ChatRecord): void {
+  state.tokens = rec.totalTokens;
   state.pendingPlanMessageTs = rec.pendingPlanMessageTs;
   state.planning = rec.planning === true || rec.pendingPlanMessageTs !== undefined;
   if (state.pendingPlanMessageTs !== undefined) {

@@ -737,8 +737,8 @@ export class ChatSession {
   async editUserMessage(messageTs: number, text: string, removeAttachmentIds: string[] = [], mode: ChatMode = this.record.mode): Promise<void> {
     if (this.disposed) return;
     if (this.isPlanning()) mode = "plan";
-    if (this.activeTurn) {
-      this.emit({ kind: "notice", text: "Wait for the current response to finish before editing an earlier message." });
+    if (this.activeTurn || this.compactTasks.size) {
+      this.emit({ kind: "notice", text: "Wait for the current response or compaction to finish before editing an earlier message." });
       return;
     }
 
@@ -776,16 +776,9 @@ export class ChatSession {
     let deleted = false;
     const turn = (async () => {
       this.cancelPendingTitle();
-      this.record.messages = this.record.messages.slice(0, index);
-      // Compacted context can include any of the removed messages. Rebuild it
-      // from the retained transcript when the next request is sent.
-      delete this.record.contextMessages;
+      this.truncateHistoryBefore(index);
       delete this.record.pendingPlanMessageTs;
       delete this.record.planning;
-      delete this.record.recalledMemories;
-      this.record.memoryCreations = this.record.memoryCreations?.filter(creation =>
-        this.record.messages.some(message => message.role === "assistant" && message.ts === creation.messageTs));
-      this.record.totalTokens = this.record.messages.reduce((total, message) => total + (message.tokens ?? 0), 0);
       try {
         await this.saveRecord();
       } catch {
@@ -942,7 +935,7 @@ export class ChatSession {
     }
 
     const attachmentsBefore = this.record.messages.flatMap(message => message.attachments ?? []);
-    const edited = this.record.messages[index];
+    const edited = { ...this.record.messages[index] };
     edited.content = text;
     edited.mode = this.turnMode();
     delete this.record.pendingPlanMessageTs;
@@ -953,18 +946,10 @@ export class ChatSession {
       edited.attachments = retained.length ? retained : undefined;
     }
     delete edited.tokens;
-    this.record.messages = this.record.messages.slice(0, index + 1);
-    // A summary may contain the response being replaced. Rebuild context from
-    // the retained transcript, allowing normal auto-compaction before replay.
-    delete this.record.contextMessages;
+    this.truncateHistoryBefore(index);
+    appendChatMessage(this.record, edited);
     this.loadedChatContextPending = false;
     this.contextActivities.clear();
-    delete this.record.recalledMemories;
-    for (const message of this.record.messages) delete message.tokens;
-    this.record.totalTokens = this.record.messages.reduce(
-      (total, message) => total + (message.tokens ?? 0),
-      0
-    );
     this.toolDiffSources.clear();
     await this.saveRecord();
     await this.deleteDroppedAttachments(attachmentsBefore);
@@ -977,6 +962,29 @@ export class ChatSession {
     // Compaction preserves the transcript; keep the live response and its tool timeline.
     if (!(await this.prepareContextForModelRequest(s, { reload: false }))) return;
     await this.runTurn(s, responseMessageId);
+  }
+
+  /** Remove the selected message and its future from both histories. */
+  private truncateHistoryBefore(index: number): void {
+    const target = this.record.messages[index];
+    const context = this.record.contextMessages;
+    const contextIndex = context?.findIndex(message =>
+      message.role === target.role && message.ts === target.ts) ?? -1;
+    this.record.messages = this.record.messages.slice(0, index);
+    if (context && contextIndex >= 0) {
+      // The target survived in the compacted tail, so its preceding summary
+      // cannot include the discarded future. Keep that summary instead of
+      // resurrecting large archived reads and triggering compaction again.
+      this.record.contextMessages = context.slice(0, contextIndex);
+    } else {
+      // An archived target may be inside the summary. Only the retained
+      // transcript is safe to replay; recount it before any compaction check.
+      delete this.record.contextMessages;
+    }
+    delete this.record.recalledMemories;
+    this.record.memoryCreations = this.record.memoryCreations?.filter(creation =>
+      this.record.messages.some(message => message.role === "assistant" && message.ts === creation.messageTs));
+    this.record.totalTokens = modelMessages(this.record).reduce((total, message) => total + (message.tokens ?? 0), 0);
   }
 
   private async deleteDroppedAttachments(before: ChatAttachment[]): Promise<void> {
