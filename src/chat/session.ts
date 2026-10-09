@@ -836,6 +836,8 @@ export class ChatSession {
       if (interrupted?.interruption) {
         // Keep terminal cards in the transcript without sending errors or
         // unfinished assistant text back to the model on continuation.
+        interrupted.ts = Math.max(interrupted.ts, (this.record.messages.at(-1)?.ts ?? 0) + 1);
+        this.lastInterruptionTs = interrupted.ts;
         this.record.contextMessages ??= this.record.messages.slice();
         this.record.messages.push(interrupted);
         try {
@@ -1301,10 +1303,23 @@ export class ChatSession {
     callId?: string,
     outcome: { status: "executed" | "failed" | "rejected"; createsNewFile?: boolean; toolId?: string; fileChange?: FileChangeSummary; fileUndo?: FileUndoSnapshot; fileUndoState?: "available" | "undone"; attachments?: ChatAttachment[] } & ChatToolProcess & ChatToolResultDisplay = { status: "executed" }
   ): Promise<string> {
-    const guardedContent = await this.prepareToolResultForContext(s, toolName, content);
+    let guardedContent = content;
+    let tokens: number | undefined;
+    let contextFailure: { error: unknown } | undefined;
+    try {
+      guardedContent = await this.prepareToolResultForContext(s, toolName, content);
+      tokens = await countTokens(s.endpoint, `<|tool|>${guardedContent}`, s.model)
+        + (outcome.attachments?.filter(isImageAttachment).length ?? 0) * VISION_TOKEN_RESERVE;
+    } catch (error) {
+      // The tool has already completed. A failed tokenizer/context request
+      // must not erase its result or make Continue repeat its side effects.
+      // Leave tokens unset so a later request can obtain the exact count.
+      contextFailure = { error };
+    }
     const message: ChatMessage = {
       role: "tool",
       content: guardedContent,
+      tokens,
       attachments: outcome.attachments,
       toolCall: {
         id: callId ?? newToolCallId(),
@@ -1331,16 +1346,11 @@ export class ChatSession {
         if (display.status) message.toolCall.status = display.status;
       }
     }
-    // Exact count via /tokenize — a char/4 estimate here becomes the permanent
-    // cached count (recomputeTokens skips already-counted messages), and tool
-    // results are the largest messages, so under-counting them is what let the
-    // context silently overrun and hard-abort.
-    message.tokens = await countTokens(s.endpoint, `<|tool|>${guardedContent}`, s.model)
-      + (outcome.attachments?.filter(isImageAttachment).length ?? 0) * VISION_TOKEN_RESERVE;
     appendChatMessage(this.record, message);
     if (callId) this.completedCallIds.set(callId, { name: toolName, argsJson });
-    this.record.totalTokens += message.tokens;
+    this.record.totalTokens += tokens ?? 0;
     await this.saveRecord();
+    if (contextFailure) throw contextFailure.error;
     this.emitLiveTokenEstimate("");
     this.emitCompactStatus();
     return guardedContent;
@@ -1402,6 +1412,20 @@ export class ChatSession {
     // Events are stamped with wall-clock time so the webview can restore
     // chronological work groups and their "Worked for Ns" duration.
     const turnEvents: (ParsedEvent & { t?: number })[] = [];
+    let completedEventCount = 0;
+    const recordEvent = (event: ParsedEvent): void => {
+      if (event.kind === "text" || event.kind === "thought") {
+        if (!event.text) return;
+        // Switching channels finishes the preceding visible block. The last
+        // streaming block stays unfinished until another block or tool starts.
+        if (turnEvents.at(-1)?.kind !== event.kind) completedEventCount = turnEvents.length;
+        if (event.kind === "text") assistantBuf += event.text;
+        else thoughtBuf += event.text;
+      } else completedEventCount = turnEvents.length;
+      if (event.kind === "toolCallProgress") return;
+      turnEvents.push({ ...event, t: Date.now() });
+      if (event.kind !== "text" && event.kind !== "thought") completedEventCount = turnEvents.length;
+    };
     const fileWrites = new Map<string, TrackedFileWrite>();
     this.activeFileWrites = fileWrites;
     this.streamingTools.clear();
@@ -1583,13 +1607,7 @@ export class ChatSession {
             const events: ParsedEvent[] = nativeThoughtRecovery
               ? asThoughtEvents(nativeThoughtRecovery.feed(chunk.text))
               : [{ kind: "thought", text: chunk.text }];
-            const continueAfter = await this.handleEvents(events, messageId, s);
-            let sawToolInBatch = false;
-            for (const e of events) {
-              if (e.kind === "toolCall") sawToolInBatch = true;
-              if (!sawToolInBatch && e.kind === "thought") thoughtBuf += e.text;
-              if (e.kind !== "toolCallProgress") turnEvents.push({ ...e, t: Date.now() });
-            }
+            const continueAfter = await this.handleEvents(events, messageId, s, recordEvent);
             if (!continueAfter.continue) {
               aborted = continueAfter.abort ?? false;
               toolLoop = continueAfter.toolLoop ?? false;
@@ -1600,8 +1618,7 @@ export class ChatSession {
           if (chunk.kind === "toolCall") {
             // Structured tool call from the server (--jinja templates).
             const ev: ParsedEvent = { kind: "toolCall", name: chunk.name, argsJson: chunk.argsJson, id: chunk.id };
-            const res = await this.handleEvents([ev], messageId, s);
-            turnEvents.push({ ...ev, t: Date.now() });
+            const res = await this.handleEvents([ev], messageId, s, recordEvent);
             if (res.abort) {
               aborted = true;
               break;
@@ -1625,11 +1642,12 @@ export class ChatSession {
               endLine: chunk.endLine,
               id: chunk.id
             };
-            await this.handleEvents([ev], messageId, s);
+            await this.handleEvents([ev], messageId, s, recordEvent);
             continue;
           }
           if (chunk.kind === "finish") {
             finishReason = chunk.reason;
+            if (chunk.reason !== "length") completedEventCount = turnEvents.length;
             continue;
           }
           // Native mode normally executes only the protocol's `tool_calls`
@@ -1652,14 +1670,7 @@ export class ChatSession {
           const events: ParsedEvent[] = this.toolProtocol === "native"
             ? (nativeTextRecovery?.feed(chunk.text) ?? [{ kind: "text", text: chunk.text }])
             : parser.feed(chunk.text);
-          const continueAfter = await this.handleEvents(events, messageId, s);
-          let sawToolInBatch = false;
-          for (const e of events) {
-            if (e.kind === "toolCall") sawToolInBatch = true;
-            if (!sawToolInBatch && e.kind === "text") assistantBuf += e.text;
-            if (!sawToolInBatch && e.kind === "thought") thoughtBuf += e.text;
-            if (e.kind !== "toolCallProgress") turnEvents.push({ ...e, t: Date.now() });
-          }
+          const continueAfter = await this.handleEvents(events, messageId, s, recordEvent);
           if (!continueAfter.continue) {
             aborted = continueAfter.abort ?? false;
             toolLoop = continueAfter.toolLoop ?? false;
@@ -1675,14 +1686,7 @@ export class ChatSession {
                 ...(nativeTextRecovery?.end() ?? [{ kind: "done" } as ParsedEvent])
               ]
             : parser.end();
-          const continueAfterTail = await this.handleEvents(tail, messageId, s);
-          let sawToolInTail = false;
-          for (const e of tail) {
-            if (e.kind === "toolCall") sawToolInTail = true;
-            if (!sawToolInTail && e.kind === "text") assistantBuf += e.text;
-            if (!sawToolInTail && e.kind === "thought") thoughtBuf += e.text;
-            if (e.kind !== "toolCallProgress") turnEvents.push({ ...e, t: Date.now() });
-          }
+          const continueAfterTail = await this.handleEvents(tail, messageId, s, recordEvent);
           aborted = continueAfterTail.abort ?? false;
           toolLoop = toolLoop || (continueAfterTail.toolLoop ?? false);
         }
@@ -1712,6 +1716,7 @@ export class ChatSession {
           assistantBuf = "";
           thoughtBuf = "";
           turnEvents.length = 0;
+          completedEventCount = 0;
           serverUsageTotal = undefined;
           this.emitLiveTokenEstimate("");
           const canCompact = compactAvailableForMessageCount(modelMessages(this.record).length);
@@ -1806,6 +1811,7 @@ export class ChatSession {
         assistantBuf = "";
         thoughtBuf = "";
         turnEvents.length = 0;
+        completedEventCount = 0;
         ranAnyTool ||= toolLoop;
         repairNote = undefined;
         continue;
@@ -1830,7 +1836,7 @@ export class ChatSession {
         // a tool call to be replayed on that same assistant tool-call message.
         // It is stored after the tool results in our execution-oriented record
         // and moved back beside the calls by buildNativePromptMessages.
-        if (assistantBuf.trim() || (this.toolProtocol === "native" && thoughtBuf.trim())) {
+        if (assistantBuf.trim() || thoughtBuf.trim()) {
           appendChatMessage(this.record, {
             role: "assistant",
             content: assistantBuf,
@@ -1842,6 +1848,7 @@ export class ChatSession {
         assistantBuf = "";
         thoughtBuf = "";
         turnEvents.length = 0;
+        completedEventCount = 0;
         await this.saveRecord();
         this.emitLiveTokenEstimate("");
         continue;
@@ -1907,6 +1914,18 @@ export class ChatSession {
       break;
     }
 
+    if (this.pendingInterruption || this.abort.signal.aborted) {
+      const events = turnEvents.slice(0, completedEventCount);
+      const content = events.flatMap(event => event.kind === "text" ? [event.text] : []).join("");
+      const reasoning = events.flatMap(event => event.kind === "thought" ? [event.text] : []).join("");
+      if (content.trim() || reasoning.trim()) {
+        appendChatMessage(this.record, {
+          role: "assistant", content,
+          reasoningContent: this.toolProtocol === "native" ? reasoning || undefined : undefined,
+          events, ts: Date.now()
+        });
+      }
+    }
     this.completeContextIngestion();
     this.acceptingSteering = false;
     await Promise.all(this.features.map(feature => feature.endTurn?.()));
@@ -1939,11 +1958,13 @@ export class ChatSession {
   private async handleEvents(
     events: ParsedEvent[],
     messageId: string,
-    s: HarnessSettings
+    s: HarnessSettings,
+    recordEvent: (event: ParsedEvent) => void
   ): Promise<{ continue: boolean; abort?: boolean; toolLoop?: boolean }> {
     let toolLoop = false;
     for (const e of events) {
       if (toolLoop && this.pendingSteering.length) break;
+      if (!toolLoop || (e.kind !== "text" && e.kind !== "thought")) recordEvent(e);
       if (e.kind === "text") {
         // Suppress any text emitted after a tool call in this batch: it was
         // generated before the tool results existed and is superseded by the

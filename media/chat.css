@@ -631,7 +631,6 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .approval-summary span:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .approval-actions { display: flex; flex-direction: column; gap: 4px; }
 .approval-actions > button { width: 100%; }
-.approval-actions .reject { background: transparent; }
 
 /* Questions and plan approval share a compact composer surface. */
 .question-composer { justify-content: flex-start; gap: 10px; padding: 10px 12px; }
