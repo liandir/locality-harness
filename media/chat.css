@@ -96,7 +96,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .message-date { flex: 0 0 auto; margin-inline: 7px; font-variant-numeric: tabular-nums; color: var(--vscode-descriptionForeground); font-size: 0.82em; line-height: 1.35; white-space: nowrap; }
 .msg.user .message-actions > :is(.message-mode, .message-date) { margin-inline: 0; }
 /* Account for the 15px Copy icon's inset within its square button. */
-.msg.user .message-action-buttons + .message-mode { margin-inline-end: calc((15px - var(--icon-action-size)) / 2); }
+.msg.user .message-action-buttons + :is(.message-mode, .message-date) { margin-inline-end: calc((15px - var(--icon-action-size)) / 2); }
 .message-action-hint { min-width: 0; color: var(--vscode-descriptionForeground); opacity: 0; font-size: 0.82em; line-height: 1.35; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; transition: opacity 0.12s; pointer-events: none; }
 .msg.assistant > .message-actions > .message-action-hint { margin-left: 5px; }
 .msg.user > .message-actions > .message-action-hint { margin-right: 5px; }
