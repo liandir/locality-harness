@@ -24,16 +24,18 @@ body:is(.vscode-light, .vscode-high-contrast-light) {
 /* Shared filled actions and quiet toolbar actions; icon-btn adds square geometry. */
 :where(button) { background: transparent; color: inherit; border: 1px solid transparent; border-radius: var(--control-radius); font: inherit; cursor: pointer; outline: none; transition: background 0.12s, color 0.12s; }
 :where(button):disabled { opacity: 0.55; cursor: default; }
-:where(.action-btn) { background: var(--surface-fill); color: var(--button-foreground, var(--vscode-foreground)); padding: 5px 14px; text-align: center; }
-:where(.action-btn.icon-btn) { --button-foreground: var(--vscode-foreground); --button-hover-fill: var(--surface-fill-strong); }
-.action-btn:is(:hover, :focus-visible):not(:disabled) { background: var(--button-hover-fill, var(--surface-fill-strong)); }
+:where(.action-btn) { --button-hover-fill: var(--surface-fill-strong); background: var(--surface-fill); color: var(--button-foreground, var(--vscode-foreground)); padding: 5px 14px; text-align: center; }
+:where(.action-btn.icon-btn) { --button-foreground: var(--vscode-foreground); }
 .cancel-btn { --button-foreground: var(--error-foreground); --button-hover-fill: color-mix(in srgb, var(--vscode-errorForeground) 26%, transparent); background: color-mix(in srgb, var(--vscode-errorForeground) 16%, transparent); }
 .quiet-btn { color: var(--button-foreground, var(--vscode-descriptionForeground)); }
 .icon-btn { flex: 0 0 auto; width: var(--action-size, var(--icon-action-size)); height: var(--action-size, var(--icon-action-size)); min-height: 0; box-sizing: border-box; display: inline-flex; align-items: center; justify-content: center; color: var(--button-foreground, var(--vscode-descriptionForeground)); padding: 0; line-height: 1; }
 .icon-btn.icon-btn-compact { --action-size: var(--icon-action-compact-size); }
-:is(.icon-btn, .quiet-btn):is(:hover, :focus-visible, .active, [aria-expanded=true]):not(:disabled) { background: var(--button-hover-fill, var(--surface-fill-hover)); color: var(--button-foreground, var(--vscode-foreground)); }
+/* All action variants share interaction colors; semantic states only set tokens. */
+:is(.action-btn, .icon-btn, .quiet-btn):is(:hover, :focus-visible):not(:disabled),
+:is(.icon-btn, .quiet-btn):is(.active, [aria-expanded=true]):not(:disabled) { background: var(--button-hover-fill, var(--surface-fill-hover)); color: var(--button-hover-foreground, var(--button-foreground, var(--vscode-foreground))); }
 .icon-btn svg { display: block; }
-:is(.action-btn, .icon-btn):is(.danger, .delete, .delete-message-btn, .remove, .reject):is(:hover, :focus-visible):not(:disabled) { background: color-mix(in srgb, var(--vscode-errorForeground) 12%, transparent); color: var(--error-highlight-foreground); }
+/* Destructive actions keep their base resting fill and turn red on interaction. */
+:is(.action-btn, .icon-btn, .quiet-btn):is(.danger, .delete, .delete-message-btn, .remove, .reject) { --button-hover-fill: color-mix(in srgb, var(--vscode-errorForeground) 12%, transparent); --button-hover-foreground: var(--error-highlight-foreground); }
 .icon-btn:is(.copied, .save):not(:disabled) { --button-foreground: var(--success-foreground); }
 
 /* Use the Settings/Welcome control geometry for decision fields and actions too. */

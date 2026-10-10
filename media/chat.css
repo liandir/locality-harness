@@ -90,16 +90,16 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   .msg > .message-actions { opacity: 0; pointer-events: none; }
   .msg:is(:hover, :focus-within) > .message-actions { opacity: 1; pointer-events: auto; }
 }
-.msg.user .message-actions { align-self: flex-end; flex-direction: row-reverse; gap: 15px; max-width: 90%; padding-right: 2px; }
-.msg.assistant .message-actions { align-self: flex-start; }
+.msg.user > .message-actions { align-self: flex-end; flex-direction: row-reverse; gap: 15px; max-width: 90%; padding-right: 2px; }
+.msg.assistant > .message-actions { align-self: flex-start; }
 .message-actions .message-mode { margin-inline-start: 7px; margin-inline-end: 4px; }
 .message-date { flex: 0 0 auto; margin-inline: 7px; font-variant-numeric: tabular-nums; color: var(--vscode-descriptionForeground); font-size: 0.82em; line-height: 1.35; white-space: nowrap; }
 .msg.user .message-actions > :is(.message-mode, .message-date) { margin-inline: 0; }
 /* Account for the 15px Copy icon's inset within its square button. */
-.msg.user .message-action-buttons + .message-mode { margin-inline-end: calc((15px - var(--icon-action-size)) / 2); }
+.msg.user .message-action-buttons + :is(.message-mode, .message-date) { margin-inline-end: calc((15px - var(--icon-action-size)) / 2); }
 .message-action-hint { min-width: 0; color: var(--vscode-descriptionForeground); opacity: 0; font-size: 0.82em; line-height: 1.35; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; transition: opacity 0.12s; pointer-events: none; }
-.msg.assistant .message-action-hint { margin-left: 5px; }
-.msg.user .message-action-hint { margin-right: 5px; }
+.msg.assistant > .message-actions > .message-action-hint { margin-left: 5px; }
+.msg.user > .message-actions > .message-action-hint { margin-right: 5px; }
 .message-action-hint.active { opacity: 0.86; }
 .bubble :first-child, .assistant-markdown :first-child { margin-top: 0; }
 .bubble :last-child, .assistant-markdown :last-child { margin-bottom: 0; }
@@ -631,7 +631,6 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .approval-summary span:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .approval-actions { display: flex; flex-direction: column; gap: 4px; }
 .approval-actions > button { width: 100%; }
-.approval-actions .reject { background: transparent; }
 
 /* Questions and plan approval share a compact composer surface. */
 .question-composer { justify-content: flex-start; gap: 10px; padding: 10px 12px; }

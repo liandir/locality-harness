@@ -146,6 +146,116 @@ function mockCommandHandle(result: Promise<{ exitCode: number; stdout: string; s
 }
 
 describe("interrupted turn continuation", () => {
+  it.each(["disconnect", "tokenizer failure", "cancel"])("preserves completed tools and output after %s in the same response", async outcome => {
+    const ws = await fs.mkdtemp(path.join(os.tmpdir(), "locality-continue-completed-"));
+    const { ChatSession } = await import("../src/chat/session.js");
+    const { ChatStorage } = await import("../src/chat/storage.js");
+    const storage = new ChatStorage(ws, path.join(ws, "chats"));
+    const record = storage.newRecord("native");
+    mocks.settings.autoapproveWrites = true;
+    const fileName = `${path.basename(ws)}.txt`;
+    const events: UiEvent[] = [];
+    let session = new ChatSession({ storage, workspaceRoot: ws, record, emit: event => events.push(structuredClone(event)) });
+    mocks.streamChat.mockImplementation(async function* () {
+      yield { kind: "thought", text: "Completed reasoning." };
+      yield { kind: "text", text: "I will create the file." };
+      if (outcome === "tokenizer failure") mocks.tokenize.mockRejectedValue(new Error("Tokenizer disconnected"));
+      yield { kind: "toolCall", name: "create_file", argsJson: JSON.stringify({ path: fileName, content: "saved" }), id: "completed-before-interruption" };
+      yield { kind: "thought", text: "Unfinished next block" };
+      if (outcome === "cancel") session.cancel();
+      throw new Error("Connection lost");
+    });
+    try {
+      await session.sendUserMessage("Create the file");
+      expect(await fs.readFile(path.join(ws, fileName), "utf8")).toBe("saved");
+      const completed = record.messages.find(message => message.toolCall?.id === "completed-before-interruption");
+      expect(completed?.toolCall?.status).toBe("executed");
+      if (outcome === "tokenizer failure") expect(completed?.tokens).toBeUndefined();
+      const output = record.messages.find(message => message.content === "I will create the file.");
+      expect(output?.reasoningContent).toBe("Completed reasoning.");
+      expect(output?.events).toEqual(expect.arrayContaining([
+        expect.objectContaining({ kind: "thought", text: "Completed reasoning." }),
+        expect.objectContaining({ kind: "text", text: "I will create the file." })
+      ]));
+      expect(JSON.stringify(record.messages)).not.toContain("Unfinished next block");
+      const terminal = record.messages.at(-1)!;
+      expect(terminal.interruption).toBeDefined();
+      expect(terminal.ts).toBeGreaterThan(output!.ts);
+      await session.shutdown();
+      const loaded = (await storage.load(record.id))!;
+      const completedHistory = structuredClone(loaded.messages.slice(0, -1));
+      session = new ChatSession({ storage, workspaceRoot: ws, record: loaded, emit: event => events.push(structuredClone(event)) });
+      mocks.tokenize.mockResolvedValue(1);
+      mocks.streamChat.mockImplementation(async function* (_endpoint, request) {
+        expect(loaded.messages).toEqual(completedHistory);
+        expect(JSON.stringify(request.messages)).toContain("completed-before-interruption");
+        yield { kind: "text", text: "Finished without repeating the file creation." };
+      });
+      const beforeContinue = events.length;
+      expect(await session.continueTurn(terminal.ts)).toBe(true);
+      const restored = events.slice(beforeContinue).find(event => event.kind === "chatLoaded");
+      expect(restored?.kind === "chatLoaded" ? restored.record.messages : undefined).toEqual(completedHistory);
+      expect(loaded.messages.filter(message => message.toolCall?.id === "completed-before-interruption")).toHaveLength(1);
+      expect(loaded.messages).toContainEqual(output);
+      expect((await storage.load(record.id))!.messages).toEqual(loaded.messages);
+    } finally {
+      mocks.tokenize.mockResolvedValue(1);
+      await session.shutdown();
+      await fs.rm(ws, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps a finished thinking block when the following text is interrupted", async () => {
+    const { ChatSession } = await import("../src/chat/session.js");
+    const record = newRecord();
+    record.toolCallingMode = "native";
+    const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record, emit: vi.fn() });
+    mocks.streamChat.mockImplementation(async function* () {
+      yield { kind: "thought", text: "Finished thinking." };
+      yield { kind: "text", text: "Unfinished answer" };
+      throw new Error("Disconnected");
+    });
+    try {
+      await session.sendUserMessage("Explain it");
+      const thinking = record.messages.find(message => message.reasoningContent === "Finished thinking.");
+      expect(thinking?.events).toEqual([expect.objectContaining({ kind: "thought", text: "Finished thinking." })]);
+      expect(JSON.stringify(record.messages)).not.toContain("Unfinished answer");
+      mocks.streamChat.mockImplementation(async function* () { yield { kind: "text", text: "Completed answer" }; });
+      await session.continueTurn(record.messages.at(-1)!.ts);
+      expect(record.messages).toContainEqual(thinking);
+    } finally { await session.shutdown(); }
+  });
+
+  it("keeps completed legacy thinking across tool passes and continuation", async () => {
+    const ws = await fs.mkdtemp(path.join(os.tmpdir(), "locality-continue-legacy-"));
+    const { ChatSession } = await import("../src/chat/session.js");
+    const record = newRecord();
+    record.toolCallingMode = "compat-qwen3";
+    const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: ws, record, emit: vi.fn() });
+    let pass = 0;
+    mocks.streamChat.mockImplementation(async function* (_endpoint, request) {
+      if (request.tools) throw new mocks.NativeToolsUnsupportedError("tools unsupported");
+      if (pass++ === 0) {
+        yield { kind: "text", text: '<think>Finished legacy thinking.</think><tool_call>{"name":"list_dir","arguments":{"path":"."}}</tool_call>' };
+      } else throw new Error("Disconnected after the tool pass");
+    });
+    try {
+      await session.sendUserMessage("Inspect the files");
+      const thinking = record.messages.find(message => message.events?.some(event =>
+        typeof event === "object" && event !== null && "text" in event && event.text === "Finished legacy thinking."
+      ));
+      expect(thinking).toBeDefined();
+      expect(record.messages.filter(message => message.toolCall?.status === "executed")).toHaveLength(1);
+      mocks.streamChat.mockImplementation(async function* () { yield { kind: "text", text: "Completed answer" }; });
+      await session.continueTurn(record.messages.at(-1)!.ts);
+      expect(record.messages).toContainEqual(thinking);
+      expect(record.messages.filter(message => message.toolCall?.status === "executed")).toHaveLength(1);
+    } finally {
+      await session.shutdown();
+      await fs.rm(ws, { recursive: true, force: true });
+    }
+  });
+
   it.each(["disconnect", "cancel"])("resumes after %s from saved tool results after reopening", async outcome => {
     const ws = await fs.mkdtemp(path.join(os.tmpdir(), "locality-continue-"));
     const { ChatSession } = await import("../src/chat/session.js");

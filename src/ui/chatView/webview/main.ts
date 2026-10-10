@@ -1069,7 +1069,7 @@ function renderMessageActionsInnerHtml(m: Message): string {
   }
   const date = (m.role === "user" || m.role === "assistant") && m.recordTs !== undefined
     ? renderMessageDate(m.recordTs) : "";
-  const mode = m.role === "user" ? renderMessageMode(m.mode) : "";
+  const mode = m.role === "user" && !m.steering ? renderMessageMode(m.mode) : "";
   if (actions.length === 0 && !date && !mode) return "";
   const hintClass = `message-action-hint${persistentHint ? " active" : ""}`;
   return `<span class="message-action-buttons">${actions.join("")}</span>${mode}${date ? `<span class="message-date">${date}</span>` : ""}<span class="${hintClass}" aria-hidden="true">${persistentHint}</span>`;
