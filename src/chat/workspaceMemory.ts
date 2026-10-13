@@ -174,7 +174,7 @@ export class WorkspaceMemory {
     if (typeof text !== "string" || text.length > 20000) throw new Error("Memory text is too long.");
     text = redactMemorySecrets(text.trim());
     if (!text || await countTokens(settings.endpoint, text, settings.model) > MEMORY_SUMMARY_TOKENS) {
-      throw new Error("Enter a non-empty memory of at most 384 tokens.");
+      throw new Error(`Enter a non-empty memory of at most ${MEMORY_SUMMARY_TOKENS} tokens.`);
     }
     await storage.updateMemory(id, rec => ({
       text, sourceRevision: transcriptRevision(rec), generatedAt: Date.now(), enabled: rec.memory?.enabled ?? false, manual: true

@@ -7,13 +7,15 @@ const mocks = vi.hoisted(() => ({
   complete: vi.fn(), tokenize: vi.fn(), context: vi.fn()
 }));
 vi.mock("../src/config/settings.js", () => ({ readSettings: () => mocks.settings }));
-vi.mock("../src/llm/client.js", () => ({
+vi.mock("../src/llm/client.js", async importOriginal => ({
+  GenerationLengthError: (await importOriginal<typeof import("../src/llm/client.js")>()).GenerationLengthError,
   complete: mocks.complete, tokenize: mocks.tokenize, fetchServerContextSize: mocks.context
 }));
 import { WorkspaceMemory, generateMemory, activeSnapshots } from "../src/chat/workspaceMemory.js";
 import { ChatStorage, type ChatRecord } from "../src/chat/storage.js";
-import { transcriptRevision, rankMemories, recallMemory, memoryMetadata } from "../src/chat/memory.js";
+import { MEMORY_SUMMARY_TOKENS, transcriptRevision, rankMemories, recallMemory, memoryMetadata } from "../src/chat/memory.js";
 import { beginForeground, foregroundBusy } from "../src/llm/activity.js";
+import { GenerationLengthError } from "../src/llm/client.js";
 let dir: string;
 let storage: ChatStorage;
 let memory: WorkspaceMemory;
@@ -45,6 +47,94 @@ describe("memory generation", () => {
     await generated(rec.id);
     expect((await memory.list())[0]).toMatchObject({ enabled: true, status: "ready", usable: true });
     expect(rankMemories("parser", await storage.records(), "new-chat")).toHaveLength(1);
+  });
+
+  it("saves and recalls summaries up to 1024 tokens without cutting out their middle", async () => {
+    const rec = await chat();
+    const summary = `Parser decisions. ${"Keep exact revisions and verify tests. ".repeat(80)}Retain this final decision.`;
+    expect(Math.ceil(summary.length / 4)).toBeGreaterThan(384);
+    mocks.complete.mockResolvedValueOnce(summary);
+    memory.enqueue(rec.id);
+    await generated(rec.id);
+    expect((await storage.load(rec.id))!.memory!.text).toBe(summary);
+    const records = await storage.records();
+    const metadata = memoryMetadata(rankMemories("parser", records, "new-chat")[0]);
+    expect(recallMemory(metadata.name, metadata.id, records, "new-chat").text).toBe(summary);
+    expect(await memory.creations(rec.id)).toEqual([expect.objectContaining({ text: summary })]);
+    expect(mocks.complete.mock.calls[0][1].max_tokens).toBeGreaterThanOrEqual(1024);
+  });
+
+  it("rewrites an oversized draft from the same source before carrying it into later chunks", async () => {
+    const rec = await chat("Parser transcript. ".repeat(2000));
+    const oversized = "Oversized draft detail. ".repeat(200);
+    const rewritten = "Parser uses exact revisions. Verified by tests.";
+    mocks.complete.mockResolvedValueOnce(oversized).mockResolvedValue(rewritten);
+    const text = await generateMemory(rec, mocks.settings.endpoint, "test", new AbortController().signal);
+    expect(text).toBe(rewritten);
+    expect(mocks.complete.mock.calls.length).toBeGreaterThan(2);
+    const first = mocks.complete.mock.calls[0][1];
+    const retry = mocks.complete.mock.calls[1][1];
+    expect(retry.messages[1]).toEqual(first.messages[1]);
+    expect(first.messages[0].content).toContain("at most 1024 tokens");
+    expect(retry.messages[0].content).toContain("at most 768 tokens");
+    expect(JSON.parse(mocks.complete.mock.calls[2][1].messages[1].content).priorDraft).toBe(rewritten);
+    expect(JSON.stringify(mocks.complete.mock.calls)).not.toContain("context guard elided");
+    expect(JSON.stringify(mocks.complete.mock.calls)).not.toContain(oversized);
+  });
+
+  it("retries output-limit failures without accepting an unfinished memory", async () => {
+    const rec = await chat();
+    mocks.complete.mockRejectedValueOnce(new GenerationLengthError());
+    memory.enqueue(rec.id);
+    await generated(rec.id);
+    expect(mocks.complete).toHaveBeenCalledTimes(2);
+    for (const call of mocks.complete.mock.calls) expect(call[3]?.acceptPartialOnLength).not.toBe(true);
+  });
+
+  it.each(["", "Previous Parser decision"])("preserves prior contents %j if the shorter retry is still oversized", async text => {
+    const rec = await chat();
+    if (text) await storage.updateMemory(rec.id, () => ({
+      text, sourceRevision: "0".repeat(64), generatedAt: 1, enabled: true, manual: false
+    }));
+    mocks.complete.mockResolvedValue("Oversized draft detail. ".repeat(200));
+    memory.enqueue(rec.id);
+    await vi.waitFor(async () => expect((await memory.list())[0].status).toBe("failed"));
+    expect(mocks.complete).toHaveBeenCalledTimes(2);
+    expect((await storage.load(rec.id))!.memory!.text).toBe(text);
+    expect(await memory.creations(rec.id)).toEqual([expect.objectContaining({ status: "failed" })]);
+  });
+
+  it("does not retry oversized output after cancellation", async () => {
+    const rec = await chat();
+    const controller = new AbortController();
+    mocks.complete.mockImplementationOnce(async () => {
+      controller.abort();
+      return "Oversized draft detail. ".repeat(200);
+    });
+    await expect(generateMemory(rec, mocks.settings.endpoint, "test", controller.signal)).rejects.toThrow();
+    expect(mocks.complete).toHaveBeenCalledOnce();
+  });
+
+  it("leaves room for the running draft and output on a small model context", async () => {
+    const rec = await chat("Parser transcript. ".repeat(1000));
+    mocks.context.mockResolvedValue(2048);
+    mocks.complete.mockResolvedValue("Parser decision with verified tests. ".repeat(40).trim());
+    const text = await generateMemory(rec, mocks.settings.endpoint, "test", new AbortController().signal);
+    expect(Math.ceil(text.length / 4)).toBeLessThanOrEqual(512);
+    expect(mocks.complete.mock.calls.length).toBeGreaterThan(1);
+    for (const [, request] of mocks.complete.mock.calls) {
+      const inputTokens = request.messages.reduce((sum: number, message: { content: string }) => sum + Math.ceil(message.content.length / 4), 0);
+      expect(inputTokens + request.max_tokens + 64).toBeLessThanOrEqual(2048);
+    }
+  });
+
+  it("accepts manual memories through 1024 tokens and rejects larger edits without replacing them", async () => {
+    const rec = await chat();
+    const text = "Manual Parser decision ".padEnd(4096, "x");
+    await memory.edit(rec.id, text);
+    expect((await storage.load(rec.id))!.memory!.text).toBe(text);
+    await expect(memory.edit(rec.id, text + "x")).rejects.toThrow("at most 1024 tokens");
+    expect((await storage.load(rec.id))!.memory!.text).toBe(text);
   });
 
   it("persists recalled contents after the answer and retains earlier turn cards on reopening", async () => {
@@ -258,13 +348,13 @@ describe("memory generation", () => {
     rec.contextMessages = [{ role: "system", content: "CONTEXT_SENTINEL", ts: 4 }];
     rec.recalledMemories = [{ sourceId: rec.id, title: "Imported", text: "IMPORTED_SENTINEL", generatedAt: 1, sourceRevision: transcriptRevision(rec) }];
     const text = await generateMemory(rec, mocks.settings.endpoint, "test", new AbortController().signal);
-    expect(Math.ceil(text.length / 4)).toBeLessThanOrEqual(384);
+    expect(Math.ceil(text.length / 4)).toBeLessThanOrEqual(MEMORY_SUMMARY_TOKENS);
     expect(mocks.complete.mock.calls.length).toBeGreaterThan(1);
     for (const [, request] of mocks.complete.mock.calls) {
       const raw = JSON.stringify(request.messages);
       for (const forbidden of ["RAW_TOOL_SENTINEL", "REASONING_SENTINEL", "IMPORTED_SENTINEL", "CONTEXT_SENTINEL", "hidden-secret"]) expect(raw).not.toContain(forbidden);
       expect(request.background).toBe(true);
-      expect(raw.length / 4).toBeLessThan(8192 - 512);
+      expect(raw.length / 4 + request.max_tokens).toBeLessThan(8192);
     }
   });
   it("does not process old chats until requested and skips manual summaries", async () => {
