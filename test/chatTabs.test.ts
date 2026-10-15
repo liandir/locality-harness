@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type * as vscode from "vscode";
+import * as vscode from "vscode";
+import { memoryMetadata } from "../src/chat/memory.js";
 import type { ChatMode } from "../src/chat/mode.js";
 import { WORKSPACE_REASONING_EFFORT_KEY, type ReasoningEffort } from "../src/chat/reasoningEffort.js";
 import type { ChatAttachment, ChatRecord, ChatStorage } from "../src/chat/storage.js";
@@ -10,8 +11,12 @@ import type { ChatToExt, ExtToChat } from "../src/ui/messaging.js";
 const mocks = vi.hoisted(() => ({ sessions: new Map<string, FakeSession>(), input: vi.fn(), picker: vi.fn(), warning: vi.fn(), metadata: vi.fn(), settings: { reasoningEfforts: {}, endpoint: "http://127.0.0.1:8080", model: "model-a", memoryEnabled: true, memoryLoadOnStart: false, autoGenerateMemories: true } }));
 vi.mock("vscode", () => ({
   commands: { executeCommand: vi.fn() },
-  window: { showInputBox: mocks.input, showOpenDialog: mocks.picker, showWarningMessage: mocks.warning },
-  Uri: { file: (path: string) => path }
+  window: { showInputBox: mocks.input, showOpenDialog: mocks.picker, showWarningMessage: mocks.warning, showErrorMessage: vi.fn() },
+  workspace: { registerTextDocumentContentProvider: vi.fn(() => ({ dispose() {} })) },
+  Uri: {
+    file: (path: string) => path,
+    from: (parts: { scheme: string; path: string; query: string }) => ({ ...parts, toString: () => JSON.stringify(parts) })
+  }
 }));
 vi.mock("../src/config/settings.js", () => ({ readSettings: () => mocks.settings }));
 vi.mock("../src/llm/client.js", () => ({ fetchServerMetadata: mocks.metadata }));
@@ -132,7 +137,7 @@ import { ChatViewProvider } from "../src/ui/chatView/provider.js";
 
 const record = (id: string) => ({ id, title: id, messages: [], reasoningEffort: "default", mode: "act" } as unknown as ChatRecord);
 function setup(memory?: WorkspaceMemory) {
-  const storage = { list: vi.fn().mockResolvedValue([]), load: vi.fn(), save: vi.fn(), delete: vi.fn(), deleteAll: vi.fn(), deleteAttachment: vi.fn(), importAttachment: vi.fn(), importAttachmentBytes: vi.fn(), attachmentPath: (id: string) => `/workspace/${id}/image.png` };
+  const storage = { metadata: vi.fn().mockResolvedValue([]), list: vi.fn().mockResolvedValue([]), load: vi.fn(), save: vi.fn(), delete: vi.fn(), deleteAll: vi.fn(), deleteAttachment: vi.fn(), importAttachment: vi.fn(), importAttachmentBytes: vi.fn(), attachmentPath: (id: string) => `/workspace/${id}/image.png` };
   const preferences = new Map<string, unknown>();
   const workspaceState = {
     get: vi.fn((key: string) => preferences.get(key)),
@@ -141,15 +146,16 @@ function setup(memory?: WorkspaceMemory) {
   const createChat = vi.fn();
   const onChatOpened = vi.fn();
   const onChatListChanged = vi.fn();
+  const onOpenMemory = vi.fn();
   const provider = new ChatViewProvider(
-    { workspaceState } as unknown as vscode.ExtensionContext,
-    () => storage as unknown as ChatStorage, () => "/workspace", vi.fn(), onChatOpened, createChat, onChatListChanged, memory
+    { workspaceState, subscriptions: [] } as unknown as vscode.ExtensionContext,
+    () => storage as unknown as ChatStorage, () => "/workspace", vi.fn(), onChatOpened, createChat, onChatListChanged, memory, onOpenMemory
   );
   const posted: ExtToChat[] = [];
   (provider as unknown as { view: unknown }).view = { webview: { postMessage: (message: ExtToChat) => posted.push(message), asWebviewUri: (path: string) => path } };
   const send = (message: ChatToExt) => (provider as unknown as { onMessage(message: ChatToExt): Promise<void> }).onMessage(message);
   const snapshot = () => [...posted].reverse().find(message => "type" in message && message.type === "chatSnapshot") as Extract<ExtToChat, { type: "chatSnapshot" }>;
-  return { provider, storage, posted, send, snapshot, workspaceState, createChat, onChatOpened, onChatListChanged };
+  return { provider, storage, posted, send, snapshot, workspaceState, createChat, onChatOpened, onChatListChanged, onOpenMemory };
 }
 beforeEach(() => {
   mocks.sessions.clear();
@@ -447,7 +453,7 @@ describe.each(["act", "review"] as const)("automatic %s memories", mode => {
     mocks.settings.autoGenerateMemories = startEnabled;
     mocks.settings.memoryEnabled = !endEnabled;
     mocks.settings.memoryLoadOnStart = !endEnabled;
-    const memory = { enqueue: vi.fn(), creations: vi.fn().mockResolvedValue([]) };
+    const memory = { enqueue: vi.fn(), list: vi.fn().mockResolvedValue([]), creations: vi.fn().mockResolvedValue([]) };
     const { provider } = setup(memory as unknown as WorkspaceMemory);
     provider.openChat(record("a"));
     const session = mocks.sessions.get("a")!;
@@ -497,7 +503,7 @@ describe("independent chat tabs", () => {
     { mode: "review" as const, messageTs: undefined, createsMemory: false },
     { mode: "plan" as const, messageTs: undefined, createsMemory: false }
   ])("only queues memory for completed Act/Review answers ($mode, answer=$messageTs)", ({ mode, messageTs, createsMemory }) => {
-    const memory = { enqueue: vi.fn(), creations: vi.fn().mockResolvedValue([]) };
+    const memory = { enqueue: vi.fn(), list: vi.fn().mockResolvedValue([]), creations: vi.fn().mockResolvedValue([]) };
     const { provider } = setup(memory as unknown as WorkspaceMemory);
     const rec = record("a");
     // The composer and active tab can change while this response is running.
@@ -1000,5 +1006,140 @@ describe("steering messages from the chat view", () => {
     a.finish();
     await turn;
     await provider.closeAll();
+  });
+});
+
+describe("memory chat navigation", () => {
+  it.each(["initialMemories", "recalledMemories"] as const)("opens %s in a chat tab while keeping the originating tab", async field => {
+    const { provider, storage, send, onOpenMemory } = setup();
+    const chat = record("a");
+    const memory = { sourceId: "source", title: "Original title", text: "# Loaded contents", generatedAt: 1, sourceRevision: "original" };
+    chat[field] = [memory];
+    storage.load.mockResolvedValue({ ...record("source"), title: "Renamed source" });
+    provider.openChat(chat);
+    await send({ type: "openMemoryChat", id: memoryMetadata(memory).id, chatId: "a" });
+    expect(storage.load).toHaveBeenCalledWith("source");
+    expect(provider.getTabs().map(tab => tab.id)).toEqual(["a", "source"]);
+    expect(provider.getCurrentRecord()?.id).toBe("source");
+    expect(onOpenMemory).not.toHaveBeenCalled();
+    expect(vscode.commands.executeCommand).not.toHaveBeenCalledWith("vscode.open", expect.anything(), expect.anything());
+    expect(vscode.workspace.registerTextDocumentContentProvider).not.toHaveBeenCalled();
+    await provider.closeAll();
+  });
+
+  it("uses historical IDs for searched and recalled memories after regeneration, including duplicate titles", async () => {
+    const { provider, storage, send } = setup();
+    const chat = record("a");
+    chat.memorySources = { first: "source-one", second: "source-two" };
+    provider.openChat({ ...record("source-one"), title: "Same title" });
+    provider.openChat({ ...record("source-two"), title: "Same title" });
+    provider.openChat(chat);
+    await send({ type: "openMemoryChat", id: "second", chatId: "a" });
+    expect(provider.getCurrentRecord()?.id).toBe("source-two");
+    expect(provider.getTabs()).toHaveLength(3);
+    expect(storage.load).not.toHaveBeenCalled();
+    await provider.closeAll();
+  });
+
+  it("resolves unchanged memories from older chats within the current workspace", async () => {
+    const { provider, storage, send } = setup();
+    const source = { ...record("source"), memory: { text: "Contents", generatedAt: 1, sourceRevision: "rev", manual: true, enabled: false } };
+    storage.metadata.mockResolvedValue([source]);
+    storage.load.mockResolvedValue(source);
+    provider.openChat(record("a"));
+    await send({ type: "openMemoryChat", id: memoryMetadata({ sourceId: source.id, title: source.title, ...source.memory }).id, chatId: "a" });
+    expect(storage.metadata).toHaveBeenCalledWith(true);
+    expect(provider.getCurrentRecord()?.id).toBe("source");
+    await provider.closeAll();
+  });
+
+  it("keeps the current chat for unknown IDs, deleted sources, or requests from another tab", async () => {
+    const { provider, storage, send } = setup();
+    const chat = record("a");
+    chat.memorySources = { known: "deleted" };
+    provider.openChat(chat);
+    await send({ type: "openMemoryChat", id: "unknown", chatId: "a" });
+    await send({ type: "openMemoryChat", id: "known", chatId: "a" });
+    await send({ type: "openMemoryChat", id: "known", chatId: "another-chat" });
+    expect(storage.load).toHaveBeenCalledTimes(1);
+    expect(storage.load).toHaveBeenCalledWith("deleted");
+    expect(provider.getCurrentRecord()?.id).toBe("a");
+    expect(vscode.window.showErrorMessage).toHaveBeenCalledTimes(2);
+    await provider.closeAll();
+  });
+
+  it("recovers an old recall's source after rename and regeneration without matching by title", async () => {
+    const { provider, storage, send } = setup();
+    const memory = { sourceId: "source", title: "Old title", text: "Original contents", generatedAt: 1, sourceRevision: "rev" };
+    const metadata = memoryMetadata(memory);
+    const chat = record("a");
+    chat.messages = [{ role: "tool", ts: 1, content: JSON.stringify({ ...metadata, contents: memory.text }),
+      toolCall: { name: "recall_memory", argsJson: "{}", status: "executed" } }];
+    const source = { ...record("source"), title: "New title" };
+    storage.metadata.mockResolvedValue([{ ...record("unrelated"), title: "Old title" }, source]);
+    storage.load.mockResolvedValue(source);
+    provider.openChat(chat);
+    await send({ type: "openMemoryChat", id: metadata.id, chatId: "a" });
+    expect(storage.load).toHaveBeenCalledWith("source");
+    expect(provider.getCurrentRecord()?.id).toBe("source");
+    await provider.closeAll();
+  });
+
+  it("does not switch tabs after a slow legacy lookup if the user has navigated elsewhere", async () => {
+    const { provider, storage, send } = setup();
+    let finish!: (sources: unknown[]) => void;
+    storage.metadata.mockReturnValue(new Promise(resolve => { finish = resolve; }));
+    provider.openChat(record("a"));
+    const navigation = send({ type: "openMemoryChat", id: "unknown", chatId: "a" });
+    provider.openChat(record("b"));
+    finish([]);
+    await navigation;
+    expect(provider.getCurrentRecord()?.id).toBe("b");
+    expect(vscode.window.showErrorMessage).not.toHaveBeenCalled();
+    await provider.closeAll();
+  });
+});
+
+describe("chat tab context menu", () => {
+  it("targets the selected tab for memory actions and deletion without switching the active chat", async () => {
+    const memory = { list: vi.fn().mockResolvedValue([]), creations: vi.fn().mockResolvedValue([]), regenerate: vi.fn() };
+    const { provider, send, onOpenMemory } = setup(memory as unknown as WorkspaceMemory);
+    provider.openChat(record("a"));
+    provider.openChat(record("b"));
+    await send({ type: "openMemory", id: "a", readonly: false, chatId: "b" });
+    await send({ type: "openMemory", id: "a", readonly: true, chatId: "b" });
+    await send({ type: "regenerateMemory", id: "a", chatId: "b" });
+    await send({ type: "deleteChat", id: "a", chatId: "b" });
+    expect(onOpenMemory.mock.calls).toEqual([["a", false], ["a", true]]);
+    expect(memory.regenerate).toHaveBeenCalledWith("a");
+    expect(vscode.commands.executeCommand).toHaveBeenCalledWith("locality.deleteChat", "a");
+    expect(provider.getCurrentRecord()?.id).toBe("b");
+    await send({ type: "openChat", id: "a", chatId: "b" });
+    expect(provider.getCurrentRecord()?.id).toBe("a");
+  });
+
+  it("shares memory availability and generation status for tab menus without sending the memory text", async () => {
+    const memory = { list: vi.fn().mockResolvedValue([{ sourceId: "a", text: "Private memory", status: "ready" }]), creations: vi.fn().mockResolvedValue([]) };
+    const { provider, posted, send } = setup(memory as unknown as WorkspaceMemory);
+    provider.openChat(record("a"));
+    await send({ type: "ready" });
+    await vi.waitFor(() => expect(posted).toContainEqual({ type: "chatMemories", memories: [{ id: "a", hasMemory: true, status: "ready" }] }));
+    memory.list.mockResolvedValue([{ sourceId: "a", text: "Private memory", status: "generating" }]);
+    provider.refreshMemoryVisibility();
+    await vi.waitFor(() => expect(posted).toContainEqual({ type: "chatMemories", memories: [{ id: "a", hasMemory: true, status: "generating" }] }));
+  });
+
+  it("drops pending memory menu updates after the workspace's chats close", async () => {
+    const memory = { list: vi.fn().mockResolvedValue([]), creations: vi.fn().mockResolvedValue([]) };
+    const { provider, posted } = setup(memory as unknown as WorkspaceMemory);
+    provider.openChat(record("a"));
+    let finish!: (value: { sourceId: string; text: string; status: string }[]) => void;
+    memory.list.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    provider.refreshMemoryVisibility();
+    await provider.closeAll();
+    posted.length = 0;
+    finish([{ sourceId: "a", text: "Late memory", status: "ready" }]);
+    await Promise.resolve();
+    expect(posted).not.toContainEqual(expect.objectContaining({ type: "chatMemories" }));
   });
 });

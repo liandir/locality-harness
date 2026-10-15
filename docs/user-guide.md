@@ -453,7 +453,9 @@ Select the **cloud icon** beside a chat’s delete button to inspect, edit, incl
 regenerate its summary. Saving an edit makes the summary manually maintained, so background
 updates cannot overwrite it. **Regenerate** replaces it with an automatically
 maintained summary. Failed generation can be retried without affecting the chat.
-Summaries are limited to 384 tokens. Raw tool messages, hidden reasoning, and
+Summaries are limited to 1,024 tokens, with a smaller budget on small model contexts.
+Oversized summaries are retried with a shorter target instead of cutting out text
+or inserting truncation notices. Raw tool messages, hidden reasoning, and
 imported memories are excluded from summarization input; common credential
 formats are redacted, and the model is instructed to omit secrets.
 

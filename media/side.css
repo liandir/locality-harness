@@ -30,7 +30,15 @@ h3 { font-size: 0.82em; margin: 0 0 12px; color: var(--vscode-descriptionForegro
 .chat-entry { min-width: 0; }
 .chat-list li > .chat-row time { color: var(--vscode-descriptionForeground); font-size: 0.85em; }
 
-.memory-reveal.memory-usable { --button-foreground: var(--vscode-textLink-foreground); --button-hover-fill: color-mix(in srgb, var(--vscode-textLink-foreground) 8%, transparent); }
+.memory-toggle:is(.memory-usable, .memory-generating) { --button-foreground: var(--vscode-textLink-foreground); --button-hover-fill: color-mix(in srgb, var(--vscode-textLink-foreground) 8%, transparent); }
+.memory-generating > svg { animation: memory-generation-shimmer 2s ease-in-out infinite; }
+@keyframes memory-generation-shimmer {
+  0%, 100% { color: color-mix(in srgb, var(--vscode-textLink-foreground) 40%, var(--vscode-sideBar-background, var(--vscode-editor-background))); }
+  50% { color: var(--vscode-textLink-foreground); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .memory-generating > svg { animation: none; }
+}
 .clear-chats { margin-top: 12px; }
 .panel { display: flex; flex-direction: column; gap: 2px; padding-bottom: 8px; }
 .panel-section { padding: 14px 0 16px; border-top: 1px solid var(--surface-stroke); }
@@ -122,11 +130,6 @@ h3 { font-size: 0.82em; margin: 0 0 12px; color: var(--vscode-descriptionForegro
 .endpoint-metadata span { color: var(--vscode-descriptionForeground); }
 .endpoint-metadata strong { min-width: 0; overflow-wrap: anywhere; text-align: right; font-weight: 600; }
 
-.memory-entry { margin: 4px 4px 8px 16px; }
-.memory-status { color: var(--vscode-descriptionForeground); font-size: 0.9em; }
-.memory-editor { width: 100%; min-height: 120px; margin-top: 8px; resize: vertical; box-sizing: border-box; padding: 10px; border: 1px solid transparent; border-radius: var(--control-radius); background: var(--surface-fill); color: var(--vscode-input-foreground); font: inherit; outline: none; }
-.memory-editor:focus { background: var(--surface-fill-strong); }
-.memory-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .memory-error { color: var(--error-foreground); }
 
 .chats-panel { gap: 0; }

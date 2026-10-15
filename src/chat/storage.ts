@@ -10,6 +10,7 @@ import { isValidChatId, normalizeWorkspaceRoot } from "./storagePaths.js";
 export { isValidChatId } from "./storagePaths.js";
 import { MAX_MEMORY_COUNT } from "./memoryLimits.js";
 import { randomUUID } from "node:crypto";
+import { restoreInitialMemoryOrder } from "./initialMemoryContext.js";
 import { normalizeToolCallingProfile, type ToolCallingProfile } from "../llm/toolCallingProfile.js";
 import type { FileChangeSummary } from "./fileChanges.js";
 import { attachmentFileType, isImageAttachment, MAX_TEXT_ATTACHMENT_BYTES } from "./attachments.js";
@@ -262,6 +263,7 @@ export class ChatStorage {
     forked.mode = rec.mode;
     forked.reasoningEffort = normalizeReasoningEffort(rec.reasoningEffort);
     forked.messages = structuredClone(rec.messages.slice(0, end));
+    forked.memorySources = rec.memorySources && { ...rec.memorySources };
     if (forked.messages.some(message => message.role === "assistant" && message.ts === rec.pendingPlanMessageTs)) {
       forked.pendingPlanMessageTs = rec.pendingPlanMessageTs;
     }
@@ -352,6 +354,8 @@ export class ChatStorage {
       memoryCreations: Array.isArray(rec.memoryCreations) ? rec.memoryCreations.filter(validMemoryCreation) : undefined,
       recalledMemories: Array.isArray(rec.recalledMemories) ? rec.recalledMemories.filter(validSnapshot).slice(-MAX_MEMORY_COUNT) : undefined,
       initialMemories: Array.isArray(rec.initialMemories) ? rec.initialMemories.filter(validSnapshot).slice(-MAX_MEMORY_COUNT) : undefined,
+      memorySources: rec.memorySources && typeof rec.memorySources === "object" && !Array.isArray(rec.memorySources)
+        ? Object.fromEntries(Object.entries(rec.memorySources).filter(([memoryId, sourceId]) => /^[a-f0-9]{16}$/.test(memoryId) && isValidChatId(sourceId))) : undefined,
       contextMessages: Array.isArray(rec.contextMessages) ? normalizeMessages(rec.contextMessages) : undefined
     } as ChatRecord;
   }
@@ -419,6 +423,7 @@ export function titleFromFirstMessage(s: string): string {
 
 /** The transcript and model context share an array until the first compaction. */
 export function modelMessages(rec: ChatRecord): ChatMessage[] {
+  restoreInitialMemoryOrder(rec);
   // Rebuilt histories (for example an edited chat or historical fork) may
   // contain terminal cards even when their separate context was discarded.
   if (!rec.contextMessages && rec.messages.some(message => message.interruption)) {

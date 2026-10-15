@@ -30,6 +30,7 @@ export type SettingsSection = typeof SETTINGS_SECTIONS[number];
 export type WorkspacePathType = "file" | "directory" | "other" | "missing";
 
 export interface ChatTab { id: string; title: string; running?: boolean; open?: boolean }
+export interface ChatMenuMemory { id: string; hasMemory: boolean; status: MemoryListItem["status"] }
 
 export type SideToExt =
   | { type: "ready" }
@@ -50,15 +51,15 @@ export type SideToExt =
   | { type: "restoreDefaultGeneratedPrompts" }
   | { type: "resetAllDefaults" }
   | { type: "listMemories" }
-  | { type: "editMemory"; id: string; text: string }
+  | { type: "openMemory"; id: string; readonly: boolean }
   | { type: "setMemoryEnabled"; id: string; enabled: boolean }
   | { type: "regenerateMemory"; id: string }
-  | { type: "summarizeExistingChats" }
   | { type: "cancelMemoryGeneration" };
+
+export type ChatContextMessage = Extract<SideToExt, { type: "openChat" | "renameChat" | "deleteChat" | "openMemory" | "regenerateMemory" }>;
 
 export type ExtToSide =
   | { type: "settingsSections"; expanded: SettingsSection[] }
-  | { type: "revealMemory"; id: string }
   | { type: "memories"; memories: MemoryListItem[] }
   | { type: "memoryError"; error: string }
   | { type: "settings"; settings: Record<string, unknown>; reasoningEffort: ReasoningEffort; resetDrafts?: boolean }
@@ -75,7 +76,10 @@ export type ExtToSide =
 // --- Chat view ---
 
 export type ChatToExt = (
-  | { type: "openMemory"; id: string }
+  | { type: "openMemory"; id: string; readonly?: boolean }
+  | { type: "openMemoryChat"; id: string }
+  | { type: "regenerateMemory"; id: string }
+  | { type: "deleteChat"; id: string }
   | { type: "ready" }
   | { type: "send"; text: string; mode: ChatMode; attachmentIds?: string[] }
   | { type: "steerMessage"; text: string; mode: ChatMode; attachmentIds?: string[] }
@@ -125,6 +129,7 @@ export type ExtToChat = UiEvent
   | { type: "serverContext"; contextSize?: number }
   | { type: "fileUndoFinished"; userMessageTs: number }
   | { type: "chatTabs"; tabs: ChatTab[]; activeId?: string }
+  | { type: "chatMemories"; memories: ChatMenuMemory[] }
   | { type: "chatSnapshot"; id: string; events: ExtToChat[]; busy: boolean; draft: string }
   | { type: "settings"; mode: ChatMode; showThinking: boolean; steerWithEnter: boolean; autoCompact: boolean; autoCompactThresholdPercent: number; workspaceRoot?: string }
   | { type: "attachmentSelected"; attachment: UiAttachment }

@@ -211,8 +211,8 @@ export function settledToolLabel(toolName: string, createsNewFile = false, inclu
   if (toolName === "view_image") return includeFileNoun ? "Viewed image" : "Viewed";
   if (toolName === "read_file") return includeFileNoun ? "Read file" : "Read";
   const labels: Record<string, string> = {
-    search_memories: "Searched memories",
-    recall_memory: "Recalled memory",
+    search_memories: "Searched",
+    recall_memory: "Recalled",
     list_dir: includeFileNoun ? "Listed directory" : "Listed",
     glob: "Searched",
     update_todos: "Updated todos",

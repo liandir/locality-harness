@@ -2,6 +2,7 @@ import { featureStyles } from "../../build/assets.js";
 import { fetchServerMetadata } from "../../llm/client.js";
 import { fileURLToPath } from "node:url";
 import { MAX_TEXT_ATTACHMENT_BYTES } from "../../chat/attachments.js";
+import { memoryMetadata } from "../../chat/memory.js";
 import type { WorkspaceMemory } from "../../chat/workspaceMemory.js";
 import * as vscode from "vscode";
 import * as path from "node:path";
@@ -60,6 +61,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private runtimes = new Map<string, ChatRuntime>();
   private navigationGeneration = 0;
   private recentChatsGeneration = 0;
+  private chatMemoriesGeneration = 0;
   private serverMetadataGeneration = 0;
   private serverMetadataKey?: string;
   private deleting = new Map<string, ChatStorage>();
@@ -89,7 +91,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     private onCreateChat: () => Promise<ChatRecord | undefined>,
     private onChatListChanged: () => void,
     private memory?: WorkspaceMemory,
-    private onOpenMemory?: (id: string) => void | Promise<void>
+    private onOpenMemory?: (id: string, readonly?: boolean) => void | Promise<void>
   ) {}
 
   private ensureReviewContentProvider(): void {
@@ -153,6 +155,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       delete transcript.memory;
       delete transcript.recalledMemories;
       delete transcript.initialMemories;
+      delete transcript.memorySources;
       payload = {
         ...msg,
         contextMessageCount: contextMessages?.length ?? transcript.messages.length,
@@ -239,9 +242,25 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   refreshMemoryVisibility(): void {
+    void this.pushChatMemories();
     for (const runtime of this.runtimes.values()) {
       void runtime.session?.refreshMemoryVisibility();
       void this.refreshMemoryCreations(runtime);
+    }
+  }
+
+  private async pushChatMemories(): Promise<void> {
+    if (!this.memory) return;
+    const generation = ++this.chatMemoriesGeneration;
+    const storage = this.getStorage();
+    try {
+      const memories = storage ? await this.memory.list() : [];
+      if (generation !== this.chatMemoriesGeneration || storage !== this.getStorage()) return;
+      this.post({ type: "chatMemories", memories: memories.map(memory => ({
+        id: memory.sourceId, hasMemory: !!memory.text.trim(), status: memory.status
+      })) });
+    } catch {
+      if (generation === this.chatMemoriesGeneration && storage === this.getStorage()) this.post({ type: "chatMemories", memories: [] });
     }
   }
 
@@ -313,6 +332,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   async closeAll(): Promise<void> {
     this.navigationGeneration++;
+    this.chatMemoriesGeneration++;
+    this.post({ type: "chatMemories", memories: [] });
     const runtimes = [...this.runtimes.values()];
     this.active.removed = true;
     this.runtimes.clear();
@@ -366,7 +387,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         if (event.kind === "turnPreparing" && !runtime.running) {
           const retained = new Map<string, UiEvent>();
           for (const old of runtime.events) {
-            if (["tokens", "memoriesUsed", "memoryCreations", "compactStatus"].includes(old.kind)) retained.set(old.kind, old);
+            if (["tokens", "initialMemoryCalls", "memoryCreations", "compactStatus"].includes(old.kind)) retained.set(old.kind, old);
           }
           runtime.events = [{ kind: "chatLoaded", record: structuredClone(session.getRecord()) }, ...retained.values()];
           runtime.running = true;
@@ -503,7 +524,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       if (m.type === "undoResponseFiles") return;
       await this.fileUndoTask;
     }
-    const navigation = ["openChat", "closeChatTab", "openChats", "openSettings", "newChat", "openMemory", "ready"].includes(m.type) || (m.type === "renameChat" && !!m.id);
+    const navigation = ["openChat", "closeChatTab", "openChats", "openSettings", "newChat", "openMemory", "regenerateMemory", "deleteChat", "ready"].includes(m.type) || (m.type === "renameChat" && !!m.id);
     if (!navigation && m.chatId && m.chatId !== this.session?.getRecord().id) {
       if (m.type === "saveDraft") { const runtime = this.runtimes.get(m.chatId); if (runtime) runtime.draft = m.text; }
       return;
@@ -701,7 +722,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         break;
       }
       case "openChat": await this.openChatById(m.id); break;
-      case "openMemory": await this.onOpenMemory?.(m.id); break;
+      case "openMemory": await this.onOpenMemory?.(m.id, m.readonly ?? true); break;
+      case "openMemoryChat": await this.openMemoryChat(m.id); break;
+      case "regenerateMemory":
+        try {
+          await this.memory?.regenerate(m.id);
+          await this.pushChatMemories();
+        } catch (error) { void vscode.window.showErrorMessage((error as Error).message); }
+        break;
+      case "deleteChat": await vscode.commands.executeCommand("locality.deleteChat", m.id); break;
       case "cancel": {
         const runtime = this.active;
         runtime.planResponse = undefined;
@@ -1095,6 +1124,40 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     } catch (err) {
       vscode.window.showErrorMessage(`Locality: could not open file: ${(err as Error).message}`);
     }
+  }
+
+  private async openMemoryChat(id: string): Promise<void> {
+    const session = this.session;
+    const storage = this.getStorage();
+    const record = session?.getRecord();
+    if (!record || !storage) return;
+    const snapshot = [...record.initialMemories ?? [], ...record.recalledMemories ?? []]
+      .find(memory => memoryMetadata(memory).id === id);
+    let sourceId = snapshot?.sourceId ?? record.memorySources?.[id];
+    if (!sourceId) {
+      // Recompute older versioned IDs using the original result and each
+      // workspace source ID, so renamed/regenerated memories still navigate.
+      let recalled: { title: string; text: string; generatedAt: number; sourceRevision: string } | undefined;
+      for (const message of record.messages) {
+        if (message.role !== "tool" || message.toolCall?.name !== "recall_memory"
+            || message.toolCall.status === "failed" || message.toolCall.status === "rejected") continue;
+        try {
+          const result = JSON.parse(message.content);
+          if (result?.id === id && typeof result.name === "string" && typeof result.contents === "string") {
+            recalled = { title: result.name, text: result.contents, generatedAt: 0, sourceRevision: "" };
+            break;
+          }
+        } catch { /* Ignore incomplete historical output. */ }
+      }
+      const sources = await storage.metadata(true);
+      sourceId = sources.find(source => {
+        const memory = recalled ?? (source.memory && { title: source.title, ...source.memory });
+        return memory && memoryMetadata({ ...memory, sourceId: source.id }).id === id;
+      })?.id;
+    }
+    if (session !== this.session || storage !== this.getStorage()) return;
+    if (typeof sourceId === "string") await this.openChatById(sourceId);
+    else void vscode.window.showErrorMessage("The source chat for this memory is no longer available.");
   }
 
   private async openReviewDiff(filePath: string): Promise<void> {

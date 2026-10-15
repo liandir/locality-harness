@@ -17,6 +17,7 @@ import { ChatStorage } from "../../chat/storage.js";
 import { DEFAULT_REASONING_EFFORT, type ReasoningEffort } from "../../chat/reasoningEffort.js";
 import type { ExtToSide, SideTab, SideToExt, ChatTab } from "../messaging.js";
 import { SETTINGS_SECTIONS, type SettingsSection } from "../messaging.js";
+import { MemoryDocuments } from "../memoryDocuments.js";
 
 export class SideViewProvider implements vscode.WebviewViewProvider {
   static readonly viewType = "locality.side";
@@ -27,8 +28,7 @@ export class SideViewProvider implements vscode.WebviewViewProvider {
   private expandedSettings: Set<SettingsSection>;
   private memoryListGeneration = 0;
   private chatListGeneration = 0;
-  private webviewReady = false;
-  private pendingMemory?: { id: string; storage: ChatStorage };
+  private memoryDocuments?: MemoryDocuments;
 
   constructor(
     private context: vscode.ExtensionContext,
@@ -50,7 +50,6 @@ export class SideViewProvider implements vscode.WebviewViewProvider {
 
   resolveWebviewView(view: vscode.WebviewView): void {
     this.view = view;
-    this.webviewReady = false;
     view.webview.options = {
       enableScripts: true,
       localResourceRoots: [
@@ -66,7 +65,7 @@ export class SideViewProvider implements vscode.WebviewViewProvider {
         void this.pushEndpointMetadata(readSettings().endpoint);
       })
     );
-    view.onDidDispose(() => { this.subs.forEach(d => d.dispose()); this.subs = []; this.view = undefined; this.webviewReady = false; });
+    view.onDidDispose(() => { this.subs.forEach(d => d.dispose()); this.subs = []; this.view = undefined; });
   }
 
   post(msg: ExtToSide): void { this.view?.webview.postMessage(msg); }
@@ -111,25 +110,21 @@ export class SideViewProvider implements vscode.WebviewViewProvider {
     if (tab === "chats") void this.pushMemories();
   }
 
-  async revealMemory(id: string): Promise<void> {
-    const storage = this.getStorage();
-    if (!storage || !(await storage.metadata()).some(chat => chat.id === id) || storage !== this.getStorage()) return;
-    this.pendingMemory = { id, storage };
-    this.activeTab = "chats";
-    await vscode.commands.executeCommand("workbench.view.extension.locality");
-    this.view?.show(false);
-    await this.revealPendingMemory();
+  async revealMemory(id: string, readonly = true): Promise<void> {
+    await this.openMemory(id, readonly);
   }
 
-  private async revealPendingMemory(): Promise<void> {
-    const pending = this.pendingMemory;
-    if (!this.webviewReady || !pending) return;
-    if (pending.storage !== this.getStorage()) { this.pendingMemory = undefined; return; }
-    await this.pushChats();
-    await this.pushMemories();
-    if (!this.webviewReady || pending !== this.pendingMemory || pending.storage !== this.getStorage()) return;
-    this.pendingMemory = undefined;
-    this.post({ type: "revealMemory", id: pending.id });
+  private async openMemory(id: string, readonly: boolean): Promise<void> {
+    if (!this.memory) return;
+    try {
+      if (!this.memoryDocuments) {
+        this.memoryDocuments = new MemoryDocuments(this.getStorage, this.memory);
+        this.context.subscriptions.push(this.memoryDocuments, vscode.workspace.registerFileSystemProvider(
+          MemoryDocuments.scheme, this.memoryDocuments, { isCaseSensitive: true }
+        ));
+      }
+      await this.memoryDocuments.open(id, readonly);
+    } catch (error) { void vscode.window.showErrorMessage((error as Error).message); }
   }
 
   refreshOpenTabs(): void {
@@ -140,7 +135,6 @@ export class SideViewProvider implements vscode.WebviewViewProvider {
     if (await this.featureHost?.handle(m)) return;
     switch (m.type) {
       case "ready":
-        this.webviewReady = true;
         this.post({ type: "settingsSections", expanded: [...this.expandedSettings] });
         this.post({ type: "appInfo", version: this.context.extension.packageJSON.version as string });
         this.pushSettings();
@@ -149,19 +143,15 @@ export class SideViewProvider implements vscode.WebviewViewProvider {
         await this.pushMemories();
         this.refreshOpenTabs();
         this.post({ type: "focusTab", tab: this.activeTab });
-        await this.revealPendingMemory();
         break;
       case "listMemories": await this.pushMemories(); break;
-      case "editMemory":
+      case "openMemory": await this.openMemory(m.id, m.readonly); break;
       case "setMemoryEnabled":
       case "regenerateMemory":
-      case "summarizeExistingChats":
       case "cancelMemoryGeneration":
         try {
-          if (m.type === "editMemory") await this.memory?.edit(m.id, m.text);
-          else if (m.type === "setMemoryEnabled") await this.memory?.setEnabled(m.id, m.enabled);
+          if (m.type === "setMemoryEnabled") await this.memory?.setEnabled(m.id, m.enabled);
           else if (m.type === "regenerateMemory") await this.memory?.regenerate(m.id);
-          else if (m.type === "summarizeExistingChats") await this.memory?.summarizeExisting();
           else this.memory?.reset();
           await this.pushMemories();
         } catch (error) { this.post({ type: "memoryError", error: (error as Error).message }); }

@@ -68,27 +68,11 @@ export function viewImageIcon(): string {
   </svg>`;
 }
 
-export function readFileIcon(): string {
-  return `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
-    <g transform="translate(0 .6) scale(1 .95)">
-      <path d="M12 7C10.95 4.65 9.25 3.4 7.1 3.4H4.6C3.72 3.4 3 4.12 3 5v11.35c0 .9.75 1.65 1.65 1.65H7.4c2.15 0 3.7 1.15 4.6 3.1Z"/>
-      <path d="M12 7c1.05-2.35 2.75-3.6 4.9-3.6h2.5c.88 0 1.6.72 1.6 1.6v11.35c0 .9-.75 1.65-1.65 1.65H16.6c-2.15 0-3.7 1.15-4.6 3.1Z"/>
-    </g>
-  </svg>`;
-}
-
 export function questionIcon(): string {
   return `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
     <circle cx="12" cy="12" r="9"/>
     <path d="M9.4 9.2a2.6 2.6 0 0 1 5 .9c0 1.7-2.4 2.2-2.4 3.9"/>
     <path d="M12 17.2h.01"/>
-  </svg>`;
-}
-
-export function pencilIcon(): string {
-  return `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
-    <path d="M4.35 19.65c-.16-.16-.21-.4-.15-.61l.7-2.38c.05-.18.15-.34.28-.47L15 5a2.83 2.83 0 0 1 4 4L8.81 20.19c-.13.13-.29.23-.47.28l-2.38.7c-.21.06-.45.01-.61-.15Z"/>
-    <path d="m13.5 6.5 4 4"/>
   </svg>`;
 }
 
