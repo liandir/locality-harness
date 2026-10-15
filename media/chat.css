@@ -547,6 +547,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .change-undo-btn { flex: 0 0 auto; padding: 2px 9px; font-family: var(--vscode-font-family); font-size: calc(var(--vscode-font-size) * 0.78); line-height: 1.35; text-transform: none; }
 .tool-diff.edit-preview { background: transparent; border: 0; border-radius: 0; padding: 3px 0; margin: 0; max-height: 240px; line-height: 1.2; }
 .change-summary { margin-top: 2px; color: var(--tool-idle); }
+/* Match consecutive tool rows inside Working by canceling the message gap. */
+.change-summary + .memory-source { margin-top: calc(-1 * var(--chat-part-gap)); }
 /* Borders keep every file divider equally thin at fractional row positions. */
 .change-summary .card-separator { height: 0; border-top: 1px solid var(--surface-stroke); background: transparent; }
 .change-summary-head { display: flex; align-items: center; gap: 8px; }
