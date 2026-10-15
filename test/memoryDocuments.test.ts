@@ -19,6 +19,7 @@ vi.mock("vscode", () => ({
     NoPermissions: (message = "No permissions") => new Error(message)
   },
   workspace: { openTextDocument: vi.fn(async uri => ({ uri })) },
+  commands: { executeCommand: vi.fn() },
   window: { showTextDocument: vi.fn() }
 }));
 vi.mock("../src/config/settings.js", () => ({ readSettings: () => ({ endpoint: "http://127.0.0.1:8080", model: "test" }) }));
@@ -62,14 +63,18 @@ describe("memory Markdown editors", () => {
     await documents.open(id, false);
     expect(openedUri()).toBe(uri);
     expect(vscode.window.showTextDocument).toHaveBeenLastCalledWith({ uri }, { preview: false });
+    expect(vscode.commands.executeCommand).not.toHaveBeenCalled();
   });
 
-  it("makes View read-only and refreshes both editors after memory changes", async () => {
+  it("opens View as a read-only Markdown preview and refreshes both views after memory changes", async () => {
     await memory.edit(id, "Saved memory");
     await documents.open(id, false);
     const editable = openedUri();
+    vi.mocked(vscode.window.showTextDocument).mockClear();
     await documents.open(id, true);
     const readonly = openedUri();
+    expect(vscode.commands.executeCommand).toHaveBeenCalledWith("vscode.openWith", readonly, "vscode.markdown.preview.editor", { preview: false });
+    expect(vscode.window.showTextDocument).not.toHaveBeenCalled();
     expect((await documents.stat(readonly)).permissions).toBe(vscode.FilePermission.Readonly);
     await expect(documents.writeFile(readonly, Buffer.from("Unwanted edit"))).rejects.toThrow("Use Edit memory");
     const changed = vi.fn();
@@ -122,5 +127,6 @@ describe("memory Markdown editors", () => {
     finish({ uri: openedUri() } as vscode.TextDocument);
     await opening;
     expect(vscode.window.showTextDocument).not.toHaveBeenCalled();
+    expect(vscode.commands.executeCommand).not.toHaveBeenCalled();
   });
 });

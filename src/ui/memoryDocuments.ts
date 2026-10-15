@@ -10,7 +10,7 @@ interface MemoryDocument {
   readonly: boolean;
 }
 
-/** Markdown editors backed by chat memory, with normal editor Save support. */
+/** Markdown previews and source editors backed by chat memory, with normal Save support. */
 export class MemoryDocuments implements vscode.FileSystemProvider, vscode.Disposable {
   static readonly scheme = "locality-memory";
   private documents = new Map<string, MemoryDocument>();
@@ -38,7 +38,11 @@ export class MemoryDocuments implements vscode.FileSystemProvider, vscode.Dispos
     }
     const document = await vscode.workspace.openTextDocument(entry.uri);
     if (storage !== this.getStorage()) return;
-    await vscode.window.showTextDocument(document, { preview: false });
+    if (readonly) {
+      await vscode.commands.executeCommand("vscode.openWith", document.uri, "vscode.markdown.preview.editor", { preview: false });
+    } else {
+      await vscode.window.showTextDocument(document, { preview: false });
+    }
   }
 
   private async load(uri: vscode.Uri) {

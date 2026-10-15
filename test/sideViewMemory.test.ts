@@ -56,13 +56,13 @@ describe("Recent Chats memory management", () => {
     expect(vscode.commands.executeCommand).toHaveBeenCalledWith("locality.deleteChat", "source");
   });
 
-  it("opens source links in a read-only editor without waiting for the sidebar", async () => {
+  it("routes View to the read-only memory preview without waiting for the sidebar", async () => {
     await provider.revealMemory("source");
     expect(editor.open).toHaveBeenCalledWith("source", true);
     expect(postMessage).not.toHaveBeenCalled();
   });
 
-  it("routes Edit and View to native editors and registers their provider only once", async () => {
+  it("routes Edit and View to the shared memory documents and registers their provider only once", async () => {
     await receive({ type: "openMemory", id: "source", readonly: false });
     await receive({ type: "openMemory", id: "source", readonly: true });
     expect(editor.open.mock.calls).toEqual([["source", false], ["source", true]]);
