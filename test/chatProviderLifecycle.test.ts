@@ -41,7 +41,7 @@ describe("chat provider lifecycle", () => {
     const provider = new ChatViewProvider(
       { workspaceState: { get: vi.fn() } } as unknown as vscode.ExtensionContext,
       () => storage, () => "/workspace", vi.fn(), vi.fn(), vi.fn(), vi.fn(),
-      { creations } as unknown as WorkspaceMemory
+      { creations, list: vi.fn().mockResolvedValue([]) } as unknown as WorkspaceMemory
     );
     const post = vi.spyOn(provider, "post");
     const record = { id: "first", messages: [], reasoningEffort: "default" } as unknown as ChatRecord;

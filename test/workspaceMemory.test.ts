@@ -357,16 +357,6 @@ describe("memory generation", () => {
       expect(raw.length / 4 + request.max_tokens).toBeLessThan(8192);
     }
   });
-  it("does not process old chats until requested and skips manual summaries", async () => {
-    mocks.settings.memoryEnabled = false;
-    const first = await chat(); const manual = await chat("Manual");
-    await memory.edit(manual.id, "Manually curated parser decision");
-    expect(mocks.complete).not.toHaveBeenCalled();
-    await memory.summarizeExisting();
-    await generated(first.id);
-    expect((await storage.load(manual.id))!.memory!.manual).toBe(true);
-    expect(mocks.complete).toHaveBeenCalledTimes(1);
-  });
   it("defers background work during foreground activity and retries preempted generation", async () => {
     mocks.settings.memoryEnabled = false;
     const rec = await chat();

@@ -110,8 +110,8 @@ export class SideViewProvider implements vscode.WebviewViewProvider {
     if (tab === "chats") void this.pushMemories();
   }
 
-  async revealMemory(id: string): Promise<void> {
-    await this.openMemory(id, true);
+  async revealMemory(id: string, readonly = true): Promise<void> {
+    await this.openMemory(id, readonly);
   }
 
   private async openMemory(id: string, readonly: boolean): Promise<void> {
@@ -148,12 +148,10 @@ export class SideViewProvider implements vscode.WebviewViewProvider {
       case "openMemory": await this.openMemory(m.id, m.readonly); break;
       case "setMemoryEnabled":
       case "regenerateMemory":
-      case "summarizeExistingChats":
       case "cancelMemoryGeneration":
         try {
           if (m.type === "setMemoryEnabled") await this.memory?.setEnabled(m.id, m.enabled);
           else if (m.type === "regenerateMemory") await this.memory?.regenerate(m.id);
-          else if (m.type === "summarizeExistingChats") await this.memory?.summarizeExisting();
           else this.memory?.reset();
           await this.pushMemories();
         } catch (error) { this.post({ type: "memoryError", error: (error as Error).message }); }

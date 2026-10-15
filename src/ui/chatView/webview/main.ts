@@ -2,19 +2,19 @@ import { startShiki, normalizeHighlightLanguage, highlightCode, highlightLanguag
 import { escapeHtml } from "../../html.js";
 import {
   sendIcon, steerIcon, paperclipIcon, closeIcon, dragHandleIcon, stopIcon,
-  clockIcon, checkIcon, folderIcon, viewImageIcon, readFileIcon, questionIcon,
-  pencilIcon, forkIcon, rightArrowIcon, compactIcon, copyIcon, brainIcon,
+  clockIcon, checkIcon, folderIcon, viewImageIcon, questionIcon,
+  forkIcon, rightArrowIcon, compactIcon, copyIcon, brainIcon,
   checklistIcon, dirIcon, fileIcon, downArrowIcon, circleIcon
 } from "./icons.js";
 import { installTooltips } from "../../tooltips.js";
 import { captureHistoryView, restoreHistoryView, type HistoryViewState } from "../historyViewState.js";
 import type { MemoryCreation, MemorySnapshot } from "../../../chat/memory.js";
-import { installChatContextMenu } from "../../chatContextMenu.js";
-import type { ChatTab } from "../../messaging.js";
+import { chatContextActions, installChatContextMenu } from "../../chatContextMenu.js";
+import type { ChatTab, ChatMenuMemory } from "../../messaging.js";
 import type { ChatToolProcess } from "../../../chat/types.js";
 import type { ChatTurnPreparation } from "../../../chat/events.js";
 import { chatFeature } from "../../../build/chat.js";
-import { chevronIcon, memoryIcon, pawnIcon, scrollIcon, searchIcon, trashIcon, plusIcon, settingsIcon, historyIcon } from "../../icons.js";
+import { chevronIcon, memoryIcon, pawnIcon, scrollIcon, searchIcon, trashIcon, plusIcon, settingsIcon, historyIcon, pencilIcon, readFileIcon } from "../../icons.js";
 import { chatModeIcon, chatModeLabel, renderMessageMode } from "./messageMode.js";
 import { renderMessageDate } from "../../memoryDate.js";
 import { renderMemoryContents, renderMemoryCreation, renderMemoryResult } from "./memoryResults.js";
@@ -270,6 +270,7 @@ interface State {
 
 let activeChatId: string | undefined;
 let chatTabs: ChatTab[] = [];
+let chatMemories: ChatMenuMemory[] = [];
 let restoringChat = false;
 interface ChatViewState {
   question: string;
@@ -3855,6 +3856,7 @@ function handleHostMessage(msg: ExtToChat): void {
       return;
     }
     if (msg.type === "chatTabs") { chatTabs = msg.tabs; updateHeaderTitle(); return; }
+    if (msg.type === "chatMemories") { chatMemories = msg.memories; return; }
     if (msg.type === "chatSnapshot") {
       saveChatView();
       const draft = viewDrafts.get(msg.id);
@@ -4436,7 +4438,7 @@ function handleHostMessage(msg: ExtToChat): void {
   }
 }
 window.addEventListener("message", ev => handleHostMessage(ev.data as ExtToChat));
-installChatContextMenu(root, id => send({ type: "renameChat", id }));
+installChatContextMenu(root, id => chatContextActions(chatMemories.find(memory => memory.id === id), send));
 
 watchThemeChanges();
 startShiki(() => {

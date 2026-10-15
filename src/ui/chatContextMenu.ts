@@ -1,14 +1,31 @@
+import { historyIcon, pencilIcon, readFileIcon, memoryIcon, trashIcon } from "./icons.js";
+import type { ChatContextMessage, ChatMenuMemory } from "./messaging.js";
+
 export interface ChatContextAction {
   label: string;
+  icon: () => string;
   run: (id: string) => void;
   disabled?: boolean;
+  destructive?: boolean;
+  separatorBefore?: boolean;
 }
 
-/** Shared chat menu, with optional actions supplied by each view. */
+export function chatContextActions(memory: ChatMenuMemory | undefined, send: (message: ChatContextMessage) => void): ChatContextAction[] {
+  return [
+    { label: "Open chat", icon: historyIcon, run: id => send({ type: "openChat", id }) },
+    { label: "Rename chat", icon: pencilIcon, run: id => send({ type: "renameChat", id }) },
+    { label: "Edit memory", icon: pencilIcon, separatorBefore: true, run: id => send({ type: "openMemory", id, readonly: false }) },
+    { label: "View memory", icon: readFileIcon, run: id => send({ type: "openMemory", id, readonly: true }), disabled: !memory?.hasMemory },
+    { label: memory?.hasMemory ? "Regenerate memory" : "Generate memory", icon: memoryIcon,
+      run: id => send({ type: "regenerateMemory", id }), disabled: memory?.status === "queued" || memory?.status === "generating" },
+    { label: "Delete chat", icon: trashIcon, destructive: true, separatorBefore: true, run: id => send({ type: "deleteChat", id }) }
+  ];
+}
+
+/** Identical menu geometry and keyboard navigation in both webviews. */
 export function installChatContextMenu(
   root: HTMLElement,
-  rename: (id: string) => void,
-  extraActions: (id: string) => ChatContextAction[] = () => []
+  actionsForChat: (id: string) => ChatContextAction[]
 ): void {
   let menu: HTMLDivElement | undefined;
   let owner: HTMLElement | undefined;
@@ -25,9 +42,22 @@ export function installChatContextMenu(
     menu = document.createElement("div");
     menu.className = "chat-context-menu";
     menu.setAttribute("role", "menu");
-    for (const action of [{ label: "Rename", run: rename }, ...extraActions(id)]) {
+    for (const action of actionsForChat(id)) {
+      if (action.separatorBefore) {
+        const separator = document.createElement("div");
+        separator.className = "chat-context-separator";
+        separator.setAttribute("role", "separator");
+        menu.append(separator);
+      }
       const button = document.createElement("button");
-      button.textContent = action.label;
+      button.className = action.destructive ? "quiet-btn delete" : "quiet-btn";
+      const icon = document.createElement("span");
+      icon.className = "chat-context-icon";
+      icon.setAttribute("aria-hidden", "true");
+      icon.innerHTML = action.icon();
+      const label = document.createElement("span");
+      label.textContent = action.label;
+      button.append(icon, label);
       button.setAttribute("role", "menuitem");
       button.disabled = action.disabled ?? false;
       button.addEventListener("click", event => { event.stopPropagation(); close(true); action.run(id); });

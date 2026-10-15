@@ -37,7 +37,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       void chatProvider.pushRecentChats();
     },
     memory,
-    id => sideProvider.revealMemory(id)
+    (id, readonly) => sideProvider.revealMemory(id, readonly)
   );
 
   sideProvider = new SideViewProvider(

@@ -5,7 +5,7 @@ import { sideFeature } from "../../../build/side.js";
 import { preserveFormFocus } from "../../formFocus.js";
 import { installTooltips } from "../../tooltips.js";
 import type { MemoryListItem } from "../../../chat/memory.js";
-import { installChatContextMenu } from "../../chatContextMenu.js";
+import { chatContextActions, installChatContextMenu } from "../../chatContextMenu.js";
 import { memoryIcon, searchIcon, trashIcon, plusIcon, settingsIcon, historyIcon } from "../../icons.js";
 import { DEFAULT_MEMORY_MAX_COUNT, MAX_MEMORY_COUNT } from "../../../chat/memoryLimits.js";
 import { isReasoningBudget } from "../../../chat/reasoningBudget.js";
@@ -143,7 +143,6 @@ function renderChats(): string {
         <p class="setting-help">Memories update after Act and Review responses when Auto-generate memories is enabled. Edited memories are preserved.</p>
         ${state.memoryError ? `<p class="memory-error" role="alert">${esc(state.memoryError)}</p>` : ""}
         ${busy ? '<button id="cancelMemories" class="action-btn wide-button">Cancel generation</button>' : ""}
-        <button id="summarizeMemories" class="action-btn wide-button icon-label">${memoryIcon()}<span>Re-generate all memories</span></button>
         ${state.chats.length > 0 ? `<button id="clearChats" class="action-btn wide-button danger icon-label clear-chats">${trashIcon()}<span>Clear all chats</span></button>` : ""}
       </section>
     </div>
@@ -292,7 +291,6 @@ function bind(): void {
   bindSetting("memoryLoadOnStart", "change", (_v, el) => (el as HTMLInputElement).checked);
   bindSetting("autoGenerateMemories", "change", (_v, el) => (el as HTMLInputElement).checked);
   bindSetting("memoryMaxCount", "change", v => Math.floor(Math.max(1, Math.min(MAX_MEMORY_COUNT, Number(v) || DEFAULT_MEMORY_MAX_COUNT))));
-  root.querySelector("#summarizeMemories")?.addEventListener("click", () => send({ type: "summarizeExistingChats" }));
   root.querySelector("#cancelMemories")?.addEventListener("click", () => send({ type: "cancelMemoryGeneration" }));
   root.querySelectorAll<HTMLButtonElement>("[data-memory-toggle]").forEach(el => el.addEventListener("click", event => {
     event.stopPropagation();
@@ -418,16 +416,12 @@ window.addEventListener("message", ev => {
 send({ type: "ready" });
 render();
 
-installChatContextMenu(root, id => send({ type: "renameChat", id }), id => {
+installChatContextMenu(root, id => {
   const memory = state.memories.find(item => item.sourceId === id);
-  return [
-    { label: "Edit memory", run: id => send({ type: "openMemory", id, readonly: false }) },
-    { label: "View memory", run: id => send({ type: "openMemory", id, readonly: true }), disabled: !memory?.text.trim() },
-    { label: "Regenerate memory", run: id => {
-      state.memoryError = undefined;
-      send({ type: "regenerateMemory", id });
-    }, disabled: memory?.status === "queued" || memory?.status === "generating" }
-  ];
+  return chatContextActions(memory ? { id, hasMemory: !!memory.text.trim(), status: memory.status } : undefined, message => {
+    state.memoryError = undefined;
+    send(message);
+  });
 });
 
 root.addEventListener("keydown", event => {

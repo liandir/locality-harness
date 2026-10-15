@@ -161,12 +161,6 @@ export class WorkspaceMemory {
       return { ...item, status: this.active?.id === rec.id ? "generating" : this.queue.has(rec.id) ? "queued" : item.status };
     });
   }
-  async summarizeExisting(): Promise<void> {
-    const epoch = this.epoch;
-    const records = await this.getStorage()?.metadata() ?? [];
-    if (epoch !== this.epoch) return;
-    for (const rec of records) if (rec.messageCount && !rec.memory?.manual && rec.memory?.enabled !== false) this.enqueue(rec.id);
-  }
   async edit(id: string, text: string, storage = this.getStorage()): Promise<void> {
     if (!storage || storage !== this.getStorage()) throw new Error("This memory is not in the active workspace.");
     const settings = readSettings();

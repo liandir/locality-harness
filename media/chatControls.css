@@ -93,9 +93,10 @@ pre, textarea { scrollbar-gutter: stable; }
 .tab-btn span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tab-btn:is(:hover, :focus-visible) { background: var(--surface-fill-hover); color: var(--vscode-foreground); }
 .tab-btn.active { background: var(--surface-fill-strong); color: var(--vscode-foreground); }
-.chat-context-menu { position: fixed; z-index: 10000; min-width: 130px; padding: 4px; border-radius: var(--control-radius); background: var(--vscode-menu-background, var(--vscode-editor-background)); color: var(--vscode-menu-foreground, var(--vscode-foreground)); box-shadow: 0 4px 16px var(--vscode-widget-shadow); }
-.chat-context-menu button { display: block; width: 100%; padding: 4px 8px; border: 1px solid transparent; border-radius: var(--control-radius); background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; outline: none; }
-.chat-context-menu button:is(:hover, :focus-visible):not(:disabled) { background: var(--surface-fill-strong); }
+.chat-context-menu { position: fixed; z-index: 10000; min-width: 130px; padding: 4px; border-radius: var(--control-radius); background: var(--vscode-menu-background, var(--vscode-editor-background)); color: var(--vscode-menu-foreground, var(--vscode-foreground)); box-shadow: 0 4px 16px var(--vscode-widget-shadow); --button-hover-fill: var(--surface-fill-strong); }
+.chat-context-menu button { display: flex; align-items: center; gap: 8px; width: 100%; padding: 4px 8px; border: 1px solid transparent; border-radius: var(--control-radius); background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; outline: none; }
+.chat-context-icon { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 16px; height: 16px; }
+.chat-context-separator { margin: 4px 8px; border-top: 1px solid var(--surface-stroke); }
 .chat-context-menu button:disabled { cursor: default; }
 .chat-running-dot { display: inline-block; flex: 0 0 6px; width: 6px; height: 6px; border-radius: 50%; background: transparent; }
 .chat-running-dot.running { background: var(--vscode-textLink-foreground); }

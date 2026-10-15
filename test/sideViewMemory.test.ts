@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type * as vscode from "vscode";
+import * as vscode from "vscode";
 import type { WorkspaceMemory } from "../src/chat/workspaceMemory.js";
 import type { ChatStorage } from "../src/chat/storage.js";
 import type { SideToExt } from "../src/ui/messaging.js";
@@ -28,7 +28,6 @@ const postMessage = vi.fn();
 const list = vi.fn();
 const setEnabled = vi.fn();
 const regenerate = vi.fn();
-const summarizeExisting = vi.fn();
 const reset = vi.fn();
 const memories = [{ sourceId: "source", title: "Parser", text: "Parser decision", status: "ready" }];
 
@@ -39,7 +38,7 @@ beforeEach(() => {
   provider = new SideViewProvider(
     { subscriptions: [], extensionUri: "/extension", extension: { packageJSON: { version: "1.7.0" } } } as unknown as vscode.ExtensionContext,
     () => storage, vi.fn(), vi.fn(), () => [],
-    { list, setEnabled, regenerate, summarizeExisting, reset } as unknown as WorkspaceMemory
+    { list, setEnabled, regenerate, reset } as unknown as WorkspaceMemory
   );
   provider.resolveWebviewView({
     webview: {
@@ -52,6 +51,11 @@ beforeEach(() => {
 });
 
 describe("Recent Chats memory management", () => {
+  it("routes deletion through the existing chat deletion command", async () => {
+    await receive({ type: "deleteChat", id: "source" });
+    expect(vscode.commands.executeCommand).toHaveBeenCalledWith("locality.deleteChat", "source");
+  });
+
   it("opens source links in a read-only editor without waiting for the sidebar", async () => {
     await provider.revealMemory("source");
     expect(editor.open).toHaveBeenCalledWith("source", true);
@@ -85,12 +89,10 @@ describe("Recent Chats memory management", () => {
     await receive({ type: "openTab", tab: "chats" });
     await receive({ type: "setMemoryEnabled", id: "source", enabled: false });
     await receive({ type: "regenerateMemory", id: "source" });
-    await receive({ type: "summarizeExistingChats" });
     await receive({ type: "cancelMemoryGeneration" });
     expect(setEnabled).toHaveBeenCalledWith("source", false);
     expect(regenerate).toHaveBeenCalledWith("source");
-    expect(summarizeExisting).toHaveBeenCalledOnce();
     expect(reset).toHaveBeenCalledOnce();
-    expect(list).toHaveBeenCalledTimes(5);
+    expect(list).toHaveBeenCalledTimes(4);
   });
 });
