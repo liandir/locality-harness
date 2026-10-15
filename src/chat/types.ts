@@ -38,6 +38,8 @@ export interface ChatAttachment {
 
 export interface ChatMessage {
   role: Role;
+  /** Harness-issued recall tool result after the first user message; outside the transcript. */
+  initialMemoryContext?: boolean;
   /** Harness note about a user-requested file undo; hidden from the transcript UI. */
   fileUndoNotice?: boolean;
   content: string;

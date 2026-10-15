@@ -1009,6 +1009,25 @@ describe("steering messages from the chat view", () => {
 });
 
 describe("recalled memory navigation", () => {
+  it("opens automatic recall from its saved snapshot without loading the current source", async () => {
+    const { provider, storage, send, onOpenMemory } = setup();
+    const chat = record("a");
+    chat.initialMemories = [{ sourceId: "source", title: "Original title", text: "# Loaded contents", generatedAt: 1, sourceRevision: "original" }];
+    provider.openChat(chat);
+    await send({ type: "openInitialMemory", sourceId: "source", chatId: "a" });
+    const call = vi.mocked(vscode.commands.executeCommand).mock.calls.find(args => args[0] === "vscode.open")!;
+    const uri = call[1] as vscode.Uri;
+    expect(uri.path).toBe("/Original title — Memory (read-only).md");
+    const [, contentProvider] = vi.mocked(vscode.workspace.registerTextDocumentContentProvider).mock.calls[0];
+    expect(contentProvider.provideTextDocumentContent(uri, {} as vscode.CancellationToken)).toBe("# Loaded contents");
+    expect(onOpenMemory).not.toHaveBeenCalled();
+    expect(storage.load).not.toHaveBeenCalled();
+    vi.mocked(vscode.commands.executeCommand).mockClear();
+    await send({ type: "openInitialMemory", sourceId: "missing", chatId: "a" });
+    await send({ type: "openInitialMemory", sourceId: "source", chatId: "other" });
+    expect(vscode.commands.executeCommand).not.toHaveBeenCalled();
+  });
+
   it("opens the exact recalled version as read-only Markdown even for duplicate titles", async () => {
     const { provider, send } = setup();
     const chat = record("a");

@@ -823,7 +823,9 @@ body.image-preview-open .chat-body { overflow: hidden; }
 .memory-disclosure > summary::-webkit-details-marker, .memory-source > summary::-webkit-details-marker { display: none; }
 .memory-disclosure > summary:focus-visible,
 .memory-source > summary:is(:focus-visible, :has(:focus-visible)) { color: var(--vscode-foreground); }
-.memory-disclosure > summary .disclosure-icon { opacity: 1; }
+.memory-disclosure > summary > .disclosure-icon { opacity: 0; }
+.memory-disclosure[open] > summary > .disclosure-icon,
+.memory-disclosure > summary:is(:hover, :focus-visible) > .disclosure-icon { opacity: 1; }
 .memory-disclosure[open] > summary .disclosure-icon,
 .memory-source[open] > summary .disclosure-icon { transform: rotate(90deg); }
 .memory-source { padding: 0; }

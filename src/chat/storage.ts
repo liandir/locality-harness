@@ -10,6 +10,7 @@ import { isValidChatId, normalizeWorkspaceRoot } from "./storagePaths.js";
 export { isValidChatId } from "./storagePaths.js";
 import { MAX_MEMORY_COUNT } from "./memoryLimits.js";
 import { randomUUID } from "node:crypto";
+import { restoreInitialMemoryOrder } from "./initialMemoryContext.js";
 import { normalizeToolCallingProfile, type ToolCallingProfile } from "../llm/toolCallingProfile.js";
 import type { FileChangeSummary } from "./fileChanges.js";
 import { attachmentFileType, isImageAttachment, MAX_TEXT_ATTACHMENT_BYTES } from "./attachments.js";
@@ -419,6 +420,7 @@ export function titleFromFirstMessage(s: string): string {
 
 /** The transcript and model context share an array until the first compaction. */
 export function modelMessages(rec: ChatRecord): ChatMessage[] {
+  restoreInitialMemoryOrder(rec);
   // Rebuilt histories (for example an edited chat or historical fork) may
   // contain terminal cards even when their separate context was discarded.
   if (!rec.contextMessages && rec.messages.some(message => message.interruption)) {

@@ -139,6 +139,7 @@ function replaceMarkdownLinkLabel(tokens: Parameters<RenderRule>[0], openIndex: 
 }
 
 interface ToolCard extends ChatToolProcess {
+  initialMemoryRecall?: boolean;
   toolId: string;
   toolName: string;
   argsJson: string;
@@ -285,7 +286,7 @@ const viewDrafts = new Map<string, ChatViewState>();
 
 function saveChatView(): void {
   if (!activeChatId) return;
-  const memories = root.querySelector<HTMLDetailsElement>("#memoryDisclosure");
+  const memories = memoryDisclosure;
   viewDrafts.set(activeChatId, {
     question: state.questionDraft, scrollTop: chatBody()?.scrollTop ?? 0, autoScroll: state.autoScroll,
     history: captureHistoryView(state.messages), memoriesExpanded: memories?.open ?? false,
@@ -336,6 +337,10 @@ const state: State = {
 };
 
 const root = document.getElementById("app")!;
+// Retain disclosure state while a collapsed work session detaches its contents.
+const memoryDisclosure = document.createElement("details");
+memoryDisclosure.id = "memoryDisclosure";
+memoryDisclosure.className = "tool-card memory-disclosure";
 const scrollFollow = new ScrollFollow(state);
 let mounted = false;
 let renderQueued = false;
@@ -560,12 +565,11 @@ function placeAfter(parent: HTMLElement, el: HTMLElement, anchor: HTMLElement | 
 }
 
 function updateMemoryDisclosure(): void {
-  const details = root.querySelector<HTMLDetailsElement>("#memoryDisclosure");
-  if (!details) return;
+  const details = memoryDisclosure;
   details.hidden = !state.memories.length || !state.messages.some(message => message.role === "user");
   const entries = state.memories.map(memory =>
     `<details class="tool-card memory-source output-surface-tool" data-memory-entry="${escapeHtml(memory.sourceId)}">
-      <summary class="tool-head disclosure-trigger"><span class="tool-icon" aria-hidden="true">${memoryIcon()}</span><span class="tool-name">Recalled</span><span class="tool-label"><button type="button" class="tool-path-link tool-label-text memory-source-link" data-open-memory="${escapeHtml(memory.sourceId)}">${escapeHtml(memory.title)}</button></span>${chevronIcon()}</summary>
+      <summary class="tool-head disclosure-trigger"><span class="tool-icon" aria-hidden="true">${memoryIcon()}</span><span class="tool-name">Recalled</span><span class="tool-label"><button type="button" class="tool-path-link tool-label-text memory-source-link" data-open-initial-memory="${escapeHtml(memory.sourceId)}">${escapeHtml(memory.title)}</button></span>${chevronIcon()}</summary>
       <div class="tool-expanded">${renderToolOutputSurface(renderMemoryContents(memory.text, memory.generatedAt, md), false)}</div>
     </details>`
   ).join("");
@@ -573,7 +577,7 @@ function updateMemoryDisclosure(): void {
   if (details.dataset.signature === signature) return;
   const expanded = new Set(Array.from(details.querySelectorAll<HTMLDetailsElement>("[data-memory-entry][open]"), entry => entry.dataset.memoryEntry));
   details.dataset.signature = signature;
-  details.innerHTML = `<summary class="work-head disclosure-trigger"><span class="work-icon" aria-hidden="true">${memoryIcon()}</span><span class="work-title">Recalled memories</span>${chevronIcon()}</summary><div class="work-body">${entries}</div>`;
+  details.innerHTML = `<summary class="tool-head work-head disclosure-trigger"><span class="tool-icon" aria-hidden="true">${memoryIcon()}</span><span class="work-title">Recalled memories</span>${chevronIcon()}</summary><div class="work-body">${entries}</div>`;
   details.querySelectorAll<HTMLDetailsElement>("[data-memory-entry]").forEach(entry => { entry.open = expanded.has(entry.dataset.memoryEntry); });
 }
 
@@ -696,7 +700,7 @@ function mountShell(): void {
     <main class="chat-body">
       <div id="emptyState" hidden></div>
       <div id="notices" style="display: contents"></div>
-      <div id="messages" style="display: contents"><details id="memoryDisclosure" class="work-section memory-disclosure" hidden></details><div id="serverStatusFallback" class="msg assistant timeline server-status-fallback" hidden></div></div>
+      <div id="messages" style="display: contents"><div id="serverStatusFallback" class="msg assistant timeline server-status-fallback" hidden></div></div>
     </main>
     <footer class="composer">
       <div id="scrollDownSlot"></div>
@@ -931,13 +935,6 @@ function todosFromCard(tc: ToolCard): TodoItem[] {
 function reconcileMessages(): void {
   const host = root.querySelector("#messages") as HTMLElement | null;
   if (!host) return;
-  const memories = root.querySelector<HTMLDetailsElement>("#memoryDisclosure")!;
-  const firstUserIndex = state.messages.findIndex(message => message.role === "user");
-  const firstUser = state.messages[firstUserIndex];
-  const firstResponse = firstUserIndex < 0 ? undefined
-    : state.messages.slice(firstUserIndex + 1).find(message => message.role === "assistant");
-  // Keep the disclosure alive while history is replaced or a response is retried.
-  if (!firstUser) placeAfter(host, memories, null);
   const wanted = new Set(state.messages.map(m => m.id));
   for (const [id, el] of messageEls) {
     if (!wanted.has(id)) {
@@ -966,14 +963,9 @@ function reconcileMessages(): void {
       ].filter(Boolean).join(" ");
     if (el.className !== cls) el.className = cls;
     if (m.role === "user") renderUserMessage(el, m);
-    else reconcileAssistantParts(el, m, m === firstResponse ? memories : undefined);
+    else reconcileAssistantParts(el, m);
     placeAfter(host, el, anchor);
     anchor = el;
-    // Initial recall can finish before the first assistant response starts.
-    if (m === firstUser && !firstResponse) {
-      placeAfter(host, memories, anchor);
-      anchor = memories;
-    }
   }
 }
 
@@ -1168,14 +1160,25 @@ function fileChangeKey(index: number): string {
 type ResolvedUnit = WorkTimelineUnit<MessagePart>;
 
 function resolveRenderUnits(m: Message): ResolvedUnit[] {
-  return resolveWorkTimeline(m, {
+  const initialRecall: MessagePart[] = hasInitialMemoryRecall(m) ? [{
+    id: `${m.id}:initial-memories`, kind: "tool", startedAt: m.workStartedAt,
+    card: { toolId: `${m.id}:initial-memories`, toolName: "recall_memory", argsJson: "{}",
+      category: "read", status: "executed", expanded: false, initialMemoryRecall: true }
+  }] : [];
+  return resolveWorkTimeline({ ...m, parts: [...initialRecall, ...m.parts] }, {
     showThinking: state.showThinking,
     serverPending: state.serverPending,
     liveStatus: visibleServerPendingLabel
   });
 }
 
-function reconcileAssistantParts(el: HTMLElement, m: Message, memories?: HTMLDetailsElement): void {
+function hasInitialMemoryRecall(message: Message): boolean {
+  if (!state.memories.length || message.role !== "assistant") return false;
+  const firstUserIndex = state.messages.findIndex(item => item.role === "user");
+  return firstUserIndex >= 0 && state.messages.slice(firstUserIndex + 1).find(item => item.role === "assistant") === message;
+}
+
+function reconcileAssistantParts(el: HTMLElement, m: Message): void {
   const units = resolveRenderUnits(m);
   const wantedWorkIds = new Set<string>();
   const wantedPartIds = new Set<string>();
@@ -1188,7 +1191,7 @@ function reconcileAssistantParts(el: HTMLElement, m: Message, memories?: HTMLDet
     const workId = child.dataset.workId;
     const actionId = child.dataset.messageActions;
     const changeSummaryId = child.dataset.changeSummary;
-    if (child.id === "serverStatus" || child === memories) continue;
+    if (child.id === "serverStatus") continue;
     if (workId && !wantedWorkIds.has(workId)) {
       removeWorkElement(child);
     } else if (partId && !wantedPartIds.has(partId)) {
@@ -1198,8 +1201,7 @@ function reconcileAssistantParts(el: HTMLElement, m: Message, memories?: HTMLDet
       child.remove();
     }
   }
-  if (memories) placeAfter(el, memories, null);
-  let anchor: HTMLElement | null = memories ?? null;
+  let anchor: HTMLElement | null = null;
   for (const u of units) {
     if (u.kind === "work" && !rendersAsDirectWorkItem(u)) {
       const workEl = ensureWorkElement(el, u.groupId!);
@@ -1261,7 +1263,7 @@ function ensureWorkElement(parent: HTMLElement, groupId: string): HTMLElement {
 }
 
 function messageUsesTimeline(m: Message): boolean {
-  return m.parts.some(part => isWorkPart(part)
+  return hasInitialMemoryRecall(m) || m.parts.some(part => isWorkPart(part)
     && (part.kind !== "thought" || thinkingPresentation(state.showThinking, part.live).visible));
 }
 
@@ -1702,6 +1704,10 @@ async function copyTextToClipboard(text: string): Promise<void> {
 }
 
 function renderToolPart(el: HTMLElement, tc: ToolCard): void {
+  if (tc.initialMemoryRecall) {
+    placeAfter(el, memoryDisclosure, null);
+    return;
+  }
   let card = directChild(el, "tool-card");
   if (!card) {
     el.textContent = "";
@@ -3171,6 +3177,12 @@ function bindOnce(): void {
       send({ type: "openRecalledMemory", id: recalledMemory.dataset.openRecalledMemory! });
       return;
     }
+    const initialMemory = target.closest<HTMLElement>("[data-open-initial-memory]");
+    if (initialMemory) {
+      e.preventDefault();
+      send({ type: "openInitialMemory", sourceId: initialMemory.dataset.openInitialMemory! });
+      return;
+    }
     const recentChat = target.closest("[data-open-chat]") as HTMLElement | null;
     if (recentChat) {
       send({ type: "openChat", id: recentChat.dataset.openChat! });
@@ -3896,7 +3908,7 @@ function handleHostMessage(msg: ExtToChat): void {
       const input = root.querySelector<HTMLTextAreaElement>("#input");
       if (input) input.value = state.draft;
       render();
-      const memories = root.querySelector<HTMLDetailsElement>("#memoryDisclosure");
+      const memories = memoryDisclosure;
       if (memories) {
         memories.open = draft?.memoriesExpanded ?? false;
         memories.querySelectorAll<HTMLDetailsElement>("[data-memory-entry]").forEach(entry => {

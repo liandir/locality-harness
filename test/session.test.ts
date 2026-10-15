@@ -4695,6 +4695,134 @@ describe("workspace memory tools", () => {
 });
 
 describe("initial workspace memory loading", () => {
+  it("keeps the model's first preamble and tool calls after the harness recall results", async () => {
+    const { ChatSession } = await import("../src/chat/session.js");
+    const { initialMemoryContext } = await import("../src/chat/initialMemoryContext.js");
+    const record = newRecord();
+    record.messages = [
+      { role: "user", content: "Fix the game", ts: 1 },
+      { role: "tool", content: "Search result", ts: 2, toolCall: { id: "model_search", name: "search_memories", argsJson: '{"query":"game"}' } },
+      { role: "assistant", content: "I will search next.", ts: 3, events: [{ kind: "text", text: "I will search next." }, { kind: "toolCall", name: "search_memories", argsJson: '{"query":"game"}', id: "model_search" }] }
+    ];
+    record.initialMemories = [{ sourceId: "source", title: "Game", text: "Loaded memory", generatedAt: 1, sourceRevision: "revision" }];
+    record.contextMessages = [record.messages[0], ...initialMemoryContext(record.initialMemories, 1), ...record.messages.slice(1)];
+    const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record, emit: () => undefined });
+    const messages = await (session as unknown as {
+      buildNativePromptMessages(prompt: string): Promise<{ role: string; content: string; tool_call_id?: string; tool_calls?: { id: string }[] }[]>;
+    }).buildNativePromptMessages("system instructions");
+    expect(messages.map(message => message.role)).toEqual(["system", "user", "assistant", "tool", "assistant", "tool"]);
+    expect(messages[2].content).toBe("");
+    expect(messages[3].content).toContain("Loaded memory");
+    expect(messages[3].tool_call_id).toBe(messages[2].tool_calls?.[0].id);
+    expect(messages[4].content).toBe("I will search next.");
+    expect(messages[4].tool_calls?.map(call => call.id)).toEqual(["model_search"]);
+    expect(messages[5].content).toBe("Search result");
+    await session.shutdown();
+  });
+
+  it("places recalled reference data after the user text and image attachments in native context", async () => {
+    const { ChatSession } = await import("../src/chat/session.js");
+    const { initialMemoryContext } = await import("../src/chat/initialMemoryContext.js");
+    const record = newRecord();
+    record.messages = [{ role: "user", content: "Describe this image", ts: 1, attachments: [
+      { id: "image", fileName: "screen.png", mimeType: "image/png", extension: "png", byteLength: 10 }
+    ] }];
+    record.initialMemories = [{ sourceId: "source", title: "Game", text: "LOADED_MEMORY", generatedAt: 1, sourceRevision: "revision" }];
+    record.contextMessages = [record.messages[0], ...initialMemoryContext(record.initialMemories, 1)];
+    const session = new ChatSession({ storage: { save: vi.fn(), attachmentDataUrl: vi.fn().mockResolvedValue("data:image/png;base64,test") } as never,
+      workspaceRoot: "/tmp/workspace", record, emit: () => undefined });
+    const messages = await (session as unknown as {
+      buildNativePromptMessages(prompt: string): Promise<{ role: string; content: string | { type: string; text?: string }[] }[]>;
+    }).buildNativePromptMessages("system instructions");
+    expect(messages.map(message => message.role)).toEqual(["system", "user", "assistant", "tool"]);
+    expect(messages[1].content).toEqual([
+      expect.objectContaining({ type: "image_url" }),
+      expect.objectContaining({ type: "text", text: expect.stringContaining("Describe this image") })
+    ]);
+    expect(messages[3].content).toBe(record.contextMessages[1].content);
+    await session.shutdown();
+  });
+
+  it.each(["native", "compat-qwen3"] as const)("keeps displayed snapshots in exact context order across source changes and reopen in %s", async profile => {
+    mocks.settings.memoryLoadOnStart = true;
+    mocks.settings.memoryMaxCount = 3;
+    mocks.settings.toolCallingMode = profile;
+    const { ChatStorage } = await import("../src/chat/storage.js");
+    const { ChatSession } = await import("../src/chat/session.js");
+    const { memoryMetadata } = await import("../src/chat/memory.js");
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "locality-memory-order-"));
+    const storage = new ChatStorage(path.join(dir, "workspace"), path.join(dir, "chats"));
+    const sessions: ChatSession[] = [];
+    try {
+      // Rank differs from alphabetical and storage order.
+      const sources = [];
+      for (const [title, text, generatedAt] of [["Zebra parser", "FIRST_MEMORY", 3], ["Alpha parser", "THIRD_MEMORY", 1], ["Middle parser", "SECOND_MEMORY", 2]] as const) {
+        const source = storage.newRecord(profile);
+        source.title = title;
+        source.memory = { text, generatedAt, sourceRevision: "0".repeat(64), enabled: true, manual: true };
+        await storage.save(source);
+        sources.push(source);
+      }
+      const requests: { messages: { role: string; content: string; tool_call_id?: string; tool_calls?: { id: string; function: { name: string; arguments: string } }[] }[] }[] = [];
+      mocks.streamChat.mockImplementation(async function* (_endpoint, request) {
+        if (profile !== "native" && request.tools) throw new mocks.NativeToolsUnsupportedError("tools param requires --jinja flag");
+        requests.push(request);
+        yield { kind: "text", text: "FIRST_ANSWER" };
+      });
+      const events: UiEvent[] = [];
+      const record = storage.newRecord(profile);
+      const session = new ChatSession({ storage, workspaceRoot: record.workspaceRoot, record, emit: event => events.push(event) });
+      sessions.push(session);
+      await session.sendUserMessage("USER_REQUEST parser");
+      const displayed = events.filter(event => event.kind === "memoriesUsed").at(-1)!.memories;
+      expect(displayed.map(memory => memory.text)).toEqual(["FIRST_MEMORY", "SECOND_MEMORY", "THIRD_MEMORY"]);
+      const payload = displayed.map(memory => ({ ...memoryMetadata(memory), contents: memory.text }));
+      const assertRequest = () => {
+        const messages = requests.at(-1)!.messages;
+        expect(messages.filter(message => message.role === "system")).toHaveLength(1);
+        expect(messages[0].content).not.toContain("FIRST_MEMORY");
+        const request = messages[1];
+        expect(request.role).toBe("user");
+        expect(request.content).toBe("USER_REQUEST parser");
+        const results = profile === "native" ? messages.slice(3, 6) : [messages[3], messages[5], messages[7]];
+        expect(results.map(message => JSON.parse(profile === "native" ? message.content : message.content.slice(message.content.indexOf("\n") + 1))))
+          .toMatchObject(payload);
+        if (profile === "native") {
+          const calls = messages[2].tool_calls!;
+          expect(messages[2].content).toBe("");
+          expect(calls.map(call => call.function.name)).toEqual(["recall_memory", "recall_memory", "recall_memory"]);
+          expect(calls.map(call => JSON.parse(call.function.arguments))).toEqual(payload.map(({ name, id }) => ({ name, id })));
+          expect(results.map(message => message.tool_call_id)).toEqual(calls.map(call => call.id));
+          expect(new Set(calls.map(call => call.id)).size).toBe(3);
+        } else {
+          expect(messages.slice(2, 8).map(message => message.role)).toEqual(["assistant", "user", "assistant", "user", "assistant", "user"]);
+          expect([messages[2], messages[4], messages[6]].every(message => message.content.includes("recall_memory"))).toBe(true);
+        }
+      };
+      assertRequest();
+      await storage.delete(sources[0].id);
+      await storage.updateMemory(sources[1].id, current => ({ ...current.memory!, enabled: false }));
+      await storage.updateMemory(sources[2].id, current => ({ ...current.memory!, text: "REPLACED_MEMORY", generatedAt: 9 }));
+      session.refreshMemoryVisibility();
+      expect(events.at(-1)).toEqual({ kind: "memoriesUsed", memories: displayed });
+      await session.shutdown();
+      const saved = (await storage.load(record.id))!;
+      const reopened = new ChatSession({ storage, workspaceRoot: saved.workspaceRoot, record: saved, emit: event => events.push(event) });
+      sessions.push(reopened);
+      reopened.refreshMemoryVisibility();
+      expect(events.at(-1)).toEqual({ kind: "memoriesUsed", memories: displayed });
+      await reopened.sendUserMessage("FOLLOWUP_REQUEST");
+      assertRequest();
+      expect(requests.at(-1)!.messages.slice(-2).map(message => message.content)).toEqual(["FIRST_ANSWER", "FOLLOWUP_REQUEST"]);
+      await reopened.editUserMessage(saved.messages.find(message => message.content === "FOLLOWUP_REQUEST")!.ts, "EDITED_FOLLOWUP");
+      expect(events.filter(event => event.kind === "memoriesUsed").at(-1)!.memories).toEqual(displayed);
+      assertRequest();
+    } finally {
+      await Promise.all(sessions.map(session => session.shutdown()));
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it.each(["native", "compat-qwen3"] as const)("loads once, persists, and replaces memories on first-message edits in %s", async profile => {
     mocks.settings.memoryLoadOnStart = true;
     mocks.settings.readToolsEnabled = false;
@@ -4736,8 +4864,9 @@ describe("initial workspace memory loading", () => {
       expect(record.initialMemories?.map(memory => memory.sourceId)).toEqual([parser.id]);
       expect(JSON.stringify(record.messages)).not.toContain("PARSER_MEMORY_SENTINEL");
       expect(JSON.stringify(requests.at(-1))).toContain("PARSER_MEMORY_SENTINEL");
-      expect(JSON.stringify(requests.at(-1))).not.toMatch(/LIMITED_MEMORY_SENTINEL|COLORS_MEMORY_SENTINEL|FOREIGN_MEMORY_SENTINEL|DISABLED_MEMORY_SENTINEL|STALE_MEMORY_SENTINEL|search_memories|recall_memory/);
-      expect(record.contextMessages?.[0].tokens).toBeGreaterThan(0);
+      expect(JSON.stringify(requests.at(-1))).not.toMatch(/LIMITED_MEMORY_SENTINEL|COLORS_MEMORY_SENTINEL|FOREIGN_MEMORY_SENTINEL|DISABLED_MEMORY_SENTINEL|STALE_MEMORY_SENTINEL|search_memories/);
+      expect(requests.at(-1)?.tools?.some(tool => tool.function.name === "recall_memory")).not.toBe(true);
+      expect(record.contextMessages?.[1].tokens).toBeGreaterThan(0);
       expect(mocks.tokenize.mock.calls.some(call => String(call[1]).includes("PARSER_MEMORY_SENTINEL"))).toBe(true);
       expect(events).toContainEqual(expect.objectContaining({ kind: "memoriesUsed", memories: [expect.objectContaining({ sourceId: parser.id })] }));
       await session.shutdown();

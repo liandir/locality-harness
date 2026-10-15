@@ -722,6 +722,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       case "openChat": await this.openChatById(m.id); break;
       case "openMemory": await this.onOpenMemory?.(m.id, m.readonly ?? true); break;
       case "openRecalledMemory": await this.openRecalledMemory(m.id); break;
+      case "openInitialMemory": {
+        const memory = this.session?.getRecord().initialMemories?.find(item => item.sourceId === m.sourceId);
+        if (memory) await this.openMemorySnapshot(memory.title, memory.text);
+        break;
+      }
       case "regenerateMemory":
         try {
           await this.memory?.regenerate(m.id);
@@ -1133,12 +1138,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       let result: { id?: unknown; name?: unknown; contents?: unknown } | null;
       try { result = JSON.parse(message.content); } catch { continue; }
       if (result?.id !== id || typeof result.name !== "string" || typeof result.contents !== "string") continue;
-      this.ensureReviewContentProvider();
-      const uri = this.snapshotReviewUri(`${result.name} — Memory (read-only).md`, result.contents);
-      await vscode.commands.executeCommand("vscode.open", uri, { preview: false });
+      await this.openMemorySnapshot(result.name, result.contents);
       return;
     }
     void vscode.window.showErrorMessage("This recalled memory is no longer available in the chat.");
+  }
+
+  private async openMemorySnapshot(title: string, text: string): Promise<void> {
+    this.ensureReviewContentProvider();
+    const uri = this.snapshotReviewUri(`${title} — Memory (read-only).md`, text);
+    await vscode.commands.executeCommand("vscode.open", uri, { preview: false });
   }
 
   private async openReviewDiff(filePath: string): Promise<void> {
