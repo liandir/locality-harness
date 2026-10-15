@@ -140,7 +140,6 @@ function renderChats(): string {
         <h3>Chats</h3>
         ${chats.length === 0 ? `<p class="empty-state">${query ? "No matching chats." : "No chats yet."}</p>` :
           `<ul class="chat-list">${chats.map(c => renderChatEntry(c, memories.get(c.id))).join("")}</ul>`}
-        <p class="setting-help">Memories update after Act and Review responses when Auto-generate memories is enabled. Edited memories are preserved.</p>
         ${state.memoryError ? `<p class="memory-error" role="alert">${esc(state.memoryError)}</p>` : ""}
         ${busy ? '<button id="cancelMemories" class="action-btn wide-button">Cancel generation</button>' : ""}
         ${state.chats.length > 0 ? `<button id="clearChats" class="action-btn wide-button danger icon-label clear-chats">${trashIcon()}<span>Clear all chats</span></button>` : ""}
