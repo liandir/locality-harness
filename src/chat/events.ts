@@ -113,7 +113,7 @@ export type UiEvent =
   | { kind: "tokens"; total: number; limit: number }
   | { kind: "titleChanged"; title: string; animate: boolean }
   | ({ kind: "chatLoaded"; record: ChatRecord } & ChatContextState)
-  | { kind: "memoriesUsed"; memories: MemorySnapshot[] }
+  | { kind: "memoriesUsed"; memories: MemorySnapshot[] } // Automatically recalled at chat start.
   | { kind: "chatClosed" }
   | { kind: "compactStatus"; currentMessages: number; minMessages: number; available: boolean }
   | { kind: "compactStart"; compactId: string; source: "manual" | "auto"; beforeTokens: number; beforeMessages: number; keepTail: number }

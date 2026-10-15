@@ -817,7 +817,7 @@ body.image-preview-open .chat-body { overflow: hidden; }
   .ctx-pill.nudge { animation: none; }
 }
 
-.memory-disclosure { margin: 8px 0; }
+.memory-disclosure { margin: 0; padding: 0; }
 .memory-disclosure[hidden] { display: none; }
 .memory-disclosure > summary, .memory-source > summary { list-style: none; outline: none; }
 .memory-disclosure > summary::-webkit-details-marker, .memory-source > summary::-webkit-details-marker { display: none; }

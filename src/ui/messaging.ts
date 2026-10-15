@@ -77,6 +77,7 @@ export type ExtToSide =
 
 export type ChatToExt = (
   | { type: "openMemory"; id: string; readonly?: boolean }
+  | { type: "openRecalledMemory"; id: string }
   | { type: "regenerateMemory"; id: string }
   | { type: "deleteChat"; id: string }
   | { type: "ready" }

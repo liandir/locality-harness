@@ -562,10 +562,10 @@ function placeAfter(parent: HTMLElement, el: HTMLElement, anchor: HTMLElement | 
 function updateMemoryDisclosure(): void {
   const details = root.querySelector<HTMLDetailsElement>("#memoryDisclosure");
   if (!details) return;
-  details.hidden = !state.memories.length;
+  details.hidden = !state.memories.length || !state.messages.some(message => message.role === "user");
   const entries = state.memories.map(memory =>
     `<details class="tool-card memory-source output-surface-tool" data-memory-entry="${escapeHtml(memory.sourceId)}">
-      <summary class="tool-head disclosure-trigger"><span class="tool-icon">${memoryIcon()}</span><span class="tool-name">Memory</span><span class="tool-label"><button type="button" class="tool-path-link tool-label-text memory-source-link" data-open-memory="${escapeHtml(memory.sourceId)}">${escapeHtml(memory.title)}</button></span>${chevronIcon()}</summary>
+      <summary class="tool-head disclosure-trigger"><span class="tool-icon" aria-hidden="true">${memoryIcon()}</span><span class="tool-name">Recalled</span><span class="tool-label"><button type="button" class="tool-path-link tool-label-text memory-source-link" data-open-memory="${escapeHtml(memory.sourceId)}">${escapeHtml(memory.title)}</button></span>${chevronIcon()}</summary>
       <div class="tool-expanded">${renderToolOutputSurface(renderMemoryContents(memory.text, memory.generatedAt, md), false)}</div>
     </details>`
   ).join("");
@@ -573,7 +573,7 @@ function updateMemoryDisclosure(): void {
   if (details.dataset.signature === signature) return;
   const expanded = new Set(Array.from(details.querySelectorAll<HTMLDetailsElement>("[data-memory-entry][open]"), entry => entry.dataset.memoryEntry));
   details.dataset.signature = signature;
-  details.innerHTML = `<summary class="work-head disclosure-trigger"><span class="work-title">Recalled memories</span>${chevronIcon()}</summary>` + entries;
+  details.innerHTML = `<summary class="work-head disclosure-trigger"><span class="work-icon" aria-hidden="true">${memoryIcon()}</span><span class="work-title">Recalled memories</span>${chevronIcon()}</summary><div class="work-body">${entries}</div>`;
   details.querySelectorAll<HTMLDetailsElement>("[data-memory-entry]").forEach(entry => { entry.open = expanded.has(entry.dataset.memoryEntry); });
 }
 
@@ -695,9 +695,8 @@ function mountShell(): void {
     </header>
     <main class="chat-body">
       <div id="emptyState" hidden></div>
-      <details id="memoryDisclosure" class="memory-disclosure" hidden></details>
       <div id="notices" style="display: contents"></div>
-      <div id="messages" style="display: contents"><div id="serverStatusFallback" class="msg assistant timeline server-status-fallback" hidden></div></div>
+      <div id="messages" style="display: contents"><details id="memoryDisclosure" class="work-section memory-disclosure" hidden></details><div id="serverStatusFallback" class="msg assistant timeline server-status-fallback" hidden></div></div>
     </main>
     <footer class="composer">
       <div id="scrollDownSlot"></div>
@@ -785,7 +784,7 @@ function reconcileEmptyState(): void {
   if (!visible) return;
 
   const recent = state.recentChats.map(chat => `
-    <button class="recent-chat-item" type="button" data-open-chat="${escapeHtml(chat.id)}">
+    <button class="recent-chat-item" type="button" data-open-chat="${escapeHtml(chat.id)}" data-chat-context="${escapeHtml(chat.id)}">
       <span class="recent-chat-title">${escapeHtml(chat.title)}</span>
       <span class="recent-chat-time">${escapeHtml(formatRecentChatTime(chat.updatedAt))}</span>
     </button>`).join("");
@@ -932,6 +931,13 @@ function todosFromCard(tc: ToolCard): TodoItem[] {
 function reconcileMessages(): void {
   const host = root.querySelector("#messages") as HTMLElement | null;
   if (!host) return;
+  const memories = root.querySelector<HTMLDetailsElement>("#memoryDisclosure")!;
+  const firstUserIndex = state.messages.findIndex(message => message.role === "user");
+  const firstUser = state.messages[firstUserIndex];
+  const firstResponse = firstUserIndex < 0 ? undefined
+    : state.messages.slice(firstUserIndex + 1).find(message => message.role === "assistant");
+  // Keep the disclosure alive while history is replaced or a response is retried.
+  if (!firstUser) placeAfter(host, memories, null);
   const wanted = new Set(state.messages.map(m => m.id));
   for (const [id, el] of messageEls) {
     if (!wanted.has(id)) {
@@ -960,9 +966,14 @@ function reconcileMessages(): void {
       ].filter(Boolean).join(" ");
     if (el.className !== cls) el.className = cls;
     if (m.role === "user") renderUserMessage(el, m);
-    else reconcileAssistantParts(el, m);
+    else reconcileAssistantParts(el, m, m === firstResponse ? memories : undefined);
     placeAfter(host, el, anchor);
     anchor = el;
+    // Initial recall can finish before the first assistant response starts.
+    if (m === firstUser && !firstResponse) {
+      placeAfter(host, memories, anchor);
+      anchor = memories;
+    }
   }
 }
 
@@ -1164,7 +1175,7 @@ function resolveRenderUnits(m: Message): ResolvedUnit[] {
   });
 }
 
-function reconcileAssistantParts(el: HTMLElement, m: Message): void {
+function reconcileAssistantParts(el: HTMLElement, m: Message, memories?: HTMLDetailsElement): void {
   const units = resolveRenderUnits(m);
   const wantedWorkIds = new Set<string>();
   const wantedPartIds = new Set<string>();
@@ -1177,7 +1188,7 @@ function reconcileAssistantParts(el: HTMLElement, m: Message): void {
     const workId = child.dataset.workId;
     const actionId = child.dataset.messageActions;
     const changeSummaryId = child.dataset.changeSummary;
-    if (child.id === "serverStatus") continue;
+    if (child.id === "serverStatus" || child === memories) continue;
     if (workId && !wantedWorkIds.has(workId)) {
       removeWorkElement(child);
     } else if (partId && !wantedPartIds.has(partId)) {
@@ -1187,7 +1198,8 @@ function reconcileAssistantParts(el: HTMLElement, m: Message): void {
       child.remove();
     }
   }
-  let anchor: HTMLElement | null = null;
+  if (memories) placeAfter(el, memories, null);
+  let anchor: HTMLElement | null = memories ?? null;
   for (const u of units) {
     if (u.kind === "work" && !rendersAsDirectWorkItem(u)) {
       const workEl = ensureWorkElement(el, u.groupId!);
@@ -2697,6 +2709,9 @@ function renderToolCardLabel(tc: ToolCard): string {
     return `<span class="tool-label-text">${escapeHtml(question)}</span>`;
   }
   const label = toolCardLabel(tc);
+  if (tc.toolName === "recall_memory" && tc.status === "executed" && label && typeof toolArgs(tc).id === "string") {
+    return `<button type="button" class="tool-path-link tool-label-text memory-source-link" data-open-recalled-memory="${escapeHtml(String(toolArgs(tc).id))}">${escapeHtml(label)}</button>`;
+  }
   return label ? `<span class="tool-label-text">${escapeHtml(label)}</span>` : "";
 }
 
@@ -3148,6 +3163,12 @@ function bindOnce(): void {
     if (memorySource) {
       e.preventDefault();
       send({ type: "openMemory", id: memorySource.dataset.openMemory! });
+      return;
+    }
+    const recalledMemory = target.closest<HTMLElement>("[data-open-recalled-memory]");
+    if (recalledMemory) {
+      e.preventDefault();
+      send({ type: "openRecalledMemory", id: recalledMemory.dataset.openRecalledMemory! });
       return;
     }
     const recentChat = target.closest("[data-open-chat]") as HTMLElement | null;

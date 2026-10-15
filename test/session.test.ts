@@ -4641,12 +4641,13 @@ describe("workspace memory tools", () => {
       expect(result.id).not.toBe(outsideMatch.id);
       expect(events.filter(e => e.kind === "toolCallProposed")).toHaveLength(2);
       expect(events.filter(e => e.kind === "toolCallProposed").every(e => e.approvalRequired === false)).toBe(true);
-      expect(events).toContainEqual(expect.objectContaining({ kind: "memoriesUsed", memories: [expect.objectContaining({ text: source.memory.text })] }));
+      // Explicit recalls remain at their tool calls, never in the initial-memory group.
+      expect(events.filter(e => e.kind === "memoriesUsed").every(e => e.memories.length === 0)).toBe(true);
       const saved = (await storage.load(record.id))!;
       expect(saved.recalledMemories).toHaveLength(1);
       const reopened = new ChatSession({ storage, workspaceRoot: saved.workspaceRoot, record: saved, emit: e => events.push(e) });
       await reopened.refreshMemoryVisibility();
-      expect(events.at(-1)).toMatchObject({ kind: "memoriesUsed", memories: [{ sourceId: source.id }] });
+      expect(events.at(-1)).toEqual({ kind: "memoriesUsed", memories: [] });
     } finally { await fs.rm(dir, { recursive: true, force: true }); }
   });
 

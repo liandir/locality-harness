@@ -11,7 +11,11 @@ const mocks = vi.hoisted(() => ({ sessions: new Map<string, FakeSession>(), inpu
 vi.mock("vscode", () => ({
   commands: { executeCommand: vi.fn() },
   window: { showInputBox: mocks.input, showOpenDialog: mocks.picker, showWarningMessage: mocks.warning, showErrorMessage: vi.fn() },
-  Uri: { file: (path: string) => path }
+  workspace: { registerTextDocumentContentProvider: vi.fn(() => ({ dispose() {} })) },
+  Uri: {
+    file: (path: string) => path,
+    from: (parts: { scheme: string; path: string; query: string }) => ({ ...parts, toString: () => JSON.stringify(parts) })
+  }
 }));
 vi.mock("../src/config/settings.js", () => ({ readSettings: () => mocks.settings }));
 vi.mock("../src/llm/client.js", () => ({ fetchServerMetadata: mocks.metadata }));
@@ -143,7 +147,7 @@ function setup(memory?: WorkspaceMemory) {
   const onChatListChanged = vi.fn();
   const onOpenMemory = vi.fn();
   const provider = new ChatViewProvider(
-    { workspaceState } as unknown as vscode.ExtensionContext,
+    { workspaceState, subscriptions: [] } as unknown as vscode.ExtensionContext,
     () => storage as unknown as ChatStorage, () => "/workspace", vi.fn(), onChatOpened, createChat, onChatListChanged, memory, onOpenMemory
   );
   const posted: ExtToChat[] = [];
@@ -1001,6 +1005,40 @@ describe("steering messages from the chat view", () => {
     a.finish();
     await turn;
     await provider.closeAll();
+  });
+});
+
+describe("recalled memory navigation", () => {
+  it("opens the exact recalled version as read-only Markdown even for duplicate titles", async () => {
+    const { provider, send } = setup();
+    const chat = record("a");
+    chat.messages = ["first", "second"].map((id, index) => ({
+      role: "tool", ts: index + 1,
+      content: JSON.stringify({ id, name: "Same title", contents: `# ${id} version` }),
+      toolCall: { name: "recall_memory", argsJson: JSON.stringify({ name: "Same title", id }), status: "executed" }
+    }));
+    provider.openChat(chat);
+    await send({ type: "openRecalledMemory", id: "second", chatId: "a" });
+    const call = vi.mocked(vscode.commands.executeCommand).mock.calls.find(args => args[0] === "vscode.open")!;
+    const uri = call[1] as vscode.Uri;
+    expect(uri.path).toBe("/Same title — Memory (read-only).md");
+    expect(call[2]).toEqual({ preview: false });
+    const [scheme, contentProvider] = vi.mocked(vscode.workspace.registerTextDocumentContentProvider).mock.calls[0];
+    expect(scheme).toBe(uri.scheme);
+    expect(contentProvider.provideTextDocumentContent(uri, {} as vscode.CancellationToken)).toBe("# second version");
+  });
+
+  it("does not open failed recalls, unknown IDs, or a recall from a different active chat", async () => {
+    const { provider, send } = setup();
+    const chat = record("a");
+    chat.messages = [{ role: "tool", ts: 1, content: JSON.stringify({ id: "failed", name: "A memory", contents: "text" }),
+      toolCall: { name: "recall_memory", argsJson: "{}", status: "failed" } }];
+    provider.openChat(chat);
+    await send({ type: "openRecalledMemory", id: "failed", chatId: "a" });
+    await send({ type: "openRecalledMemory", id: "unknown", chatId: "a" });
+    await send({ type: "openRecalledMemory", id: "failed", chatId: "another-chat" });
+    expect(vi.mocked(vscode.commands.executeCommand).mock.calls.filter(args => args[0] === "vscode.open")).toEqual([]);
+    expect(vscode.window.showErrorMessage).toHaveBeenCalledTimes(2);
   });
 });
 

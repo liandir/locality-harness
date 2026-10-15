@@ -721,6 +721,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       }
       case "openChat": await this.openChatById(m.id); break;
       case "openMemory": await this.onOpenMemory?.(m.id, m.readonly ?? true); break;
+      case "openRecalledMemory": await this.openRecalledMemory(m.id); break;
       case "regenerateMemory":
         try {
           await this.memory?.regenerate(m.id);
@@ -1121,6 +1122,23 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     } catch (err) {
       vscode.window.showErrorMessage(`Locality: could not open file: ${(err as Error).message}`);
     }
+  }
+
+  private async openRecalledMemory(id: string): Promise<void> {
+    // Resolve the versioned tool result in this chat, never a title match or
+    // the source's current memory, which may have been edited or regenerated.
+    for (const message of this.session?.getRecord().messages ?? []) {
+      if (message.role !== "tool" || message.toolCall?.name !== "recall_memory"
+          || message.toolCall.status === "failed" || message.toolCall.status === "rejected") continue;
+      let result: { id?: unknown; name?: unknown; contents?: unknown } | null;
+      try { result = JSON.parse(message.content); } catch { continue; }
+      if (result?.id !== id || typeof result.name !== "string" || typeof result.contents !== "string") continue;
+      this.ensureReviewContentProvider();
+      const uri = this.snapshotReviewUri(`${result.name} — Memory (read-only).md`, result.contents);
+      await vscode.commands.executeCommand("vscode.open", uri, { preview: false });
+      return;
+    }
+    void vscode.window.showErrorMessage("This recalled memory is no longer available in the chat.");
   }
 
   private async openReviewDiff(filePath: string): Promise<void> {

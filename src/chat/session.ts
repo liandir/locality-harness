@@ -1058,14 +1058,12 @@ export class ChatSession {
   async refreshMemoryVisibility(): Promise<void> {
     const generation = ++this.memoryVisibilityGeneration;
     try {
-      const snapshots = [...(this.record.initialMemories ?? []),
-        ...(readSettings().memoryEnabled ? this.record.recalledMemories ?? [] : [])];
-      const unique = [...new Map(snapshots.map(memory => [memory.sourceId, memory])).values()];
-      const available = unique.length ? await activeSnapshots(this.storage, unique) : [];
-      // Disclose summaries loaded at chat start or explicitly recalled, including on reopen.
+      const snapshots = this.record.initialMemories ?? [];
+      const available = snapshots.length ? await activeSnapshots(this.storage, snapshots) : [];
+      // Initial memories lead the first response; explicit recalls stay with
+      // their tool calls at the point where they entered the conversation.
       if (generation !== this.memoryVisibilityGeneration) return;
-      const initialIds = new Set(this.record.initialMemories?.map(memory => memory.sourceId));
-      this.emit({ kind: "memoriesUsed", memories: available.filter(memory => initialIds.has(memory.sourceId) || readSettings().memoryEnabled) });
+      this.emit({ kind: "memoriesUsed", memories: available });
     } catch {
       if (generation !== this.memoryVisibilityGeneration) return;
       this.emit({ kind: "memoriesUsed", memories: [] });

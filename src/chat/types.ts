@@ -97,7 +97,7 @@ export interface ChatRecord {
   contextMessages?: ChatMessage[];
   memory?: ChatMemory;
   memoryCreations?: MemoryCreation[];
-  /** Memories explicitly recalled by tools, for the UI disclosure only. */
+  /** Source snapshots explicitly recalled by tools, retained with chat history. */
   recalledMemories?: MemorySnapshot[];
   /** Memories loaded at chat start, for the UI disclosure; contents live in contextMessages. */
   initialMemories?: MemorySnapshot[];
