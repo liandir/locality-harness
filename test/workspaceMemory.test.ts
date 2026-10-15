@@ -471,6 +471,33 @@ describe("memory generation", () => {
   });
 });
 describe("workspace memory persistence", () => {
+  it("rejects a save if the workspace changes during memory validation", async () => {
+    const rec = await chat();
+    const originalStorage = storage;
+    let finish!: (tokens: number) => void;
+    mocks.tokenize.mockImplementationOnce(() => new Promise<number>(resolve => { finish = resolve; }));
+    const editing = memory.edit(rec.id, "A memory awaiting token validation");
+    const rejected = expect(editing).rejects.toThrow("active workspace changed");
+    await vi.waitFor(() => expect(finish).toBeDefined());
+    storage = new ChatStorage(path.join(dir, "other-workspace"), path.join(dir, "chats"));
+    finish(12);
+    await rejected;
+    expect((await originalStorage.load(rec.id))?.memory).toBeUndefined();
+  });
+
+  it("reports a failed save if its chat is deleted during validation", async () => {
+    const rec = await chat();
+    let finish!: (tokens: number) => void;
+    mocks.tokenize.mockImplementationOnce(() => new Promise<number>(resolve => { finish = resolve; }));
+    const editing = memory.edit(rec.id, "A memory whose chat is being deleted");
+    const rejected = expect(editing).rejects.toThrow("chat is no longer available");
+    await vi.waitFor(() => expect(finish).toBeDefined());
+    await storage.delete(rec.id);
+    finish(12);
+    await rejected;
+    expect(await storage.load(rec.id)).toBeUndefined();
+  });
+
   it("lists memories and validates recalled snapshots without loading transcripts", async () => {
     const rec = await chat();
     await storage.updateMemory(rec.id, current => ({ text: "Parser decision", sourceRevision: transcriptRevision(current), generatedAt: 1, enabled: true, manual: false }));

@@ -1,5 +1,15 @@
-/** Shared rename menu for chat tabs and Recent Chats rows. */
-export function installChatContextMenu(root: HTMLElement, rename: (id: string) => void): void {
+export interface ChatContextAction {
+  label: string;
+  run: (id: string) => void;
+  disabled?: boolean;
+}
+
+/** Shared chat menu, with optional actions supplied by each view. */
+export function installChatContextMenu(
+  root: HTMLElement,
+  rename: (id: string) => void,
+  extraActions: (id: string) => ChatContextAction[] = () => []
+): void {
   let menu: HTMLDivElement | undefined;
   let owner: HTMLElement | undefined;
   const close = (restoreFocus = false): void => {
@@ -15,15 +25,27 @@ export function installChatContextMenu(root: HTMLElement, rename: (id: string) =
     menu = document.createElement("div");
     menu.className = "chat-context-menu";
     menu.setAttribute("role", "menu");
-    const button = document.createElement("button");
-    button.textContent = "Rename";
-    button.setAttribute("role", "menuitem");
-    button.addEventListener("click", event => { event.stopPropagation(); close(true); rename(id); });
-    menu.append(button);
+    for (const action of [{ label: "Rename", run: rename }, ...extraActions(id)]) {
+      const button = document.createElement("button");
+      button.textContent = action.label;
+      button.setAttribute("role", "menuitem");
+      button.disabled = action.disabled ?? false;
+      button.addEventListener("click", event => { event.stopPropagation(); close(true); action.run(id); });
+      menu.append(button);
+    }
+    menu.addEventListener("keydown", event => {
+      const buttons = Array.from(menu!.querySelectorAll<HTMLButtonElement>("button:not(:disabled)"));
+      const current = buttons.indexOf(document.activeElement as HTMLButtonElement);
+      const index = event.key === "ArrowDown" ? (current + 1) % buttons.length
+        : event.key === "ArrowUp" ? (current + buttons.length - 1) % buttons.length
+        : event.key === "Home" ? 0 : event.key === "End" ? buttons.length - 1 : undefined;
+      if (index !== undefined) { event.preventDefault(); buttons[index]?.focus(); }
+      else if (event.key === "Tab") close(true);
+    });
     document.body.append(menu);
     menu.style.left = `${Math.max(0, Math.min(x, window.innerWidth - menu.offsetWidth))}px`;
     menu.style.top = `${Math.max(0, Math.min(y, window.innerHeight - menu.offsetHeight))}px`;
-    button.focus();
+    menu.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus();
   };
   root.addEventListener("contextmenu", event => {
     const target = (event.target as HTMLElement).closest<HTMLElement>("[data-chat-context]");

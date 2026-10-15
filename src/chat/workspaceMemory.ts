@@ -167,18 +167,19 @@ export class WorkspaceMemory {
     if (epoch !== this.epoch) return;
     for (const rec of records) if (rec.messageCount && !rec.memory?.manual && rec.memory?.enabled !== false) this.enqueue(rec.id);
   }
-  async edit(id: string, text: string): Promise<void> {
-    const storage = this.getStorage();
-    if (!storage) return;
+  async edit(id: string, text: string, storage = this.getStorage()): Promise<void> {
+    if (!storage || storage !== this.getStorage()) throw new Error("This memory is not in the active workspace.");
     const settings = readSettings();
     if (typeof text !== "string" || text.length > 20000) throw new Error("Memory text is too long.");
     text = redactMemorySecrets(text.trim());
     if (!text || await countTokens(settings.endpoint, text, settings.model) > MEMORY_SUMMARY_TOKENS) {
       throw new Error(`Enter a non-empty memory of at most ${MEMORY_SUMMARY_TOKENS} tokens.`);
     }
-    await storage.updateMemory(id, rec => ({
-      text, sourceRevision: transcriptRevision(rec), generatedAt: Date.now(), enabled: rec.memory?.enabled ?? false, manual: true
-    }));
+    const saved = await storage.updateMemory(id, rec => {
+      if (storage !== this.getStorage()) throw new Error("The active workspace changed. The memory was not saved.");
+      return { text, sourceRevision: transcriptRevision(rec), generatedAt: Date.now(), enabled: rec.memory?.enabled ?? false, manual: true };
+    });
+    if (!saved) throw new Error("The chat is no longer available. The memory was not saved.");
     this.changed();
   }
   async setEnabled(id: string, enabled: boolean): Promise<void> {

@@ -7,7 +7,6 @@ import { installTooltips } from "../../tooltips.js";
 import type { MemoryListItem } from "../../../chat/memory.js";
 import { installChatContextMenu } from "../../chatContextMenu.js";
 import { memoryIcon, searchIcon, trashIcon, plusIcon, settingsIcon, historyIcon } from "../../icons.js";
-import { renderMemoryDate } from "../../memoryDate.js";
 import { DEFAULT_MEMORY_MAX_COUNT, MAX_MEMORY_COUNT } from "../../../chat/memoryLimits.js";
 import { isReasoningBudget } from "../../../chat/reasoningBudget.js";
 import type { ExtToSide, SideToExt } from "../../messaging.js";
@@ -39,8 +38,6 @@ const state: SideViewState = {
 };
 
 let endpointRequestSequence = 0;
-const memoryDrafts = new Map<string, string>();
-const expandedMemories = new Set<string>();
 let expandedSettings = new Set<SettingsSection>();
 
 const root = document.getElementById("app")!;
@@ -53,10 +50,6 @@ function send(msg: SideToExt): void {
 
 function render(preserveDrafts = true): void {
   const restoreFocus = preserveFormFocus(root, preserveDrafts);
-  const active = document.activeElement as HTMLTextAreaElement | null;
-  const editingMemory = active?.dataset.memoryEditor;
-  const editingPanel = active?.closest<HTMLElement>("[data-memory-details]")?.id;
-  const selection = editingMemory ? [active!.selectionStart, active!.selectionEnd] : undefined;
   const keepSearchFocus = (document.activeElement as HTMLElement | null)?.id === "chatSearch";
   root.innerHTML = `
     <div class="tabs">
@@ -70,11 +63,6 @@ function render(preserveDrafts = true): void {
   `;
   bind();
   restoreFocus();
-  if (editingMemory && selection) {
-    const editor = root.querySelector(`#${editingPanel} [data-memory-editor="${editingMemory}"]`) as HTMLTextAreaElement | null;
-    editor?.focus();
-    editor?.setSelectionRange(selection[0], selection[1]);
-  }
   if (keepSearchFocus) {
     const input = root.querySelector("#chatSearch") as HTMLInputElement | null;
     input?.focus();
@@ -136,7 +124,7 @@ function renderChats(): string {
       ${state.openTabs.some(tab => tab.open !== false) ? `
         <section class="panel-section">
           <h3>Open</h3>
-          <ul class="chat-list">${state.openTabs.filter(tab => tab.open !== false).map(t => renderChatEntry(t, memories.get(t.id), "open")).join("")}</ul>
+          <ul class="chat-list">${state.openTabs.filter(tab => tab.open !== false).map(t => renderChatEntry(t, memories.get(t.id))).join("")}</ul>
         </section>
       ` : ""}
 
@@ -151,7 +139,7 @@ function renderChats(): string {
       <section class="panel-section">
         <h3>Chats</h3>
         ${chats.length === 0 ? `<p class="empty-state">${query ? "No matching chats." : "No chats yet."}</p>` :
-          `<ul class="chat-list">${chats.map(c => renderChatEntry(c, memories.get(c.id), "recent")).join("")}</ul>`}
+          `<ul class="chat-list">${chats.map(c => renderChatEntry(c, memories.get(c.id))).join("")}</ul>`}
         <p class="setting-help">Memories update after Act and Review responses when Auto-generate memories is enabled. Edited memories are preserved.</p>
         ${state.memoryError ? `<p class="memory-error" role="alert">${esc(state.memoryError)}</p>` : ""}
         ${busy ? '<button id="cancelMemories" class="action-btn wide-button">Cancel generation</button>' : ""}
@@ -162,36 +150,25 @@ function renderChats(): string {
   `;
 }
 
-function renderChatEntry(chat: { id: string; title: string; updatedAt?: number }, memory: MemoryListItem | undefined, group: string): string {
-  const panelId = `memory-${group}-${chat.id}`;
+function renderChatEntry(chat: { id: string; title: string; updatedAt?: number }, memory: MemoryListItem | undefined): string {
   const running = state.openTabs.some(tab => tab.id === chat.id && tab.running);
   const memoryEnabled = state.settings.memoryEnabled === true || state.settings.memoryLoadOnStart === true;
   const active = memoryEnabled && memory?.usable === true;
+  const generating = memory?.status === "generating";
+  const enabled = memory?.enabled === true;
+  const action = enabled ? "Deactivate" : "Activate";
   const status = !memoryEnabled ? "off in settings" : memory?.enabled === false ? "excluded" : active ? "active" : memory?.status ?? "missing";
+  const detail = generating ? "generating" : memory?.status === "queued" ? "queued" : status;
+  const tip = `${action} memory · ${detail}${memory?.error ? ` · ${memory.error}` : ""}`;
   return `<li class="chat-entry">
     <div class="chat-row" data-open="${esc(chat.id)}" data-chat-context="${esc(chat.id)}" tabindex="0" role="button">
       <span class="chat-running-dot${running ? " running" : ""}" aria-label="${running ? "Running" : "Idle"}"></span>
       <span class="chat-row-title">${esc(chat.title)}</span>
       ${chat.updatedAt !== undefined ? `<time>${ago(chat.updatedAt)}</time>` : ""}
-      <button class="icon-btn icon-btn-compact memory-reveal${active ? " memory-usable" : ""}" data-memory-reveal="${esc(panelId)}" data-tip="Memory ${esc(status)}" aria-label="Memory for ${esc(chat.title)} (${esc(status)})" aria-expanded="${expandedMemories.has(panelId)}" aria-controls="${esc(panelId)}">${memoryIcon()}</button>
+      <button class="icon-btn icon-btn-compact memory-toggle${active ? " memory-usable" : ""}${generating ? " memory-generating" : ""}" data-memory-toggle="${esc(chat.id)}" data-tip="${esc(tip)}" aria-label="${action} memory for ${esc(chat.title)} (${esc(detail)})" aria-pressed="${enabled}" aria-busy="${generating}">${memoryIcon()}</button>
       <button class="icon-btn icon-btn-compact delete" data-delete="${esc(chat.id)}" data-tip="Delete" aria-label="Delete chat">${trashIcon()}</button>
     </div>
-    ${renderChatMemory(memory ?? { sourceId: chat.id, title: chat.title, text: "", sourceRevision: "", generatedAt: 0, enabled: false, usable: false, status: "missing" }, panelId)}
   </li>`;
-}
-
-function renderChatMemory(memory: MemoryListItem, panelId: string): string {
-  return `<div class="memory-entry" id="${esc(panelId)}" data-memory-details="${esc(memory.sourceId)}" ${expandedMemories.has(panelId) ? "" : "hidden"}>
-        <p class="memory-status">Memory · ${memory.enabled ? esc(memory.status) : `excluded · ${esc(memory.status)}`}</p>
-        ${memory.generatedAt ? `<p class="setting-help">Updated ${renderMemoryDate(memory.generatedAt)}</p>` : ""}
-        ${memory.error ? `<p class="memory-error">${esc(memory.error)}</p>` : ""}
-        <textarea class="memory-editor" data-memory-editor="${esc(memory.sourceId)}" aria-label="Memory for ${esc(memory.title)}" placeholder="No summary yet">${esc(memoryDrafts.get(memory.sourceId) ?? memory.text)}</textarea>
-        <div class="memory-actions">
-          <button class="action-btn" data-memory-save="${esc(memory.sourceId)}">Save edit</button>
-          <button class="action-btn" data-memory-toggle="${esc(memory.sourceId)}" aria-label="${memory.enabled ? "Deactivate memory for" : "Activate memory for"} ${esc(memory.title)}">${memory.enabled ? "Deactivate" : "Activate"}</button>
-          <button class="action-btn" data-memory-regenerate="${esc(memory.sourceId)}">Regenerate</button>
-        </div>
-      </div>`;
 }
 
 function updateSettingsSections(): void {
@@ -317,28 +294,11 @@ function bind(): void {
   bindSetting("memoryMaxCount", "change", v => Math.floor(Math.max(1, Math.min(MAX_MEMORY_COUNT, Number(v) || DEFAULT_MEMORY_MAX_COUNT))));
   root.querySelector("#summarizeMemories")?.addEventListener("click", () => send({ type: "summarizeExistingChats" }));
   root.querySelector("#cancelMemories")?.addEventListener("click", () => send({ type: "cancelMemoryGeneration" }));
-  root.querySelectorAll<HTMLButtonElement>("[data-memory-reveal]").forEach(el => el.addEventListener("click", e => {
-    e.stopPropagation();
-    const id = el.dataset.memoryReveal!;
-    const expanded = !expandedMemories.has(id);
-    if (expanded) expandedMemories.add(id); else expandedMemories.delete(id);
-    el.setAttribute("aria-expanded", String(expanded));
-    document.getElementById(id)!.hidden = !expanded;
-  }));
-  root.querySelectorAll<HTMLTextAreaElement>("[data-memory-editor]").forEach(el => el.addEventListener("input", () => memoryDrafts.set(el.dataset.memoryEditor!, el.value)));
-  root.querySelectorAll<HTMLElement>("[data-memory-save]").forEach(el => el.addEventListener("click", () => {
-    const id = el.dataset.memorySave!;
-    state.memoryError = undefined;
-    send({ type: "editMemory", id, text: memoryDrafts.get(id) ?? state.memories.find(m => m.sourceId === id)?.text ?? "" });
-  }));
-  root.querySelectorAll<HTMLElement>("[data-memory-toggle]").forEach(el => el.addEventListener("click", () => {
+  root.querySelectorAll<HTMLButtonElement>("[data-memory-toggle]").forEach(el => el.addEventListener("click", event => {
+    event.stopPropagation();
     const id = el.dataset.memoryToggle!;
+    state.memoryError = undefined;
     send({ type: "setMemoryEnabled", id, enabled: !(state.memories.find(m => m.sourceId === id)?.enabled ?? false) });
-  }));
-  root.querySelectorAll<HTMLElement>("[data-memory-regenerate]").forEach(el => el.addEventListener("click", () => {
-    const id = el.dataset.memoryRegenerate!;
-    memoryDrafts.delete(id);
-    send({ type: "regenerateMemory", id });
   }));
   bindSetting("showThinking", "change", (_v, el) => (el as HTMLInputElement).checked);
   bindSetting("steerWithEnter", "change", (_v, el) => (el as HTMLInputElement).checked);
@@ -407,17 +367,6 @@ window.addEventListener("message", ev => {
       expandedSettings = new Set(msg.expanded);
       updateSettingsSections();
       break;
-    case "revealMemory": {
-      state.tab = "chats";
-      state.search = "";
-      const panelId = `memory-recent-${msg.id}`;
-      expandedMemories.add(panelId);
-      render();
-      const button = root.querySelector<HTMLButtonElement>(`[data-memory-reveal="${panelId}"]`);
-      button?.scrollIntoView({ block: "center" });
-      button?.focus({ preventScroll: true });
-      break;
-    }
     case "settingSaved":
       if (["memoryEnabled", "memoryLoadOnStart", "autoGenerateMemories", "memoryMaxCount"].includes(msg.key)) {
         state.memorySettingError = msg.ok ? undefined : msg.error;
@@ -469,7 +418,17 @@ window.addEventListener("message", ev => {
 send({ type: "ready" });
 render();
 
-installChatContextMenu(root, id => send({ type: "renameChat", id }));
+installChatContextMenu(root, id => send({ type: "renameChat", id }), id => {
+  const memory = state.memories.find(item => item.sourceId === id);
+  return [
+    { label: "Edit memory", run: id => send({ type: "openMemory", id, readonly: false }) },
+    { label: "View memory", run: id => send({ type: "openMemory", id, readonly: true }), disabled: !memory?.text.trim() },
+    { label: "Regenerate memory", run: id => {
+      state.memoryError = undefined;
+      send({ type: "regenerateMemory", id });
+    }, disabled: memory?.status === "queued" || memory?.status === "generating" }
+  ];
+});
 
 root.addEventListener("keydown", event => {
   const row = (event.target as HTMLElement).closest<HTMLElement>(".chat-row");

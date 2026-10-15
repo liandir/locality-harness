@@ -50,7 +50,7 @@ export type SideToExt =
   | { type: "restoreDefaultGeneratedPrompts" }
   | { type: "resetAllDefaults" }
   | { type: "listMemories" }
-  | { type: "editMemory"; id: string; text: string }
+  | { type: "openMemory"; id: string; readonly: boolean }
   | { type: "setMemoryEnabled"; id: string; enabled: boolean }
   | { type: "regenerateMemory"; id: string }
   | { type: "summarizeExistingChats" }
@@ -58,7 +58,6 @@ export type SideToExt =
 
 export type ExtToSide =
   | { type: "settingsSections"; expanded: SettingsSection[] }
-  | { type: "revealMemory"; id: string }
   | { type: "memories"; memories: MemoryListItem[] }
   | { type: "memoryError"; error: string }
   | { type: "settings"; settings: Record<string, unknown>; reasoningEffort: ReasoningEffort; resetDrafts?: boolean }
