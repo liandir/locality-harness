@@ -93,11 +93,17 @@ pre, textarea { scrollbar-gutter: stable; }
 .tab-btn span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tab-btn:is(:hover, :focus-visible) { background: var(--surface-fill-hover); color: var(--vscode-foreground); }
 .tab-btn.active { background: var(--surface-fill-strong); color: var(--vscode-foreground); }
-.chat-context-menu { position: fixed; z-index: 10000; min-width: 130px; padding: 4px; border-radius: var(--control-radius); background: var(--vscode-menu-background, var(--vscode-editor-background)); color: var(--vscode-menu-foreground, var(--vscode-foreground)); box-shadow: 0 4px 16px var(--vscode-widget-shadow); --button-hover-fill: var(--surface-fill-strong); }
-.chat-context-menu button { display: flex; align-items: center; gap: 8px; width: 100%; padding: 4px 8px; border: 1px solid transparent; border-radius: var(--control-radius); background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; outline: none; }
-.chat-context-icon { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 16px; height: 16px; }
-.chat-context-separator { margin: 4px 8px; border-top: 1px solid var(--surface-stroke); }
-.chat-context-menu button:disabled { cursor: default; }
+/* Mode selectors and chat context menus share all appearance and row geometry.
+   Their component rules only position the popup. Actions use the shared quiet-btn
+   interaction/disabled rules, including destructive foregrounds and fills. */
+.context-menu { display: flex; flex-direction: column; gap: 0; min-width: 130px; padding: 4px; border: 1px solid transparent; border-radius: var(--control-radius); background: var(--vscode-menu-background, var(--vscode-editor-background)); color: var(--vscode-menu-foreground, var(--vscode-foreground)); font-size: var(--vscode-font-size); box-shadow: 0 4px 16px var(--vscode-widget-shadow); --button-foreground: var(--vscode-menu-foreground, var(--vscode-foreground)); --button-hover-foreground: var(--button-foreground); --button-hover-fill: var(--surface-fill-strong); }
+.context-menu[hidden] { display: none; }
+.context-menu-item { display: flex; align-items: center; gap: 7px; width: 100%; min-height: 22px; padding: 2px 8px; text-align: left; }
+.context-menu-item[aria-checked=true] { background: var(--surface-fill); }
+.context-menu-icon { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 14px; width: 14px; height: 14px; }
+.context-menu-icon svg { display: block; width: 100%; height: 100%; }
+.context-menu-separator { margin: 4px 8px; border-top: 1px solid var(--surface-stroke); }
+.chat-context-menu { position: fixed; z-index: 10000; }
 .chat-running-dot { display: inline-block; flex: 0 0 6px; width: 6px; height: 6px; border-radius: 50%; background: transparent; }
 .chat-running-dot.running { background: var(--vscode-textLink-foreground); }
 

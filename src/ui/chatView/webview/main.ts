@@ -715,10 +715,10 @@ function mountShell(): void {
           <div class="composer-toolbar">
             <span class="mode-selector chat-mode-group">
               <button id="chatMode" class="icon-btn mode-icon-toggle" type="button" aria-label="Mode (Act)" aria-haspopup="menu" aria-controls="chatModeMenu" aria-expanded="false" data-tip="Mode (Act)"><span id="chatModeIcon">${pawnIcon()}</span></button>
-              <span id="chatModeMenu" class="mode-select-menu chat-mode-menu" role="menu" hidden>
-                <button type="button" role="menuitemradio" data-chat-mode="act"><span class="mode-select-check"></span><span class="mode-select-option-icon">${pawnIcon()}</span><span>Act mode</span></button>
-                <button type="button" role="menuitemradio" data-chat-mode="plan"><span class="mode-select-check"></span><span class="mode-select-option-icon">${scrollIcon()}</span><span>Plan mode</span></button>
-                <button type="button" role="menuitemradio" data-chat-mode="review"><span class="mode-select-check"></span><span class="mode-select-option-icon">${searchIcon()}</span><span>Review mode</span></button>
+              <span id="chatModeMenu" class="context-menu mode-select-menu" role="menu" hidden>
+                <button class="context-menu-item quiet-btn" type="button" role="menuitemradio" data-chat-mode="act"><span class="context-menu-icon mode-select-check"></span><span class="context-menu-icon">${pawnIcon()}</span><span>Act mode</span></button>
+                <button class="context-menu-item quiet-btn" type="button" role="menuitemradio" data-chat-mode="plan"><span class="context-menu-icon mode-select-check"></span><span class="context-menu-icon">${scrollIcon()}</span><span>Plan mode</span></button>
+                <button class="context-menu-item quiet-btn" type="button" role="menuitemradio" data-chat-mode="review"><span class="context-menu-icon mode-select-check"></span><span class="context-menu-icon">${searchIcon()}</span><span>Review mode</span></button>
               </span>
             </span>
             <button id="attachFiles" class="icon-btn composer-attach" type="button" aria-label="Attach files" data-tip="Attach files">${paperclipIcon()}</button>
@@ -2262,7 +2262,6 @@ function updateChatModeControl(): void {
 }
 
 function updateModeMenuOption(option: HTMLElement, selected: boolean): void {
-  option.classList.toggle("selected", selected);
   option.setAttribute("aria-checked", String(selected));
   const check = option.querySelector(".mode-select-check") as HTMLElement | null;
   if (!check) return;

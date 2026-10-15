@@ -709,45 +709,14 @@ body.image-preview-open .chat-body { overflow: hidden; }
 .mode-icon-toggle span { display: inline-flex; align-items: center; justify-content: center; }
 /* Optically align the mode glyph with the adjacent attachment icon. */
 #chatModeIcon { transform: translateY(1px); }
-.mode-icon-toggle svg, .mode-select-option-icon svg, .thinking-icon svg, .work-type-icon svg { display: block; }
+.mode-icon-toggle svg, .thinking-icon svg, .work-type-icon svg { display: block; }
 .mode-select-menu {
-  font-size: var(--vscode-font-size);
   position: absolute;
   left: 0;
   bottom: calc(100% + 8px);
   width: min(180px, calc(100vw - 24px));
-  display: flex;
-  flex-direction: column;
-  gap: 0;
-  padding: 4px;
-  border-radius: var(--control-radius);
-  background: var(--vscode-dropdown-background, var(--vscode-editorWidget-background, var(--vscode-sideBar-background)));
-  color: var(--vscode-dropdown-foreground, var(--vscode-foreground));
-  border: 1px solid transparent;
-  box-shadow: 0 6px 18px var(--vscode-widget-shadow, rgba(0,0,0,0.26));
   z-index: 20;
 }
-.mode-select-menu[hidden] { display: none; }
-.mode-select-menu button {
-  width: 100%;
-  min-height: 22px;
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  padding: 2px 8px;
-  background: transparent;
-  color: var(--vscode-dropdown-foreground, var(--vscode-foreground));
-  border: 1px solid transparent;
-  border-radius: var(--control-radius);
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-  outline: none;
-}
-.mode-select-menu button:hover, .mode-select-menu button:focus-visible, .mode-select-menu button.selected { background: var(--surface-fill); border-color: transparent; }
-.mode-select-menu button:hover, .mode-select-menu button:focus-visible { background: var(--surface-fill-strong); }
-.mode-select-check { width: 14px; height: 14px; flex: 0 0 14px; display: inline-flex; align-items: center; justify-content: center; }
-.mode-select-option-icon { width: 14px; height: 14px; flex: 0 0 14px; display: inline-flex; align-items: center; justify-content: center; }
 .compact-group { position: relative; flex: 1; display: inline-flex; align-items: center; justify-content: flex-start; gap: 8px; min-width: 0; }
 .compact-hint { flex: 0 1 auto; text-align: left; }
 .compact-hint.active { max-width: 100%; opacity: 0.86; }

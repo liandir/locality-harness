@@ -40,19 +40,19 @@ export function installChatContextMenu(
     const id = target.dataset.chatContext;
     if (!id) return;
     menu = document.createElement("div");
-    menu.className = "chat-context-menu";
+    menu.className = "context-menu chat-context-menu";
     menu.setAttribute("role", "menu");
     for (const action of actionsForChat(id)) {
       if (action.separatorBefore) {
         const separator = document.createElement("div");
-        separator.className = "chat-context-separator";
+        separator.className = "context-menu-separator";
         separator.setAttribute("role", "separator");
         menu.append(separator);
       }
       const button = document.createElement("button");
-      button.className = action.destructive ? "quiet-btn delete" : "quiet-btn";
+      button.className = `context-menu-item quiet-btn${action.destructive ? " delete" : ""}`;
       const icon = document.createElement("span");
-      icon.className = "chat-context-icon";
+      icon.className = "context-menu-icon";
       icon.setAttribute("aria-hidden", "true");
       icon.innerHTML = action.icon();
       const label = document.createElement("span");
