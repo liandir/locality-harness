@@ -8,16 +8,16 @@ import {
 } from "./icons.js";
 import { installTooltips } from "../../tooltips.js";
 import { captureHistoryView, restoreHistoryView, type HistoryViewState } from "../historyViewState.js";
-import type { MemoryCreation, MemorySnapshot } from "../../../chat/memory.js";
+import type { MemoryCreation } from "../../../chat/memory.js";
 import { chatContextActions, installChatContextMenu } from "../../chatContextMenu.js";
 import type { ChatTab, ChatMenuMemory } from "../../messaging.js";
-import type { ChatToolProcess } from "../../../chat/types.js";
+import type { ChatMessage, ChatToolProcess } from "../../../chat/types.js";
 import type { ChatTurnPreparation } from "../../../chat/events.js";
 import { chatFeature } from "../../../build/chat.js";
 import { chevronIcon, memoryIcon, pawnIcon, scrollIcon, searchIcon, trashIcon, plusIcon, settingsIcon, historyIcon, pencilIcon, readFileIcon } from "../../icons.js";
 import { chatModeIcon, chatModeLabel, renderMessageMode } from "./messageMode.js";
 import { renderMessageDate } from "../../memoryDate.js";
-import { renderMemoryContents, renderMemoryCreation, renderMemoryResult } from "./memoryResults.js";
+import { renderMemoryCreation, renderMemoryResult } from "./memoryResults.js";
 import { CARD_SEPARATOR_HTML, renderToolOutputSurface } from "./toolOutputSurface.js";
 import { parseQuestionPayload, renderQuestionResult } from "./questionResult.js";
 import { copyableAssistantText } from "./messageCopy.js";
@@ -139,7 +139,6 @@ function replaceMarkdownLinkLabel(tokens: Parameters<RenderRule>[0], openIndex: 
 }
 
 interface ToolCard extends ChatToolProcess {
-  initialMemoryRecall?: boolean;
   toolId: string;
   toolName: string;
   argsJson: string;
@@ -244,7 +243,7 @@ interface State {
   // kept here so it survives composer re-renders like the main draft does.
   questionDraft: string;
   chatTitle: string;
-  memories: MemorySnapshot[];
+  initialMemoryParts: Extract<MessagePart, { kind: "tool" }>[];
   memoryCreations: MemoryCreation[];
   hasChat: boolean;
   autoScroll: boolean;
@@ -278,19 +277,15 @@ interface ChatViewState {
   scrollTop: number;
   autoScroll: boolean;
   history: HistoryViewState;
-  memoriesExpanded: boolean;
-  expandedMemorySources: Set<string>;
   expandedMemoryCreations: Set<string>;
 }
 const viewDrafts = new Map<string, ChatViewState>();
 
 function saveChatView(): void {
   if (!activeChatId) return;
-  const memories = memoryDisclosure;
   viewDrafts.set(activeChatId, {
     question: state.questionDraft, scrollTop: chatBody()?.scrollTop ?? 0, autoScroll: state.autoScroll,
-    history: captureHistoryView(state.messages), memoriesExpanded: memories?.open ?? false,
-    expandedMemorySources: new Set(Array.from(memories?.querySelectorAll<HTMLElement>("[data-memory-entry][open]") ?? [], entry => entry.dataset.memoryEntry!)),
+    history: captureHistoryView(state.messages),
     expandedMemoryCreations: new Set(Array.from(root.querySelectorAll<HTMLElement>("[data-memory-creation][open]"), entry => entry.dataset.memoryCreation!))
   });
 }
@@ -316,7 +311,7 @@ const state: State = {
   supportsVision: false,
   questionDraft: "",
   chatTitle: "Chat",
-  memories: [],
+  initialMemoryParts: [],
   memoryCreations: [],
   hasChat: false,
   autoScroll: true,
@@ -337,10 +332,6 @@ const state: State = {
 };
 
 const root = document.getElementById("app")!;
-// Retain disclosure state while a collapsed work session detaches its contents.
-const memoryDisclosure = document.createElement("details");
-memoryDisclosure.id = "memoryDisclosure";
-memoryDisclosure.className = "tool-card memory-disclosure";
 const scrollFollow = new ScrollFollow(state);
 let mounted = false;
 let renderQueued = false;
@@ -564,24 +555,37 @@ function placeAfter(parent: HTMLElement, el: HTMLElement, anchor: HTMLElement | 
   parent.insertBefore(el, anchor ? anchor.nextSibling : parent.firstChild);
 }
 
-function updateMemoryDisclosure(): void {
-  const details = memoryDisclosure;
-  details.hidden = !state.memories.length || !state.messages.some(message => message.role === "user");
-  const entries = state.memories.map(memory =>
-    `<details class="tool-card memory-source output-surface-tool" data-memory-entry="${escapeHtml(memory.sourceId)}">
-      <summary class="tool-head disclosure-trigger"><span class="tool-icon" aria-hidden="true">${memoryIcon()}</span><span class="tool-name">Recalled</span><span class="tool-label"><button type="button" class="tool-path-link tool-label-text memory-source-link" data-open-initial-memory="${escapeHtml(memory.sourceId)}">${escapeHtml(memory.title)}</button></span>${chevronIcon()}</summary>
-      <div class="tool-expanded">${renderToolOutputSurface(renderMemoryContents(memory.text, memory.generatedAt, md), false)}</div>
-    </details>`
-  ).join("");
-  const signature = entries;
-  if (details.dataset.signature === signature) return;
-  const expanded = new Set(Array.from(details.querySelectorAll<HTMLDetailsElement>("[data-memory-entry][open]"), entry => entry.dataset.memoryEntry));
-  details.dataset.signature = signature;
-  details.innerHTML = `<summary class="tool-head work-head disclosure-trigger"><span class="tool-icon" aria-hidden="true">${memoryIcon()}</span><span class="work-title">Recalled memories</span>${chevronIcon()}</summary><div class="work-body">${entries}</div>`;
-  details.querySelectorAll<HTMLDetailsElement>("[data-memory-entry]").forEach(entry => { entry.open = expanded.has(entry.dataset.memoryEntry); });
+/** Use the same cards, timeline parts, links, and disclosure state as streamed tools. */
+function setInitialMemoryCalls(calls: ChatMessage[]): void {
+  const previous = new Map(state.initialMemoryParts.map(part => [part.card.toolId, part.card]));
+  for (const message of state.messages) {
+    message.toolCards = message.toolCards.filter(card => !previous.has(card.toolId));
+    message.parts = message.parts.filter(part => part.kind !== "tool" || !previous.has(part.card.toolId));
+  }
+  state.initialMemoryParts = calls.flatMap(call => {
+    const tool = call.toolCall;
+    if (call.role !== "tool" || !tool?.id) return [];
+    const card: ToolCard = {
+      toolId: tool.id, toolName: tool.name, argsJson: tool.argsJson, category: "read",
+      status: restoredToolStatus(tool.status, call.content, false), resultPreview: call.content,
+      expanded: previous.get(tool.id)?.expanded ?? false
+    };
+    return [{ id: tool.id, kind: "tool", card, startedAt: call.ts }];
+  });
+}
+
+function attachInitialMemoryCalls(): void {
+  if (!state.initialMemoryParts.length) return;
+  const firstUserIndex = state.messages.findIndex(message => message.role === "user");
+  if (firstUserIndex < 0) return;
+  const response = state.messages[firstUserIndex + 1];
+  if (response?.role !== "assistant" || response.parts.includes(state.initialMemoryParts[0])) return;
+  response.parts.unshift(...state.initialMemoryParts);
+  response.toolCards.unshift(...state.initialMemoryParts.map(part => part.card));
 }
 
 function render(immediate = true): void {
+  attachInitialMemoryCalls();
   if (restoringChat) return;
   if (!immediate) {
     scheduleRender();
@@ -601,7 +605,6 @@ function render(immediate = true): void {
   updateComposer();
   updateContextPill();
   updateHeaderTitle();
-  updateMemoryDisclosure();
   syncToolHeaderScrollbars();
   syncShimmerAnimations();
   if (body) {
@@ -1160,22 +1163,11 @@ function fileChangeKey(index: number): string {
 type ResolvedUnit = WorkTimelineUnit<MessagePart>;
 
 function resolveRenderUnits(m: Message): ResolvedUnit[] {
-  const initialRecall: MessagePart[] = hasInitialMemoryRecall(m) ? [{
-    id: `${m.id}:initial-memories`, kind: "tool", startedAt: m.workStartedAt,
-    card: { toolId: `${m.id}:initial-memories`, toolName: "recall_memory", argsJson: "{}",
-      category: "read", status: "executed", expanded: false, initialMemoryRecall: true }
-  }] : [];
-  return resolveWorkTimeline({ ...m, parts: [...initialRecall, ...m.parts] }, {
+  return resolveWorkTimeline(m, {
     showThinking: state.showThinking,
     serverPending: state.serverPending,
     liveStatus: visibleServerPendingLabel
   });
-}
-
-function hasInitialMemoryRecall(message: Message): boolean {
-  if (!state.memories.length || message.role !== "assistant") return false;
-  const firstUserIndex = state.messages.findIndex(item => item.role === "user");
-  return firstUserIndex >= 0 && state.messages.slice(firstUserIndex + 1).find(item => item.role === "assistant") === message;
 }
 
 function reconcileAssistantParts(el: HTMLElement, m: Message): void {
@@ -1263,7 +1255,7 @@ function ensureWorkElement(parent: HTMLElement, groupId: string): HTMLElement {
 }
 
 function messageUsesTimeline(m: Message): boolean {
-  return hasInitialMemoryRecall(m) || m.parts.some(part => isWorkPart(part)
+  return m.parts.some(part => isWorkPart(part)
     && (part.kind !== "thought" || thinkingPresentation(state.showThinking, part.live).visible));
 }
 
@@ -1704,10 +1696,6 @@ async function copyTextToClipboard(text: string): Promise<void> {
 }
 
 function renderToolPart(el: HTMLElement, tc: ToolCard): void {
-  if (tc.initialMemoryRecall) {
-    placeAfter(el, memoryDisclosure, null);
-    return;
-  }
   let card = directChild(el, "tool-card");
   if (!card) {
     el.textContent = "";
@@ -2716,7 +2704,7 @@ function renderToolCardLabel(tc: ToolCard): string {
   }
   const label = toolCardLabel(tc);
   if (tc.toolName === "recall_memory" && tc.status === "executed" && label && typeof toolArgs(tc).id === "string") {
-    return `<button type="button" class="tool-path-link tool-label-text memory-source-link" data-open-recalled-memory="${escapeHtml(String(toolArgs(tc).id))}">${escapeHtml(label)}</button>`;
+    return `<button type="button" class="tool-path-link tool-label-text memory-source-link" data-open-memory-chat="${escapeHtml(String(toolArgs(tc).id))}">${escapeHtml(label)}</button>`;
   }
   return label ? `<span class="tool-label-text">${escapeHtml(label)}</span>` : "";
 }
@@ -3165,22 +3153,10 @@ function bindOnce(): void {
       render();
       return;
     }
-    const memorySource = target.closest("[data-open-memory]") as HTMLElement | null;
-    if (memorySource) {
+    const memoryChat = target.closest<HTMLElement>("[data-open-memory-chat]");
+    if (memoryChat) {
       e.preventDefault();
-      send({ type: "openMemory", id: memorySource.dataset.openMemory! });
-      return;
-    }
-    const recalledMemory = target.closest<HTMLElement>("[data-open-recalled-memory]");
-    if (recalledMemory) {
-      e.preventDefault();
-      send({ type: "openRecalledMemory", id: recalledMemory.dataset.openRecalledMemory! });
-      return;
-    }
-    const initialMemory = target.closest<HTMLElement>("[data-open-initial-memory]");
-    if (initialMemory) {
-      e.preventDefault();
-      send({ type: "openInitialMemory", sourceId: initialMemory.dataset.openInitialMemory! });
+      send({ type: "openMemoryChat", id: memoryChat.dataset.openMemoryChat! });
       return;
     }
     const recentChat = target.closest("[data-open-chat]") as HTMLElement | null;
@@ -3908,13 +3884,6 @@ function handleHostMessage(msg: ExtToChat): void {
       const input = root.querySelector<HTMLTextAreaElement>("#input");
       if (input) input.value = state.draft;
       render();
-      const memories = memoryDisclosure;
-      if (memories) {
-        memories.open = draft?.memoriesExpanded ?? false;
-        memories.querySelectorAll<HTMLDetailsElement>("[data-memory-entry]").forEach(entry => {
-          entry.open = draft?.expandedMemorySources.has(entry.dataset.memoryEntry!) ?? false;
-        });
-      }
       root.querySelectorAll<HTMLDetailsElement>("[data-memory-creation]").forEach(entry => {
         entry.open = draft?.expandedMemoryCreations.has(entry.dataset.memoryCreation!) ?? false;
       });
@@ -4005,10 +3974,10 @@ function handleHostMessage(msg: ExtToChat): void {
       state.supportsVision = msg.supported;
       render();
       break;
-    case "memoriesUsed": state.memories = msg.memories; render(); break;
+    case "initialMemoryCalls": setInitialMemoryCalls(msg.calls); render(); break;
     case "memoryCreations": state.memoryCreations = msg.creations; render(); break;
     case "chatLoaded": {
-      state.memories = [];
+      state.initialMemoryParts = [];
       state.memoryCreations = msg.record.memoryCreations ?? [];
       closeImagePreview(false);
       hiddenApprovalToolIds.clear();
@@ -4051,7 +4020,7 @@ function handleHostMessage(msg: ExtToChat): void {
       state.questionDraft = "";
       state.pendingPlanMessageTs = undefined;
       state.planning = false;
-      state.memories = [];
+      state.initialMemoryParts = [];
       state.memoryCreations = [];
       closeImagePreview(false);
       hiddenApprovalToolIds.clear();

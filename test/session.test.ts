@@ -4617,8 +4617,9 @@ describe("workspace memory tools", () => {
           yield call("search_memories", { query: "parser" });
         } else if (step === 2) {
           const result = JSON.parse(record.messages.filter(m => m.role === "tool").at(-1)!.content);
-          expect(events.filter(e => e.kind === "memoriesUsed").every(e => e.memories.length === 0)).toBe(true);
+          expect(events.filter(e => e.kind === "initialMemoryCalls").every(e => e.calls.length === 0)).toBe(true);
           expect(result.memories).toHaveLength(1);
+          expect(record.memorySources?.[result.memories[0].id]).toBe(source.id);
           expect(result.memories[0]).toMatchObject({ name: source.title, date: "2026-09-11T12:30Z" });
           expect(JSON.stringify(result)).not.toContain("LOCAL_CONTENT_SENTINEL");
           selected = result.memories[0];
@@ -4629,10 +4630,13 @@ describe("workspace memory tools", () => {
       });
       const session = new ChatSession({ storage, workspaceRoot: record.workspaceRoot, record, emit: e => events.push(e) });
       await session.refreshMemoryVisibility();
-      expect(events.at(-1)).toEqual({ kind: "memoriesUsed", memories: [] });
+      expect(events.at(-1)).toEqual({ kind: "initialMemoryCalls", calls: [] });
       await session.sendUserMessage("Explain the parser");
       const result = JSON.parse(record.messages.filter(m => m.role === "tool").at(-1)!.content);
       expect(result).toMatchObject({ name: source.title, contents: source.memory.text, date: "2026-09-11T12:30Z" });
+      const { initialMemoryContext } = await import("../src/chat/initialMemoryContext.js");
+      expect(initialMemoryContext(record.recalledMemories!, 1)[0].content)
+        .toBe(record.messages.filter(message => message.role === "tool").at(-1)!.content);
       for (const request of requests) {
         expect(JSON.stringify(request.messages.filter(m => m.role === "system"))).not.toContain("LOCAL_CONTENT_SENTINEL");
         expect(JSON.stringify(request)).not.toContain("OTHER_WORKSPACE_SENTINEL");
@@ -4641,13 +4645,14 @@ describe("workspace memory tools", () => {
       expect(result.id).not.toBe(outsideMatch.id);
       expect(events.filter(e => e.kind === "toolCallProposed")).toHaveLength(2);
       expect(events.filter(e => e.kind === "toolCallProposed").every(e => e.approvalRequired === false)).toBe(true);
-      // Explicit recalls remain at their tool calls, never in the initial-memory group.
-      expect(events.filter(e => e.kind === "memoriesUsed").every(e => e.memories.length === 0)).toBe(true);
+      // Explicit recalls remain in their original positions in the timeline.
+      expect(events.filter(e => e.kind === "initialMemoryCalls").every(e => e.calls.length === 0)).toBe(true);
       const saved = (await storage.load(record.id))!;
       expect(saved.recalledMemories).toHaveLength(1);
+      expect(saved.memorySources).toEqual({ [result.id]: source.id });
       const reopened = new ChatSession({ storage, workspaceRoot: saved.workspaceRoot, record: saved, emit: e => events.push(e) });
       await reopened.refreshMemoryVisibility();
-      expect(events.at(-1)).toEqual({ kind: "memoriesUsed", memories: [] });
+      expect(events.at(-1)).toEqual({ kind: "initialMemoryCalls", calls: [] });
     } finally { await fs.rm(dir, { recursive: true, force: true }); }
   });
 
@@ -4774,9 +4779,10 @@ describe("initial workspace memory loading", () => {
       const session = new ChatSession({ storage, workspaceRoot: record.workspaceRoot, record, emit: event => events.push(event) });
       sessions.push(session);
       await session.sendUserMessage("USER_REQUEST parser");
-      const displayed = events.filter(event => event.kind === "memoriesUsed").at(-1)!.memories;
-      expect(displayed.map(memory => memory.text)).toEqual(["FIRST_MEMORY", "SECOND_MEMORY", "THIRD_MEMORY"]);
-      const payload = displayed.map(memory => ({ ...memoryMetadata(memory), contents: memory.text }));
+      const displayed = events.filter(event => event.kind === "initialMemoryCalls").at(-1)!.calls;
+      expect(displayed.map(call => JSON.parse(call.content).contents)).toEqual(["FIRST_MEMORY", "SECOND_MEMORY", "THIRD_MEMORY"]);
+      const payload = record.initialMemories!.map(memory => ({ ...memoryMetadata(memory), contents: memory.text }));
+      expect(displayed.map(call => JSON.parse(call.content))).toEqual(payload);
       const assertRequest = () => {
         const messages = requests.at(-1)!.messages;
         expect(messages.filter(message => message.role === "system")).toHaveLength(1);
@@ -4786,13 +4792,16 @@ describe("initial workspace memory loading", () => {
         expect(request.content).toBe("USER_REQUEST parser");
         const results = profile === "native" ? messages.slice(3, 6) : [messages[3], messages[5], messages[7]];
         expect(results.map(message => JSON.parse(profile === "native" ? message.content : message.content.slice(message.content.indexOf("\n") + 1))))
-          .toMatchObject(payload);
+          .toEqual(payload);
+        expect(results.map(message => profile === "native" ? message.content : message.content.slice(message.content.indexOf("\n") + 1)))
+          .toEqual(displayed.map(call => call.content));
         if (profile === "native") {
           const calls = messages[2].tool_calls!;
           expect(messages[2].content).toBe("");
           expect(calls.map(call => call.function.name)).toEqual(["recall_memory", "recall_memory", "recall_memory"]);
           expect(calls.map(call => JSON.parse(call.function.arguments))).toEqual(payload.map(({ name, id }) => ({ name, id })));
           expect(results.map(message => message.tool_call_id)).toEqual(calls.map(call => call.id));
+          expect(calls.map(call => call.id)).toEqual(displayed.map(call => call.toolCall!.id));
           expect(new Set(calls.map(call => call.id)).size).toBe(3);
         } else {
           expect(messages.slice(2, 8).map(message => message.role)).toEqual(["assistant", "user", "assistant", "user", "assistant", "user"]);
@@ -4804,18 +4813,18 @@ describe("initial workspace memory loading", () => {
       await storage.updateMemory(sources[1].id, current => ({ ...current.memory!, enabled: false }));
       await storage.updateMemory(sources[2].id, current => ({ ...current.memory!, text: "REPLACED_MEMORY", generatedAt: 9 }));
       session.refreshMemoryVisibility();
-      expect(events.at(-1)).toEqual({ kind: "memoriesUsed", memories: displayed });
+      expect(events.at(-1)).toEqual({ kind: "initialMemoryCalls", calls: displayed });
       await session.shutdown();
       const saved = (await storage.load(record.id))!;
       const reopened = new ChatSession({ storage, workspaceRoot: saved.workspaceRoot, record: saved, emit: event => events.push(event) });
       sessions.push(reopened);
       reopened.refreshMemoryVisibility();
-      expect(events.at(-1)).toEqual({ kind: "memoriesUsed", memories: displayed });
+      expect(events.at(-1)).toEqual({ kind: "initialMemoryCalls", calls: displayed });
       await reopened.sendUserMessage("FOLLOWUP_REQUEST");
       assertRequest();
       expect(requests.at(-1)!.messages.slice(-2).map(message => message.content)).toEqual(["FIRST_ANSWER", "FOLLOWUP_REQUEST"]);
       await reopened.editUserMessage(saved.messages.find(message => message.content === "FOLLOWUP_REQUEST")!.ts, "EDITED_FOLLOWUP");
-      expect(events.filter(event => event.kind === "memoriesUsed").at(-1)!.memories).toEqual(displayed);
+      expect(events.filter(event => event.kind === "initialMemoryCalls").at(-1)!.calls).toEqual(displayed);
       assertRequest();
     } finally {
       await Promise.all(sessions.map(session => session.shutdown()));
@@ -4868,7 +4877,7 @@ describe("initial workspace memory loading", () => {
       expect(requests.at(-1)?.tools?.some(tool => tool.function.name === "recall_memory")).not.toBe(true);
       expect(record.contextMessages?.[1].tokens).toBeGreaterThan(0);
       expect(mocks.tokenize.mock.calls.some(call => String(call[1]).includes("PARSER_MEMORY_SENTINEL"))).toBe(true);
-      expect(events).toContainEqual(expect.objectContaining({ kind: "memoriesUsed", memories: [expect.objectContaining({ sourceId: parser.id })] }));
+      expect(events).toContainEqual({ kind: "initialMemoryCalls", calls: [expect.objectContaining({ role: "tool", content: expect.stringContaining("PARSER_MEMORY_SENTINEL") })] });
       await session.shutdown();
 
       const saved = (await storage.load(record.id))!;
@@ -4876,7 +4885,7 @@ describe("initial workspace memory loading", () => {
       const reopened = new ChatSession({ storage, workspaceRoot: saved.workspaceRoot, record: saved, emit: e => events.push(e) });
       sessions.push(reopened);
       await reopened.refreshMemoryVisibility();
-      expect(events.at(-1)).toMatchObject({ kind: "memoriesUsed", memories: [{ sourceId: parser.id }] });
+      expect(events.at(-1)).toMatchObject({ kind: "initialMemoryCalls", calls: [{ role: "tool", content: expect.stringContaining("PARSER_MEMORY_SENTINEL") }] });
       await reopened.sendUserMessage("Colors");
       expect(JSON.stringify(requests.at(-1))).toContain("PARSER_MEMORY_SENTINEL");
       expect(JSON.stringify(requests.at(-1))).not.toContain("COLORS_MEMORY_SENTINEL");

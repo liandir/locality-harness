@@ -2,6 +2,7 @@ import { featureStyles } from "../../build/assets.js";
 import { fetchServerMetadata } from "../../llm/client.js";
 import { fileURLToPath } from "node:url";
 import { MAX_TEXT_ATTACHMENT_BYTES } from "../../chat/attachments.js";
+import { memoryMetadata } from "../../chat/memory.js";
 import type { WorkspaceMemory } from "../../chat/workspaceMemory.js";
 import * as vscode from "vscode";
 import * as path from "node:path";
@@ -154,6 +155,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       delete transcript.memory;
       delete transcript.recalledMemories;
       delete transcript.initialMemories;
+      delete transcript.memorySources;
       payload = {
         ...msg,
         contextMessageCount: contextMessages?.length ?? transcript.messages.length,
@@ -385,7 +387,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         if (event.kind === "turnPreparing" && !runtime.running) {
           const retained = new Map<string, UiEvent>();
           for (const old of runtime.events) {
-            if (["tokens", "memoriesUsed", "memoryCreations", "compactStatus"].includes(old.kind)) retained.set(old.kind, old);
+            if (["tokens", "initialMemoryCalls", "memoryCreations", "compactStatus"].includes(old.kind)) retained.set(old.kind, old);
           }
           runtime.events = [{ kind: "chatLoaded", record: structuredClone(session.getRecord()) }, ...retained.values()];
           runtime.running = true;
@@ -721,12 +723,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       }
       case "openChat": await this.openChatById(m.id); break;
       case "openMemory": await this.onOpenMemory?.(m.id, m.readonly ?? true); break;
-      case "openRecalledMemory": await this.openRecalledMemory(m.id); break;
-      case "openInitialMemory": {
-        const memory = this.session?.getRecord().initialMemories?.find(item => item.sourceId === m.sourceId);
-        if (memory) await this.openMemorySnapshot(memory.title, memory.text);
-        break;
-      }
+      case "openMemoryChat": await this.openMemoryChat(m.id); break;
       case "regenerateMemory":
         try {
           await this.memory?.regenerate(m.id);
@@ -1129,25 +1126,38 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  private async openRecalledMemory(id: string): Promise<void> {
-    // Resolve the versioned tool result in this chat, never a title match or
-    // the source's current memory, which may have been edited or regenerated.
-    for (const message of this.session?.getRecord().messages ?? []) {
-      if (message.role !== "tool" || message.toolCall?.name !== "recall_memory"
-          || message.toolCall.status === "failed" || message.toolCall.status === "rejected") continue;
-      let result: { id?: unknown; name?: unknown; contents?: unknown } | null;
-      try { result = JSON.parse(message.content); } catch { continue; }
-      if (result?.id !== id || typeof result.name !== "string" || typeof result.contents !== "string") continue;
-      await this.openMemorySnapshot(result.name, result.contents);
-      return;
+  private async openMemoryChat(id: string): Promise<void> {
+    const session = this.session;
+    const storage = this.getStorage();
+    const record = session?.getRecord();
+    if (!record || !storage) return;
+    const snapshot = [...record.initialMemories ?? [], ...record.recalledMemories ?? []]
+      .find(memory => memoryMetadata(memory).id === id);
+    let sourceId = snapshot?.sourceId ?? record.memorySources?.[id];
+    if (!sourceId) {
+      // Recompute older versioned IDs using the original result and each
+      // workspace source ID, so renamed/regenerated memories still navigate.
+      let recalled: { title: string; text: string; generatedAt: number; sourceRevision: string } | undefined;
+      for (const message of record.messages) {
+        if (message.role !== "tool" || message.toolCall?.name !== "recall_memory"
+            || message.toolCall.status === "failed" || message.toolCall.status === "rejected") continue;
+        try {
+          const result = JSON.parse(message.content);
+          if (result?.id === id && typeof result.name === "string" && typeof result.contents === "string") {
+            recalled = { title: result.name, text: result.contents, generatedAt: 0, sourceRevision: "" };
+            break;
+          }
+        } catch { /* Ignore incomplete historical output. */ }
+      }
+      const sources = await storage.metadata(true);
+      sourceId = sources.find(source => {
+        const memory = recalled ?? (source.memory && { title: source.title, ...source.memory });
+        return memory && memoryMetadata({ ...memory, sourceId: source.id }).id === id;
+      })?.id;
     }
-    void vscode.window.showErrorMessage("This recalled memory is no longer available in the chat.");
-  }
-
-  private async openMemorySnapshot(title: string, text: string): Promise<void> {
-    this.ensureReviewContentProvider();
-    const uri = this.snapshotReviewUri(`${title} — Memory (read-only).md`, text);
-    await vscode.commands.executeCommand("vscode.open", uri, { preview: false });
+    if (session !== this.session || storage !== this.getStorage()) return;
+    if (typeof sourceId === "string") await this.openChatById(sourceId);
+    else void vscode.window.showErrorMessage("The source chat for this memory is no longer available.");
   }
 
   private async openReviewDiff(filePath: string): Promise<void> {

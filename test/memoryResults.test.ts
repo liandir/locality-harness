@@ -50,7 +50,7 @@ describe("memory tool result rendering", () => {
     expect(html).not.toContain('"contents":');
   });
 
-  it("lists names and dates without IDs in search relevance order with truncation feedback", () => {
+  it("links names to source chats and lists dates in search relevance order with truncation feedback", () => {
     const html = renderMemoryResult("search_memories", JSON.stringify({
       memories: [{ ...metadata, name: "Zebra parser" }, { ...metadata, name: "Another parser", id: "def456" }],
       total: 5, truncated: true
@@ -58,8 +58,8 @@ describe("memory tool result rendering", () => {
     expect(html).toContain('<ul class="tool-filelist">');
     expect(html.match(/<li /g)).toHaveLength(2);
     expect(html.indexOf("Zebra parser")).toBeLessThan(html.indexOf("Another parser"));
-    expect(html).not.toContain("abc123");
-    expect(html).not.toContain("def456");
+    expect(html).toContain('data-open-memory-chat="abc123"');
+    expect(html).toContain('data-open-memory-chat="def456"');
     expect(html).toContain('datetime="2026-09-11T12:30:00.000Z"');
     expect(html).toContain("Showing 2 of 5 matches");
   });
@@ -72,7 +72,7 @@ describe("memory tool result rendering", () => {
     const unsafe = { ...metadata, name: '<img src=x onerror="alert(1)">', id: "<script>" };
     const list = renderMemoryResult("search_memories", JSON.stringify({ memories: [unsafe] }), md);
     expect(list).toContain("&lt;img");
-    expect(list).not.toContain("&lt;script&gt;");
+    expect(list).toContain('data-open-memory-chat="&lt;script&gt;"');
     expect(list).not.toContain("<script>");
     expect(list).not.toContain("<img");
     const recalled = renderMemoryResult("recall_memory", JSON.stringify({ ...metadata, contents: "<script>alert(1)</script>" }), md);

@@ -137,6 +137,10 @@ export function memoryMetadata(memory: MemorySnapshot): { id: string; name: stri
   return { id: memoryId(memory), name: memory.title, date: new Date(memory.generatedAt).toISOString().replace(/:\d{2}\.\d{3}Z$/, "Z") };
 }
 
+export function memoryRecallResult(memory: MemorySnapshot): string {
+  return JSON.stringify({ ...memoryMetadata(memory), contents: memory.text });
+}
+
 export function searchMemories(query: string, records: MemorySource[], currentId: string, limit = DEFAULT_MEMORY_MAX_COUNT): {
   memories: ReturnType<typeof memoryMetadata>[]; total: number; truncated: boolean;
 } {

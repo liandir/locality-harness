@@ -1,8 +1,8 @@
 /** Session events shared by the host, feature facades, and webviews. */
-import type { ChatAttachment, ChatRecord, ChatToolProcess } from "./types.js";
+import type { ChatAttachment, ChatMessage, ChatRecord, ChatToolProcess } from "./types.js";
 import type { ChatMode } from "./mode.js";
 import type { ReasoningEffort } from "./reasoningEffort.js";
-import type { MemoryCreation, MemorySnapshot } from "./memory.js";
+import type { MemoryCreation } from "./memory.js";
 import type { FileChangeSummary } from "./fileChanges.js";
 
 /** Model-context size sent with chatLoaded, independently of the visible transcript. */
@@ -113,7 +113,7 @@ export type UiEvent =
   | { kind: "tokens"; total: number; limit: number }
   | { kind: "titleChanged"; title: string; animate: boolean }
   | ({ kind: "chatLoaded"; record: ChatRecord } & ChatContextState)
-  | { kind: "memoriesUsed"; memories: MemorySnapshot[] } // Automatically recalled at chat start.
+  | { kind: "initialMemoryCalls"; calls: ChatMessage[] } // Harness-issued calls in model context order.
   | { kind: "chatClosed" }
   | { kind: "compactStatus"; currentMessages: number; minMessages: number; available: boolean }
   | { kind: "compactStart"; compactId: string; source: "manual" | "auto"; beforeTokens: number; beforeMessages: number; keepTail: number }

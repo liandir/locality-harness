@@ -12,7 +12,7 @@ import type { UiEvent, ToolCategory } from "./events.js";
 export type { UiEvent, ToolCategory } from "./events.js";
 import type { Disposable, SecretStorage } from "vscode";
 import { beginForeground } from "../llm/activity.js";
-import { rankMemories, searchMemories, recallMemory, memoryMetadata } from "./memory.js";
+import { rankMemories, searchMemories, recallMemory, memoryMetadata, memoryRecallResult } from "./memory.js";
 import { MAX_MEMORY_COUNT } from "./memoryLimits.js";
 import type { WorkspaceMemory } from "./workspaceMemory.js";
 import { initialMemoryContext } from "./initialMemoryContext.js";
@@ -1055,7 +1055,7 @@ export class ChatSession {
   refreshMemoryVisibility(): void {
     // Disclose exactly what was loaded, in order. Source edits/deactivation affect
     // future retrieval; they do not remove snapshots already in this chat's context.
-    this.emit({ kind: "memoriesUsed", memories: this.record.initialMemories ?? [] });
+    this.emit({ kind: "initialMemoryCalls", calls: initialMemoryContext(this.record.initialMemories ?? [], this.record.messages[0]?.ts ?? 0) });
   }
 
   /** Expand text assets in model-only history, preserving the original visible message. */
@@ -2290,10 +2290,16 @@ export class ChatSession {
         // The workspace switch can change while storage or approval is pending.
         if (!readSettings().memoryEnabled) throw new Error("Workspace memories are disabled.");
         if (e.name === "search_memories") {
-          result = JSON.stringify(searchMemories(args.query as string, records, this.record.id, readSettings().memoryMaxCount));
+          const search = searchMemories(args.query as string, records, this.record.id, readSettings().memoryMaxCount);
+          for (const match of search.memories) {
+            const memory = recallMemory(match.name, match.id, records, this.record.id);
+            (this.record.memorySources ??= {})[match.id] = memory.sourceId;
+          }
+          result = JSON.stringify(search);
         } else {
           const memory = recallMemory(args.name as string, args.id as string, records, this.record.id);
-          result = JSON.stringify({ ...memoryMetadata(memory), contents: memory.text });
+          result = memoryRecallResult(memory);
+          (this.record.memorySources ??= {})[memoryMetadata(memory).id] = memory.sourceId;
           this.record.recalledMemories = [...(this.record.recalledMemories ?? []).filter(m => m.sourceId !== memory.sourceId), memory].slice(-MAX_MEMORY_COUNT);
           await this.refreshMemoryVisibility();
         }

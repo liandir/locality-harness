@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import * as vscode from "vscode";
+import { memoryMetadata } from "../src/chat/memory.js";
 import type { ChatMode } from "../src/chat/mode.js";
 import { WORKSPACE_REASONING_EFFORT_KEY, type ReasoningEffort } from "../src/chat/reasoningEffort.js";
 import type { ChatAttachment, ChatRecord, ChatStorage } from "../src/chat/storage.js";
@@ -136,7 +137,7 @@ import { ChatViewProvider } from "../src/ui/chatView/provider.js";
 
 const record = (id: string) => ({ id, title: id, messages: [], reasoningEffort: "default", mode: "act" } as unknown as ChatRecord);
 function setup(memory?: WorkspaceMemory) {
-  const storage = { list: vi.fn().mockResolvedValue([]), load: vi.fn(), save: vi.fn(), delete: vi.fn(), deleteAll: vi.fn(), deleteAttachment: vi.fn(), importAttachment: vi.fn(), importAttachmentBytes: vi.fn(), attachmentPath: (id: string) => `/workspace/${id}/image.png` };
+  const storage = { metadata: vi.fn().mockResolvedValue([]), list: vi.fn().mockResolvedValue([]), load: vi.fn(), save: vi.fn(), delete: vi.fn(), deleteAll: vi.fn(), deleteAttachment: vi.fn(), importAttachment: vi.fn(), importAttachmentBytes: vi.fn(), attachmentPath: (id: string) => `/workspace/${id}/image.png` };
   const preferences = new Map<string, unknown>();
   const workspaceState = {
     get: vi.fn((key: string) => preferences.get(key)),
@@ -1008,56 +1009,94 @@ describe("steering messages from the chat view", () => {
   });
 });
 
-describe("recalled memory navigation", () => {
-  it("opens automatic recall from its saved snapshot without loading the current source", async () => {
+describe("memory chat navigation", () => {
+  it.each(["initialMemories", "recalledMemories"] as const)("opens %s in a chat tab while keeping the originating tab", async field => {
     const { provider, storage, send, onOpenMemory } = setup();
     const chat = record("a");
-    chat.initialMemories = [{ sourceId: "source", title: "Original title", text: "# Loaded contents", generatedAt: 1, sourceRevision: "original" }];
+    const memory = { sourceId: "source", title: "Original title", text: "# Loaded contents", generatedAt: 1, sourceRevision: "original" };
+    chat[field] = [memory];
+    storage.load.mockResolvedValue({ ...record("source"), title: "Renamed source" });
     provider.openChat(chat);
-    await send({ type: "openInitialMemory", sourceId: "source", chatId: "a" });
-    const call = vi.mocked(vscode.commands.executeCommand).mock.calls.find(args => args[0] === "vscode.open")!;
-    const uri = call[1] as vscode.Uri;
-    expect(uri.path).toBe("/Original title — Memory (read-only).md");
-    const [, contentProvider] = vi.mocked(vscode.workspace.registerTextDocumentContentProvider).mock.calls[0];
-    expect(contentProvider.provideTextDocumentContent(uri, {} as vscode.CancellationToken)).toBe("# Loaded contents");
+    await send({ type: "openMemoryChat", id: memoryMetadata(memory).id, chatId: "a" });
+    expect(storage.load).toHaveBeenCalledWith("source");
+    expect(provider.getTabs().map(tab => tab.id)).toEqual(["a", "source"]);
+    expect(provider.getCurrentRecord()?.id).toBe("source");
     expect(onOpenMemory).not.toHaveBeenCalled();
+    expect(vscode.commands.executeCommand).not.toHaveBeenCalledWith("vscode.open", expect.anything(), expect.anything());
+    expect(vscode.workspace.registerTextDocumentContentProvider).not.toHaveBeenCalled();
+    await provider.closeAll();
+  });
+
+  it("uses historical IDs for searched and recalled memories after regeneration, including duplicate titles", async () => {
+    const { provider, storage, send } = setup();
+    const chat = record("a");
+    chat.memorySources = { first: "source-one", second: "source-two" };
+    provider.openChat({ ...record("source-one"), title: "Same title" });
+    provider.openChat({ ...record("source-two"), title: "Same title" });
+    provider.openChat(chat);
+    await send({ type: "openMemoryChat", id: "second", chatId: "a" });
+    expect(provider.getCurrentRecord()?.id).toBe("source-two");
+    expect(provider.getTabs()).toHaveLength(3);
     expect(storage.load).not.toHaveBeenCalled();
-    vi.mocked(vscode.commands.executeCommand).mockClear();
-    await send({ type: "openInitialMemory", sourceId: "missing", chatId: "a" });
-    await send({ type: "openInitialMemory", sourceId: "source", chatId: "other" });
-    expect(vscode.commands.executeCommand).not.toHaveBeenCalled();
+    await provider.closeAll();
   });
 
-  it("opens the exact recalled version as read-only Markdown even for duplicate titles", async () => {
-    const { provider, send } = setup();
-    const chat = record("a");
-    chat.messages = ["first", "second"].map((id, index) => ({
-      role: "tool", ts: index + 1,
-      content: JSON.stringify({ id, name: "Same title", contents: `# ${id} version` }),
-      toolCall: { name: "recall_memory", argsJson: JSON.stringify({ name: "Same title", id }), status: "executed" }
-    }));
-    provider.openChat(chat);
-    await send({ type: "openRecalledMemory", id: "second", chatId: "a" });
-    const call = vi.mocked(vscode.commands.executeCommand).mock.calls.find(args => args[0] === "vscode.open")!;
-    const uri = call[1] as vscode.Uri;
-    expect(uri.path).toBe("/Same title — Memory (read-only).md");
-    expect(call[2]).toEqual({ preview: false });
-    const [scheme, contentProvider] = vi.mocked(vscode.workspace.registerTextDocumentContentProvider).mock.calls[0];
-    expect(scheme).toBe(uri.scheme);
-    expect(contentProvider.provideTextDocumentContent(uri, {} as vscode.CancellationToken)).toBe("# second version");
+  it("resolves unchanged memories from older chats within the current workspace", async () => {
+    const { provider, storage, send } = setup();
+    const source = { ...record("source"), memory: { text: "Contents", generatedAt: 1, sourceRevision: "rev", manual: true, enabled: false } };
+    storage.metadata.mockResolvedValue([source]);
+    storage.load.mockResolvedValue(source);
+    provider.openChat(record("a"));
+    await send({ type: "openMemoryChat", id: memoryMetadata({ sourceId: source.id, title: source.title, ...source.memory }).id, chatId: "a" });
+    expect(storage.metadata).toHaveBeenCalledWith(true);
+    expect(provider.getCurrentRecord()?.id).toBe("source");
+    await provider.closeAll();
   });
 
-  it("does not open failed recalls, unknown IDs, or a recall from a different active chat", async () => {
-    const { provider, send } = setup();
+  it("keeps the current chat for unknown IDs, deleted sources, or requests from another tab", async () => {
+    const { provider, storage, send } = setup();
     const chat = record("a");
-    chat.messages = [{ role: "tool", ts: 1, content: JSON.stringify({ id: "failed", name: "A memory", contents: "text" }),
-      toolCall: { name: "recall_memory", argsJson: "{}", status: "failed" } }];
+    chat.memorySources = { known: "deleted" };
     provider.openChat(chat);
-    await send({ type: "openRecalledMemory", id: "failed", chatId: "a" });
-    await send({ type: "openRecalledMemory", id: "unknown", chatId: "a" });
-    await send({ type: "openRecalledMemory", id: "failed", chatId: "another-chat" });
-    expect(vi.mocked(vscode.commands.executeCommand).mock.calls.filter(args => args[0] === "vscode.open")).toEqual([]);
+    await send({ type: "openMemoryChat", id: "unknown", chatId: "a" });
+    await send({ type: "openMemoryChat", id: "known", chatId: "a" });
+    await send({ type: "openMemoryChat", id: "known", chatId: "another-chat" });
+    expect(storage.load).toHaveBeenCalledTimes(1);
+    expect(storage.load).toHaveBeenCalledWith("deleted");
+    expect(provider.getCurrentRecord()?.id).toBe("a");
     expect(vscode.window.showErrorMessage).toHaveBeenCalledTimes(2);
+    await provider.closeAll();
+  });
+
+  it("recovers an old recall's source after rename and regeneration without matching by title", async () => {
+    const { provider, storage, send } = setup();
+    const memory = { sourceId: "source", title: "Old title", text: "Original contents", generatedAt: 1, sourceRevision: "rev" };
+    const metadata = memoryMetadata(memory);
+    const chat = record("a");
+    chat.messages = [{ role: "tool", ts: 1, content: JSON.stringify({ ...metadata, contents: memory.text }),
+      toolCall: { name: "recall_memory", argsJson: "{}", status: "executed" } }];
+    const source = { ...record("source"), title: "New title" };
+    storage.metadata.mockResolvedValue([{ ...record("unrelated"), title: "Old title" }, source]);
+    storage.load.mockResolvedValue(source);
+    provider.openChat(chat);
+    await send({ type: "openMemoryChat", id: metadata.id, chatId: "a" });
+    expect(storage.load).toHaveBeenCalledWith("source");
+    expect(provider.getCurrentRecord()?.id).toBe("source");
+    await provider.closeAll();
+  });
+
+  it("does not switch tabs after a slow legacy lookup if the user has navigated elsewhere", async () => {
+    const { provider, storage, send } = setup();
+    let finish!: (sources: unknown[]) => void;
+    storage.metadata.mockReturnValue(new Promise(resolve => { finish = resolve; }));
+    provider.openChat(record("a"));
+    const navigation = send({ type: "openMemoryChat", id: "unknown", chatId: "a" });
+    provider.openChat(record("b"));
+    finish([]);
+    await navigation;
+    expect(provider.getCurrentRecord()?.id).toBe("b");
+    expect(vscode.window.showErrorMessage).not.toHaveBeenCalled();
+    await provider.closeAll();
   });
 });
 

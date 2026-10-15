@@ -101,7 +101,9 @@ export interface ChatRecord {
   memoryCreations?: MemoryCreation[];
   /** Source snapshots explicitly recalled by tools, retained with chat history. */
   recalledMemories?: MemorySnapshot[];
-  /** Memories loaded at chat start, for the UI disclosure; contents live in contextMessages. */
+  /** Historical memory IDs resolve to source chats even after regeneration. */
+  memorySources?: Record<string, string>;
+  /** Snapshots backing the initial recall tool history; contents also live in contextMessages. */
   initialMemories?: MemorySnapshot[];
   /** Token count of the model context, not the full transcript. */
   totalTokens: number;

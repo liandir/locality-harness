@@ -18,6 +18,19 @@ afterEach(async () => {
 });
 
 describe("ChatStorage", () => {
+  it("preserves historical memory navigation on reload and fork, filtering invalid source references", async () => {
+    const storage = new ChatStorage(ws, chatsRoot);
+    const rec = storage.newRecord("native");
+    const source = storage.newRecord("native");
+    rec.memorySources = { "0123456789abcdef": source.id, "abcdef0123456789": "../outside", invalid: source.id };
+    await storage.save(rec);
+    const loaded = (await storage.load(rec.id))!;
+    expect(loaded.memorySources).toEqual({ "0123456789abcdef": source.id });
+    const forked = await storage.fork(loaded);
+    expect(forked.memorySources).not.toBe(loaded.memorySources);
+    expect((await storage.load(forked.id))?.memorySources).toEqual(loaded.memorySources);
+  });
+
   it("includes steering and the whole response when forking a user turn", async () => {
     const storage = new ChatStorage(ws, chatsRoot);
     const rec = storage.newRecord("native");

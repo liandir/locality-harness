@@ -817,16 +817,9 @@ body.image-preview-open .chat-body { overflow: hidden; }
   .ctx-pill.nudge { animation: none; }
 }
 
-.memory-disclosure { margin: 0; padding: 0; }
-.memory-disclosure[hidden] { display: none; }
-.memory-disclosure > summary, .memory-source > summary { list-style: none; outline: none; }
-.memory-disclosure > summary::-webkit-details-marker, .memory-source > summary::-webkit-details-marker { display: none; }
-.memory-disclosure > summary:focus-visible,
+.memory-source > summary { list-style: none; outline: none; }
+.memory-source > summary::-webkit-details-marker { display: none; }
 .memory-source > summary:is(:focus-visible, :has(:focus-visible)) { color: var(--vscode-foreground); }
-.memory-disclosure > summary > .disclosure-icon { opacity: 0; }
-.memory-disclosure[open] > summary > .disclosure-icon,
-.memory-disclosure > summary:is(:hover, :focus-visible) > .disclosure-icon { opacity: 1; }
-.memory-disclosure[open] > summary .disclosure-icon,
 .memory-source[open] > summary .disclosure-icon { transform: rotate(90deg); }
 .memory-source { padding: 0; }
 /* Native memory summaries retain pointer focus after clicks. Keep their

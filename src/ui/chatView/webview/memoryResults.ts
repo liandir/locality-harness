@@ -39,7 +39,7 @@ export function renderMemoryResult(toolName: string, result: string, md: Markdow
   const escape = md.utils.escapeHtml;
   const rows = parsed.memories.map(memory =>
     `<li class="tool-filelist-item tool-memory-item"><span class="tool-filelist-icon" aria-hidden="true">${memoryIcon()}</span>
-      <div class="tool-memory-entry"><div class="tool-memory-name">${escape(memory.name)}</div>
+      <div class="tool-memory-entry"><button type="button" class="tool-path-link tool-memory-name memory-source-link" data-open-memory-chat="${escape(memory.id)}">${escape(memory.name)}</button>
         <div class="memory-date">${renderMemoryDate(Date.parse(memory.date))}</div></div></li>`
   ).join("");
   const list = rows ? `<ul class="tool-filelist">${rows}</ul>`
