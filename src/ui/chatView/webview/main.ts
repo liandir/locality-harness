@@ -1,6 +1,6 @@
 import { pendingPlanTimestamp } from "../../../chat/planning.js";
 import type { CompletionDiagnostics } from "../../../llm/completion.js";
-import { renderInterruptionDetails } from "./interruption.js";
+import { interruptionMessage } from "./interruption.js";
 import { startShiki, normalizeHighlightLanguage, highlightCode, highlightLanguageForPath } from "./highlighting.js";
 import { escapeHtml } from "../../html.js";
 import {
@@ -1550,7 +1550,7 @@ function renderPartInto(
     return;
   } else {
     cls = "part abort-part";
-    html = `<div class="assistant-markdown abort">${escapeHtml(part.reason)}</div>${renderInterruptionDetails(part.diagnostics)}`;
+    html = `<div class="assistant-markdown abort">${escapeHtml(interruptionMessage(part.reason, part.diagnostics))}</div>`;
   }
   if (el.className !== cls) el.className = cls;
   setHtml(el, html);
@@ -4366,7 +4366,7 @@ function handleHostMessage(msg: ExtToChat): void {
     case "turnRecovery": {
       const message = getOrCreateMsg(msg.messageId, "assistant");
       finalizeLiveThoughts(message);
-      appendPartText(message, "text", `${msg.text}\n\n`);
+      appendPartText(message, "text", `\n\n${msg.text}\n\n`);
       render();
       break;
     }

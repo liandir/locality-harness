@@ -25,25 +25,16 @@ async function posted(page: Page) {
 
 for (const theme of ["light", "dark"] as const) {
   test.describe(theme, () => {
-    test("a restored interruption stays outside collapsed work and exposes diagnostics and Continue", async ({ page }) => {
+    test("a restored interruption stays outside collapsed work and shows diagnostics inline and Continue", async ({ page }) => {
       await webview(page, theme);
       await hostMessage(page, { kind: "chatLoaded", record: record() });
       const error = page.locator(".abort-part");
       await expect(error).toBeVisible();
       await expect(error).toContainText("response is incomplete");
       expect(await error.evaluate(element => !!element.closest(".work-section"))).toBe(false);
-      const details = page.getByText("Details", { exact: true });
-      await page.mouse.move(990, 5);
-      const resting = await details.evaluate(element => getComputedStyle(element).color);
-      await details.click();
-      await page.mouse.move(990, 5);
-      await expect(details).toHaveCSS("color", resting);
-      await expect(error).toContainText("30751");
-      await details.focus();
-      await page.keyboard.press("Enter");
-      await expect(page.locator(".activity-details")).not.toHaveAttribute("open");
-      await page.keyboard.press("Space");
-      await expect(page.locator(".activity-details")).toHaveAttribute("open", "");
+      await expect(error).toContainText("server output: 30751 tokens");
+      await expect(error.locator("details")).toHaveCount(0);
+      await expect(page.getByText("Details", { exact: true })).toHaveCount(0);
       await page.getByRole("button", { name: "Continue", exact: true }).click();
       expect(await posted(page)).toContainEqual(expect.objectContaining({ type: "continueChat", messageTs: 4 }));
     });
@@ -64,6 +55,23 @@ for (const theme of ["light", "dark"] as const) {
       expect(await posted(page)).toContainEqual(expect.objectContaining({ type: "resumeMessageQueue", messageTs: 4 }));
     });
 
+    test("stopping a response shows only the concise red message, including after reload", async ({ page }) => {
+      await webview(page, theme);
+      const stopped = record();
+      stopped.messages.at(-1)!.interruption = {
+        reason: "Stopped by user.", mode: "act", reasoningEffort: "default",
+        diagnostics: { cause: "user_cancel", completionTokens: 42 }
+      };
+      await hostMessage(page, { kind: "chatLoaded", record: stopped });
+      await expect(page.locator(".abort-part .abort")).toHaveText("Stopped by user.");
+      await expect(page.locator(".abort-part details")).toHaveCount(0);
+      await page.reload();
+      await webview(page, theme);
+      await hostMessage(page, { kind: "chatLoaded", record: stopped });
+      await expect(page.locator(".abort-part .abort")).toHaveText("Stopped by user.");
+      await expect(page.getByText("Details", { exact: true })).toHaveCount(0);
+    });
+
     test("incomplete planning keeps its normal composer and cancellation without plan approval", async ({ page }) => {
       await webview(page, theme);
       await hostMessage(page, { kind: "chatLoaded", record: record(true) });
@@ -80,13 +88,18 @@ for (const theme of ["light", "dark"] as const) {
       expect(await posted(page)).toContainEqual(expect.objectContaining({ type: "cancelPlanning" }));
     });
 
-    test("approval appears only after submission completes and survives reload", async ({ page }) => {
+    test("the plan is visible while streaming and approval waits for completion", async ({ page }) => {
       await webview(page, theme);
       const initial = record(true);
       initial.messages = initial.messages.slice(0, 1);
       await hostMessage(page, { kind: "chatLoaded", record: initial });
       await hostMessage(page, { kind: "turnStart", messageId: "plan" });
+      await hostMessage(page, { kind: "text", messageId: "plan", delta: "I will inspect the code." });
+      await hostMessage(page, { kind: "turnRecovery", messageId: "plan", text: "Continuing planning to finish the plan…" });
+      await expect(page.getByText("Continuing planning to finish the plan…", { exact: true })).toBeVisible();
       await hostMessage(page, { kind: "text", messageId: "plan", delta: "- [ ] Implement\n- [ ] Verify" });
+      await expect(page.locator(".assistant-markdown").filter({ hasText: "Implement" })).toBeVisible();
+      await expect(page.getByRole("button", { name: "Accept plan", exact: true })).toHaveCount(0);
       await hostMessage(page, { kind: "planFinal", messageId: "plan", messageTs: 5, markdown: "- [ ] Implement\n- [ ] Verify" });
       await expect(page.getByRole("button", { name: "Accept plan", exact: true })).toHaveCount(0);
       await hostMessage(page, { kind: "turnEnd", messageId: "plan", mode: "plan", messageTs: 5 });
@@ -96,6 +109,30 @@ for (const theme of ["light", "dark"] as const) {
       await hostMessage(page, { kind: "chatLoaded", record: initial });
       await page.getByRole("button", { name: "Accept plan", exact: true }).click();
       expect(await posted(page)).toContainEqual(expect.objectContaining({ type: "acceptPlan", messageTs: 5 }));
+    });
+
+    test("planning questions are answerable before the final plan streams", async ({ page }) => {
+      await webview(page, theme);
+      const initial = record(true);
+      initial.messages = initial.messages.slice(0, 1);
+      await hostMessage(page, { kind: "chatLoaded", record: initial });
+      await hostMessage(page, { kind: "turnStart", messageId: "plan" });
+      await hostMessage(page, { kind: "toolCallProposed", messageId: "plan", toolId: "question",
+        toolName: "ask_user_question", category: "question", approvalRequired: false,
+        argsJson: JSON.stringify({ question: "Which scope?", suggestions: ["Source files", "All files"] }) });
+      await expect(page.getByRole("button", { name: "Accept plan", exact: true })).toHaveCount(0);
+      const answer = page.getByRole("button", { name: /Source files/ });
+      await expect(answer).toBeVisible();
+      await answer.focus();
+      await page.keyboard.press("Enter");
+      expect(await posted(page)).toContainEqual({ type: "answerQuestion", chatId: initial.id, toolId: "question", answer: "Source files" });
+      await hostMessage(page, { kind: "toolCallResolved", toolId: "question", status: "executed", resultPreview: "Source files" });
+      await hostMessage(page, { kind: "text", messageId: "plan", delta: "- [ ] Update source files\n- [ ] Run tests" });
+      await expect(page.locator(".assistant-markdown").filter({ hasText: "Update source files" })).toBeVisible();
+      await expect(page.getByRole("button", { name: "Accept plan", exact: true })).toHaveCount(0);
+      await hostMessage(page, { kind: "planFinal", messageId: "plan", messageTs: 5, markdown: "- [ ] Update source files\n- [ ] Run tests" });
+      await hostMessage(page, { kind: "turnEnd", messageId: "plan", mode: "plan", messageTs: 5 });
+      await expect(page.getByRole("button", { name: "Accept plan", exact: true })).toBeEnabled();
     });
 
     test("an interruption does not resume following after the user scrolls up", async ({ page }) => {

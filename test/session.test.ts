@@ -6,6 +6,8 @@ import type { ChatRecord } from "../src/chat/storage.js";
 import type { ChatSession, UiEvent } from "../src/chat/session.js";
 import type { WorkspaceMemory } from "../src/chat/workspaceMemory.js";
 
+const planText = (markdown: string) => `<proposed_plan>\n${markdown}\n</proposed_plan>`;
+
 const mocks = vi.hoisted(() => ({
   GenerationLengthError: class GenerationLengthError extends Error {},
   MalformedNativeToolCallError: class MalformedNativeToolCallError extends Error {},
@@ -434,7 +436,7 @@ describe("interrupted turn continuation", () => {
       expect(record.mode).toBe("act");
       mocks.streamChat.mockImplementation(async function* (_endpoint, request) {
         expect(request.tools.some((tool: { function: { name: string } }) => tool.function.name === "create_file")).toBe(false);
-        yield { kind: "toolCall", name: "submit_plan", argsJson: JSON.stringify({ markdown: "Completed plan" }) };
+        yield { kind: "text", text: planText("Completed plan") };
       });
       await session.continueTurn(record.messages.at(-1)!.ts);
       expect(record.mode).toBe("plan");
@@ -991,6 +993,7 @@ describe("ChatSession", () => {
     await fs.writeFile(path.join(ws, "a.txt"), "hello\n", "utf8");
     mocks.settings.toolCallingMode = "native";
     const requests: Array<{
+      messages: Array<{ content: unknown }>;
       thinking_budget_tokens?: number;
       reasoning_effort?: string;
       chat_template_kwargs?: Record<string, unknown>;
@@ -1004,7 +1007,7 @@ describe("ChatSession", () => {
         await firstRequestGate;
         yield { kind: "toolCall", name: "read_file", argsJson: '{"path":"a.txt"}', id: "call_read_modes" };
       } else {
-        if (request.tools?.some(tool => tool.function.name === "submit_plan")) yield { kind: "toolCall", name: "submit_plan", argsJson: JSON.stringify({ markdown: "done" }) };
+        if (JSON.stringify(request.messages[0]?.content).includes("You are in plan mode.")) yield { kind: "text", text: planText("done") };
         else yield { kind: "text", text: "done" };
       }
     });
@@ -1045,10 +1048,10 @@ describe("ChatSession", () => {
 
   it.each(["act", "plan", "review"] as const)("executes a submitted %s message independently of the composer mode", async mode => {
     mocks.settings.toolCallingMode = "native";
-    const requests: Array<{ tools?: Array<{ function: { name: string } }> }> = [];
+    const requests: Array<{ messages: Array<{ content: unknown }>; tools?: Array<{ function: { name: string } }> }> = [];
     mocks.streamChat.mockImplementation(async function* (_endpoint: string, request: typeof requests[number]) {
       requests.push(request);
-      if (mode === "plan") yield { kind: "toolCall", name: "submit_plan", argsJson: JSON.stringify({ markdown: "Done" }) };
+      if (mode === "plan") yield { kind: "text", text: planText("Done") };
       else yield { kind: "text", text: "Done" };
     });
     const { ChatSession } = await import("../src/chat/session.js");
@@ -1076,10 +1079,10 @@ describe("ChatSession", () => {
   it("retains plan approval after reload and keeps revisions in Plan until acceptance", async () => {
     const ws = await fs.mkdtemp(path.join(os.tmpdir(), "locality-plan-approval-"));
     mocks.settings.toolCallingMode = "native";
-    const requests: Array<{ tools?: Array<{ function: { name: string } }> }> = [];
+    const requests: Array<{ messages: Array<{ content: unknown }>; tools?: Array<{ function: { name: string } }> }> = [];
     mocks.streamChat.mockImplementation(async function* (_endpoint: string, request: typeof requests[number]) {
       requests.push(request);
-      if (request.tools?.some((tool: { function: { name: string } }) => tool.function.name === "submit_plan")) yield { kind: "toolCall", name: "submit_plan", argsJson: JSON.stringify({ markdown: "A concrete plan or completed response." }) };
+      if (JSON.stringify(request.messages[0]?.content).includes("You are in plan mode.")) yield { kind: "text", text: planText("A concrete plan or completed response.") };
       else yield { kind: "text", text: "A concrete plan or completed response." };
     });
     const { ChatSession } = await import("../src/chat/session.js");
@@ -1129,7 +1132,7 @@ describe("ChatSession", () => {
     const { ChatStorage } = await import("../src/chat/storage.js");
     mocks.settings.toolCallingMode = "native";
     mocks.streamChat.mockImplementation(async function* () {
-      if (outcome === "pending") yield { kind: "toolCall", name: "submit_plan", argsJson: JSON.stringify({ markdown: "The plan" }) };
+      if (outcome === "pending") yield { kind: "text", text: planText("The plan") };
     });
     const storage = new ChatStorage(ws, path.join(ws, "chats"));
     const record = storage.newRecord("native");
@@ -1149,7 +1152,7 @@ describe("ChatSession", () => {
       expect(session.isPlanning()).toBe(false);
       expect(loaded.mode).toBe("act");
       expect(loaded.messages.filter(message => message.role === "user").map(message => message.content)).toEqual(["Plan this"]);
-      expect(mocks.streamChat).toHaveBeenCalledOnce();
+      expect(mocks.streamChat).toHaveBeenCalledTimes(outcome === "pending" ? 1 : 3);
       expect(events).toContainEqual({ kind: "planningState", active: false, pendingPlanMessageTs: undefined });
       const saved = (await storage.load(record.id))!;
       expect(saved.pendingPlanMessageTs).toBeUndefined();
@@ -2053,7 +2056,7 @@ describe("ChatSession", () => {
         expect(request.messages.at(-1)).toMatchObject({
           role: "tool", tool_call_id: "call_question", content: "The user skipped this question"
         });
-        if (mode === "plan") yield { kind: "toolCall", name: "submit_plan", argsJson: JSON.stringify({ markdown: "Continuing with the available information." }) };
+        if (mode === "plan") yield { kind: "text", text: planText("Continuing with the available information.") };
         else yield { kind: "text", text: "Continuing with the available information." };
       }
     });
@@ -2085,7 +2088,7 @@ describe("ChatSession", () => {
         kind: "toolCallResolved", toolId: question.toolId, status: "executed",
         resultPreview: "The user skipped this question"
       }));
-      expect(record.messages.filter(message => message.role === "tool" && message.toolCall?.name !== "submit_plan")).toEqual([
+      expect(record.messages.filter(message => message.role === "tool")).toEqual([
         expect.objectContaining({ content: "The user skipped this question", toolCall: expect.objectContaining({ status: "executed" }) })
       ]);
       expect(record.messages.filter(message => message.role === "user")).toHaveLength(1);
@@ -5109,7 +5112,7 @@ describe("steering an active turn", () => {
           signal.addEventListener("abort", () => reject(new Error("Generation interrupted")), { once: true });
         });
       } else {
-        if (mode === "plan") yield { kind: "toolCall", name: "submit_plan", argsJson: JSON.stringify({ markdown: "Revised approach." }) };
+        if (mode === "plan") yield { kind: "text", text: planText("Revised approach.") };
         else yield { kind: "text", text: "Revised approach." };
       }
     });
@@ -5290,14 +5293,47 @@ describe("saved response file Undo", () => {
   });
 });
 
-describe("explicit plan submission and terminal failures", () => {
+describe("streamed final plans and terminal failures", () => {
+  it("waits for a planning question answer, then finishes with a visible plan", async () => {
+    const { ChatSession } = await import("../src/chat/session.js");
+    const record = newRecord();
+    record.toolCallingMode = "native";
+    mocks.settings.toolCallingMode = "native";
+    const events: UiEvent[] = [];
+    const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record, emit: event => events.push(event) });
+    let pass = 0;
+    mocks.streamChat.mockImplementation(async function* (_endpoint, request) {
+      if (pass++ === 0) yield {
+        kind: "toolCall", name: "ask_user_question", id: "scope",
+        argsJson: JSON.stringify({ question: "Which scope?", suggestions: ["Source files", "All files"] })
+      };
+      else {
+        expect(request.messages.at(-1)).toMatchObject({
+          role: "tool", tool_call_id: "scope", content: 'the user has answered your question: "Source files"'
+        });
+        yield { kind: "text", text: planText("- Update source files\n- Run tests") };
+      }
+    });
+    try {
+      const turn = session.sendUserMessage("Plan the changes", [], "plan");
+      await vi.waitFor(() => expect(events.some(event => event.kind === "toolCallProposed")).toBe(true));
+      const question = events.find((event): event is Extract<UiEvent, { kind: "toolCallProposed" }> => event.kind === "toolCallProposed")!;
+      expect(record.pendingPlanMessageTs).toBeUndefined();
+      expect(events.some(event => event.kind === "turnEnd")).toBe(false);
+      session.answerQuestion(question.toolId, "Source files");
+      await turn;
+      expect(record.messages.at(-1)?.content).toBe("- Update source files\n- Run tests");
+      expect(record.pendingPlanMessageTs).toBe(record.messages.at(-1)?.ts);
+      expect(events.filter(event => event.kind === "turnEnd")).toHaveLength(1);
+      expect(events.some(event => event.kind === "abort")).toBe(false);
+    } finally { await session.shutdown(); }
+  });
+
   const profiles = ["native", "compat-gemma4", "compat-qwen3", "compat-muse-glimmer", "compat-gpt-oss"] as const;
   for (const profile of profiles) {
     for (const transport of (profile === "native" || profile === "compat-muse-glimmer") ? ["native"] as const : ["native", "legacy"] as const) {
-      it.each(["valid", "empty", "malformed", "missing", "mixed", "duplicate", "interrupted"] as const)(`${profile}/${transport}: %s submission`, async outcome => {
+      it.each(["valid", "empty", "malformed", "missing", "corrected", "duplicate", "interrupted"] as const)(`${profile}/${transport}: %s final plan`, async outcome => {
         const { ChatSession } = await import("../src/chat/session.js");
-        const { renderToolCallForPrompt } = await import("../src/llm/prompt.js");
-        const { compatibilityFamily } = await import("../src/llm/toolCallingProfile.js");
         const { StreamFailure } = await import("../src/llm/completion.js");
         const record = newRecord();
         record.toolCallingMode = profile;
@@ -5306,37 +5342,41 @@ describe("explicit plan submission and terminal failures", () => {
         const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record, emit: event => events.push(event) });
         let generations = 0;
         mocks.streamChat.mockImplementation(async function* (_endpoint, request) {
+          expect(request.tools?.some((tool: { function: { name: string } }) => tool.function.name === "submit_plan")).not.toBe(true);
           if (transport === "legacy" && request.tools) throw new mocks.NativeToolsUnsupportedError("tools unsupported");
           generations++;
-          if (outcome === "missing") { yield { kind: "text", text: "I will inspect the code." }; return; }
-          const calls = [{ name: "submit_plan", id: `plan_attempt_${generations}`, argsJson: outcome === "malformed" ? '{"markdown":' : JSON.stringify({ markdown: outcome === "empty" ? "  " : "- [ ] Implement the change\n- [ ] Run tests" }) }];
-          if (outcome === "mixed") calls.push({ name: "list_dir", id: `read_attempt_${generations}`, argsJson: '{"path":"."}' });
-          if (outcome === "duplicate") calls.push(calls[0]);
-          for (const call of calls) {
-            if (transport === "legacy") yield { kind: "text", text: renderToolCallForPrompt(compatibilityFamily(profile)!, call.name, call.argsJson) };
-            else yield { kind: "toolCall", ...call };
+          if (outcome === "missing" || outcome === "corrected" && generations === 1) {
+            yield { kind: "text", text: "I will inspect the code." }; return;
           }
+          if (outcome === "corrected") expect(JSON.stringify(request.messages)).toContain("Planning is still active");
+          yield { kind: "text", text: "<proposed_" };
+          yield { kind: "text", text: "plan>\n" };
+          yield { kind: "text", text: outcome === "empty" ? "  " : "- [ ] Implement the change\n- [ ] Run tests" };
+          // The plan is already visible while the server is still generating it.
+          if (outcome !== "empty") expect(events).toContainEqual(expect.objectContaining({ kind: "text", delta: expect.stringContaining("Implement the change") }));
+          expect(events.some(event => event.kind === "planFinal")).toBe(false);
+          if (outcome !== "malformed") yield { kind: "text", text: "\n</proposed_plan>" };
+          if (outcome === "duplicate") yield { kind: "text", text: "\n" + planText("Second plan") };
           if (outcome === "interrupted") throw new StreamFailure("Connection interrupted", { cause: "unexpected_eof", completionEvidence: "none" });
         });
         try {
           await session.sendUserMessage("Plan this", [], "plan");
-          if (outcome === "valid") {
+          if (outcome === "valid" || outcome === "corrected") {
             expect(record.pendingPlanMessageTs).toBe(record.messages.at(-1)?.ts);
             expect(record.messages.at(-1)?.content).toContain("Run tests");
             expect(events.filter(event => event.kind === "planFinal")).toHaveLength(1);
             expect(events.some(event => event.kind === "abort")).toBe(false);
-            expect(record.messages.filter(message => message.toolCall?.name === "submit_plan")).toHaveLength(1);
             expect(session.resolvePlan(record.pendingPlanMessageTs! - 1, "act")).toBe(false);
             expect(session.resolvePlan(record.pendingPlanMessageTs!, "act")).toBe(true);
           } else {
             expect(record.pendingPlanMessageTs).toBeUndefined();
+            expect(record.planning).toBe(true);
             expect(events.some(event => event.kind === "planFinal")).toBe(false);
             expect(record.messages.at(-1)?.interruption?.diagnostics?.cause).toBe(outcome === "interrupted" ? "unexpected_eof" : "plan_incomplete");
-            expect(record.messages.some(message => message.toolCall?.name === "list_dir" && message.toolCall.status === "executed")).toBe(false);
           }
-          const ids = record.messages.flatMap(message => message.toolCall?.id ? [message.toolCall.id] : []);
-          expect(new Set(ids).size).toBe(ids.length);
-          expect(generations).toBe(["empty", "malformed", "mixed", "duplicate"].includes(outcome) ? 2 : 1);
+          expect(record.messages.some(message => message.toolCall?.name === "submit_plan")).toBe(false);
+          expect(JSON.stringify(events.filter(event => event.kind === "text"))).not.toContain("proposed_plan");
+          expect(generations).toBe(outcome === "corrected" ? 2 : ["valid", "interrupted"].includes(outcome) ? 1 : 3);
         } finally { await session.shutdown(); }
       });
     }
@@ -5408,7 +5448,7 @@ it("rejects an old approval after a plan revision in the same millisecond", asyn
   const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record, emit: vi.fn() });
   const now = vi.spyOn(Date, "now").mockReturnValue(1000);
   mocks.streamChat.mockImplementation(async function* () {
-    yield { kind: "toolCall", name: "submit_plan", argsJson: '{"markdown":"Implement and verify"}' };
+    yield { kind: "text", text: planText("Implement and verify") };
   });
   try {
     await session.sendUserMessage("Plan this", [], "plan");

@@ -489,7 +489,7 @@ describe("OpenAI-compatible client", () => {
     expect(body.tools).toEqual(tools);
     expect(body.tool_choice).toBe("auto");
     expect(body.parallel_tool_calls).toBe(false);
-    expect(tools.map(tool => tool.function.name)).toEqual(["submit_plan", "read_file", "list_dir", "glob", "ask_user_question"]);
+    expect(tools.map(tool => tool.function.name)).toEqual(["read_file", "list_dir", "glob", "ask_user_question"]);
   });
 
   it("offers command strings alongside native file tools", () => {
@@ -512,7 +512,7 @@ describe("OpenAI-compatible client", () => {
 
   it.each(["legacy", "native"] as const)("offers only read tools and questions in Review and Plan (%s)", transport => {
     const tools = toolsForMode("review", transport);
-    expect(tools).toEqual(toolsForMode("plan", transport).filter(tool => tool.name !== "submit_plan"));
+    expect(tools).toEqual(toolsForMode("plan", transport));
     const names = tools.map(tool => tool.name);
     expect(names).toEqual(["read_file", "list_dir", "glob", "ask_user_question"]);
   });

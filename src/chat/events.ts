@@ -125,7 +125,7 @@ export type UiEvent =
   | { kind: "reasoningEffortChanged"; effort: ReasoningEffort };
 
 export type ToolCategory =
-  | "plan"     // explicit submission; no execution approval
+  | "plan"     // historical submitted-plan cards; no execution approval
 
   | "read"      // gray, auto-approve via setting
   | "write"     // gray + approval, auto via setting

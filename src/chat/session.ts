@@ -1,7 +1,7 @@
 import { pendingPlanTimestamp } from "./planning.js";
 import { StreamFailure, type CompletionDiagnostics } from "../llm/completion.js";
 import { unresolvedInterruption } from "./interruption.js";
-import { validatePlanSubmission, type ParsedToolCall } from "./planSubmission.js";
+import { PlanResponse, PLAN_CONTINUATION_NOTE } from "./planResponse.js";
 import {
   MultipleToolArgsError,
   normalizeToolArgs,
@@ -90,6 +90,7 @@ const WRITE_TOOL_NAMES = new Set(["write_file", "create_file", "edit_file", "ins
 const MAX_EMPTY_NATIVE_RETRIES = 1;
 const MAX_MALFORMED_NATIVE_RETRIES = 1;
 const MAX_LENGTH_RECOVERY_RETRIES = 1;
+const MAX_PLAN_CONTINUATIONS = 2;
 const LENGTH_RECOVERY_NOTE =
   "[harness recovery] The previous generation reached its output or context limit. " +
   "Its unfinished text, reasoning, and incomplete tool call were discarded; incomplete calls were not executed. " +
@@ -213,7 +214,8 @@ export class ChatSession {
   // the new record values take effect when the next user turn starts.
   private activeTurnModes?: { mode: ChatMode; reasoningEffort: ReasoningEffort };
   private pendingInterruption?: ChatMessage;
-  private stagedPlanCalls?: ParsedToolCall[];
+  private stagedPlanCalls?: Extract<ParsedEvent, { kind: "toolCall" }>[];
+  private planResponse?: PlanResponse;
   private lastInterruptionTs = 0;
   private pendingSteering: ChatMessage[] = [];
   private acceptingSteering = false;
@@ -1415,7 +1417,6 @@ export class ChatSession {
     let emptyNativeRetries = 0;
     let planCorrectionAttempts = 0;
     let completion: CompletionDiagnostics | undefined;
-    let submittedPlan: string | undefined;
     let malformedNativeRetries = 0;
     let lengthRecoveryRetries = 0;
     let disabledReasoningNoticeShown = false;
@@ -1453,7 +1454,7 @@ export class ChatSession {
       this.emit({ kind: "turnPreparing", reason: "server" });
       finishReason = undefined;
       completion = undefined;
-      submittedPlan = undefined;
+      const planResponse = this.planResponse = this.turnMode() === "plan" ? new PlanResponse() : undefined;
       this.stagedPlanCalls = this.turnMode() === "plan" ? [] : undefined;
       const family = compatibilityFamily(this.record.toolCallingMode);
       const parser = makeParser(family ?? "gemma4");
@@ -1704,6 +1705,11 @@ export class ChatSession {
           const continueAfterTail = await this.handleEvents(tail, messageId, s, recordEvent);
           aborted = continueAfterTail.abort ?? false;
           toolLoop = toolLoop || (continueAfterTail.toolLoop ?? false);
+          const finalText = planResponse?.end();
+          if (finalText) {
+            recordEvent({ kind: "text", text: finalText });
+            this.emit({ kind: "text", messageId, delta: finalText });
+          }
         }
       } catch (e) {
         streamError = e;
@@ -1839,45 +1845,9 @@ export class ChatSession {
       const planningCalls = this.stagedPlanCalls;
       this.stagedPlanCalls = undefined;
       if (planningCalls?.length && !aborted && !this.abort.signal.aborted) {
-        if (planningCalls.some(call => call.name === "submit_plan")) {
-          const reusedCallId = planningCalls.some(call => call.id && this.completedCallIds.has(call.id));
-          const submission = !completion
-            ? { error: "The stream did not confirm completion of the plan submission." }
-            : reusedCallId ? { error: "Use a new tool call ID when submitting the completed plan." }
-            : validatePlanSubmission(planningCalls);
-          for (const call of planningCalls) {
-            const toolId = `plan_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-            // Rejected duplicate IDs must not corrupt subsequent native history.
-            const callId = call.id && this.completedCallIds.has(call.id) ? toolId : call.id;
-            recordEvent({ ...call, id: callId });
-            this.emit({ kind: "toolCallProposed", toolId, messageId, toolName: call.name, argsJson: call.argsJson, category: "plan", approvalRequired: false });
-            await this.finishToolCall(s, { toolId, toolName: call.name, argsJson: call.argsJson, callId,
-              status: "error" in submission ? "failed" : "executed",
-              content: "error" in submission ? `error: ${submission.error}` : "Plan submitted for user approval. Implementation has not been authorized." });
-          }
-          if (this.abort.signal.aborted) aborted = true;
-          else if (this.pendingSteering.length) toolLoop = true;
-          else if ("error" in submission) {
-            if (planCorrectionAttempts++ < 1) toolLoop = true;
-            else {
-              this.emit({ kind: "abort", reason: "Planning stopped before submitting a completed plan. Continue to finish planning.", diagnostics: { ...completion, cause: "plan_incomplete" } });
-              aborted = true;
-            }
-          } else {
-            if (assistantBuf.trim() || thoughtBuf.trim() || turnEvents.length) {
-              appendChatMessage(this.record, { role: "assistant", content: assistantBuf, reasoningContent: thoughtBuf || undefined, events: turnEvents.splice(0), ts: Date.now() });
-            }
-            submittedPlan = submission.markdown;
-            assistantBuf = submittedPlan;
-            thoughtBuf = "";
-            turnEvents.push({ kind: "text", text: submittedPlan, t: Date.now() });
-            this.emit({ kind: "text", messageId, delta: `\n\n${submittedPlan}` });
-          }
-        } else {
-          const result = await this.handleEvents(planningCalls, messageId, s, recordEvent);
-          aborted = result.abort ?? false;
-          toolLoop = result.toolLoop ?? false;
-        }
+        const result = await this.handleEvents(planningCalls, messageId, s, recordEvent);
+        aborted = result.abort ?? false;
+        toolLoop = result.toolLoop ?? false;
       }
 
       // The model truncated mid-tool-call (an unclosed write_file the parser
@@ -1917,7 +1887,8 @@ export class ChatSession {
         continue;
       }
       if (
-        this.toolProtocol === "native"
+        this.turnMode() !== "plan"
+        && this.toolProtocol === "native"
         && !assistantBuf.trim()
         && thoughtBuf.trim()
         && emptyNativeRetries < MAX_EMPTY_NATIVE_RETRIES
@@ -1936,12 +1907,32 @@ export class ChatSession {
         this.emitLiveTokenEstimate("");
         continue;
       }
+      if (this.turnMode() === "plan" && (!completion || !planResponse?.complete)) {
+        if (completion && planCorrectionAttempts++ < MAX_PLAN_CONTINUATIONS) {
+          // Preserve visible progress and give the model its previous reply as context.
+          // This is a continuation of planning, never a completed plan or approval state.
+          if (assistantBuf.trim() || thoughtBuf.trim()) appendChatMessage(this.record, {
+            role: "assistant", content: assistantBuf, reasoningContent: thoughtBuf || undefined,
+            events: turnEvents.splice(0), ts: Date.now()
+          });
+          assistantBuf = "";
+          thoughtBuf = "";
+          turnEvents.length = 0;
+          completedEventCount = 0;
+          repairNote = PLAN_CONTINUATION_NOTE;
+          this.emit({ kind: "turnRecovery", messageId, text: "Continuing planning to finish the plan…" });
+          await this.saveRecord();
+          continue;
+        }
+        completedEventCount = 0;
+        this.emit({ kind: "abort", reason: "The model stopped before completing the plan. Continue planning to try again.", diagnostics: { ...completion, cause: "plan_incomplete" } });
+        break;
+      }
+      if (planResponse?.complete) assistantBuf = assistantBuf.trim();
       // Done — flush the final assistant message, or report an empty turn.
       this.acceptingSteering = false;
       const fileChanges = summarizeFileChanges(fileWrites.values());
-      if (this.turnMode() === "plan" && !submittedPlan) {
-        this.emit({ kind: "abort", reason: "Planning stopped before submitting a completed plan. Continue to finish planning.", diagnostics: { ...completion, cause: "plan_incomplete" } });
-      } else if (assistantBuf.trim()) {
+      if (assistantBuf.trim()) {
         if (this.turnMode() !== "plan") {
           this.emit({ kind: "summary", messageId, text: extractSummary(assistantBuf) });
         }
@@ -2002,6 +1993,7 @@ export class ChatSession {
           events: completed });
       }
     }
+    this.planResponse = undefined;
     this.completeContextIngestion();
     this.acceptingSteering = false;
     await Promise.all(this.features.map(feature => feature.endTurn?.()));
@@ -2038,7 +2030,8 @@ export class ChatSession {
     recordEvent: (event: ParsedEvent) => void
   ): Promise<{ continue: boolean; abort?: boolean; toolLoop?: boolean }> {
     let toolLoop = false;
-    for (const e of events) {
+    for (let e of events) {
+      if (e.kind === "text" && this.planResponse) e = { ...e, text: this.planResponse.feed(e.text) };
       if (e.kind === "toolCall" && this.stagedPlanCalls) {
         this.stagedPlanCalls.push(e);
         continue;
