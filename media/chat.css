@@ -351,19 +351,19 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 /* tabular-nums: every digit the same width, so a counting stat never makes the
    label wobble horizontally. */
 .diff-stat { font-family: var(--vscode-editor-font-family); font-weight: 400; font-size: 0.95em; font-variant-numeric: tabular-nums; transition: color 0.12s; }
-.diff-stat.add { color: var(--success-foreground); }
-.diff-stat.del { color: var(--error-highlight-foreground); }
+.diff-stat.add { color: var(--diff-added-foreground); }
+.diff-stat.del { color: var(--diff-removed-foreground); }
 /* Settled edit/create counts stay colored for an open diff or row hover.
    Active counts share the heading's shimmer. */
 .tool-head .diff-stat, .change-file-row .diff-stat { color: inherit; }
 .tool-card:not(.failed):not(.rejected) > .tool-head:hover .diff-stat.add,
 .tool-card.open:not(.failed):not(.rejected) > .tool-head:not(.active-tool-head) .diff-stat.add,
 .change-summary:is(.open, :hover, :has(:focus-visible)) > .change-summary-head .diff-stat.add,
-.change-file-item:is(.open, :hover, :has(:focus-visible)) > .change-file-row .diff-stat.add { color: var(--success-foreground); }
+.change-file-item:is(.open, :hover, :has(:focus-visible)) > .change-file-row .diff-stat.add { color: var(--diff-added-foreground); }
 .tool-card:not(.failed):not(.rejected) > .tool-head:hover .diff-stat.del,
 .tool-card.open:not(.failed):not(.rejected) > .tool-head:not(.active-tool-head) .diff-stat.del,
 .change-summary:is(.open, :hover, :has(:focus-visible)) > .change-summary-head .diff-stat.del,
-.change-file-item:is(.open, :hover, :has(:focus-visible)) > .change-file-row .diff-stat.del { color: var(--error-highlight-foreground); }
+.change-file-item:is(.open, :hover, :has(:focus-visible)) > .change-file-row .diff-stat.del { color: var(--diff-removed-foreground); }
 .tool-expanded { padding: 3px 0 1px 24px; margin-top: 0; font-size: inherit; font-weight: 400; line-height: 1.4; }
 /* Expanded tool payloads inherit from the chat rather than the editor's font
    size setting. Code-oriented payloads step down slightly because the editor
@@ -528,14 +528,14 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .tool-diff .diff-lines { display: grid; width: max-content; min-width: 100%; }
 .tool-diff .diff-line { position: relative; display: grid; width: 100%; min-width: 0; grid-template-columns: 6ch minmax(0, 1fr); min-height: 0; padding: 2px 0; line-height: 1.2; white-space: pre; }
 .tool-diff .diff-line::before { content: ""; position: absolute; inset: 0 auto 0 0; width: 3px; background: transparent; }
-.tool-diff .diff-line.add { background: color-mix(in srgb, var(--success-foreground) 15%, transparent); }
-.tool-diff .diff-line.del { background: color-mix(in srgb, var(--error-foreground) 15%, transparent); }
-.tool-diff .diff-line.add::before { background: var(--success-foreground); }
-.tool-diff .diff-line.del::before { background: var(--error-foreground); }
+.tool-diff .diff-line.add { background: color-mix(in srgb, var(--diff-added-foreground) 15%, transparent); }
+.tool-diff .diff-line.del { background: color-mix(in srgb, var(--diff-removed-foreground) 15%, transparent); }
+.tool-diff .diff-line.add::before { background: var(--diff-added-foreground); }
+.tool-diff .diff-line.del::before { background: var(--diff-removed-foreground); }
 .tool-diff .diff-line.neutral { color: var(--vscode-descriptionForeground); }
 .tool-diff .diff-no { color: var(--vscode-editorLineNumber-foreground, var(--vscode-descriptionForeground)); text-align: right; padding: 0 10px 0 5px; user-select: none; opacity: 0.82; }
-.tool-diff .diff-line.add .diff-no { color: var(--success-foreground); opacity: 1; }
-.tool-diff .diff-line.del .diff-no { color: var(--error-foreground); opacity: 1; }
+.tool-diff .diff-line.add .diff-no { color: var(--diff-added-foreground); opacity: 1; }
+.tool-diff .diff-line.del .diff-no { color: var(--diff-removed-foreground); opacity: 1; }
 .tool-diff .diff-code { min-width: 0; padding-right: 9px; color: var(--vscode-editor-foreground, var(--vscode-foreground)); }
 
 .card { padding: 8px 10px; }

@@ -14,9 +14,9 @@ describe("tool calling profiles", () => {
   });
 
   it("uses the default profile for missing or invalid settings", () => {
-    expect(normalizeToolCallingProfile(undefined)).toBe("compat-gemma4");
-    expect(normalizeToolCallingProfile("unsupported")).toBe("compat-gemma4");
-    expect(normalizeToolCallingProfile(123)).toBe("compat-gemma4");
+    expect(normalizeToolCallingProfile(undefined)).toBe("native");
+    expect(normalizeToolCallingProfile("unsupported")).toBe("native");
+    expect(normalizeToolCallingProfile(123)).toBe("native");
   });
 
   it("returns a recovery family only for compatibility profiles", () => {

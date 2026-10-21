@@ -15,10 +15,10 @@ const PROFILES = new Set<ToolCallingProfile>([
   "compat-gpt-oss"
 ]);
 
-/** Use the default compatibility profile for missing or invalid settings. */
+/** Use native-only tool calling for missing or invalid settings. */
 export function normalizeToolCallingProfile(value: unknown): ToolCallingProfile {
   if (PROFILES.has(value as ToolCallingProfile)) return value as ToolCallingProfile;
-  return "compat-gemma4";
+  return "native";
 }
 
 export function compatibilityFamily(profile: ToolCallingProfile): CompatibilityFamily | undefined {

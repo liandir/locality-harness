@@ -316,7 +316,7 @@ describe("ChatStorage", () => {
     }));
 
     await expect(storage.load(id)).resolves.toMatchObject({
-      reasoningEffort: "default", mode: "act", toolCallingMode: "compat-gemma4"
+      reasoningEffort: "default", mode: "act", toolCallingMode: "native"
     });
   });
 

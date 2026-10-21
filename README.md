@@ -89,8 +89,8 @@ settings. The installed edition is shown in Locality's Settings tab.
    `http://127.0.0.1:8080/v1` or `http://192.168.1.50:8080/v1`, then click **Set**
    and select the model. Use `localhost` or a private IP address; other DNS names
    such as `nas.local` are not accepted.
-3. Under **Tool calling**, choose your model family's compatibility profile, or
-   **Native server only** when the server returns structured tool calls reliably.
+3. **Tool calling** defaults to **Native server only**. Choose your model family's
+   compatibility profile if it needs recovery for tool calls leaked into text.
 4. Open a project folder, click **+ New chat**, and describe what you want to do.
 
 Use **Act** to make changes, **Plan** to explore a solution before editing, and

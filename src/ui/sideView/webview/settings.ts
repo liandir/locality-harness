@@ -4,6 +4,7 @@ import { chevronIcon } from "../../icons.js";
 import type { SettingsSection } from "../../messaging.js";
 import type { SideViewState } from "./types.js";
 import { DEFAULT_MEMORY_MAX_COUNT, MAX_MEMORY_COUNT } from "../../../chat/memoryLimits.js";
+import { normalizeToolCallingProfile } from "../../../llm/toolCallingProfile.js";
 import { DEFAULT_REASONING_EFFORT, REASONING_NONE, availableReasoningEffort, normalizeReasoningEfforts, reasoningEffortChoices } from "../../../chat/reasoningEffort.js";
 
 export function renderSettings(state: SideViewState, expandedSettings: ReadonlySet<SettingsSection>): string {
@@ -13,7 +14,7 @@ export function renderSettings(state: SideViewState, expandedSettings: ReadonlyS
   const s = state.settings;
   const endpoint = state.endpointDraft ?? String(s["endpoint"] ?? "http://localhost:8080/v1");
   const model = String(s["model"] ?? "local");
-  const toolCallingMode = String(s["toolCallingMode"] ?? "compat-gemma4");
+  const toolCallingMode = normalizeToolCallingProfile(s["toolCallingMode"]);
   const temperature = String(s["temperature"] ?? 0.8);
   const topK = String(s["topK"] ?? 40);
   const topP = String(s["topP"] ?? 0.95);

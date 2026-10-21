@@ -175,7 +175,7 @@
             "Prefer structured calls and recover leaked Muse Glimmer ATEM syntax. Muse requires native server tool support.",
             "Prefer structured calls, recover leaked GPT-OSS Harmony syntax, and fall back to the Harmony legacy adapter when native tools are rejected."
           ],
-          "default": "compat-gemma4",
+          "default": "native",
           "description": "Tool-call transport and compatibility profile. Native server only requires a tool-aware server template; family profiles add narrowly scoped recovery and, where reliable, a legacy fallback."
         },
         "locality.temperature": {

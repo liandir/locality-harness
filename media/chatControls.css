@@ -8,6 +8,9 @@
   --surface-stroke: color-mix(in srgb, var(--vscode-foreground) 9%, transparent);
   --surface-stroke-strong: color-mix(in srgb, var(--vscode-foreground) 14%, transparent);
   --success-foreground: var(--vscode-gitDecoration-addedResourceForeground, var(--vscode-testing-iconPassed, #3fb950));
+  /* File changes have their own semantics; error text can be white in themes. */
+  --diff-added-foreground: var(--vscode-gitDecoration-addedResourceForeground, var(--vscode-editorGutter-addedBackground, #608b4e));
+  --diff-removed-foreground: var(--vscode-gitDecoration-deletedResourceForeground, var(--vscode-editorGutter-deletedBackground, #c74e39));
   --surface-fill-hover: color-mix(in srgb, var(--vscode-foreground) 8%, transparent);
   --scrollbar-size: 4px;
   --scrollbar-hover-size: calc(1.5 * var(--scrollbar-size));
