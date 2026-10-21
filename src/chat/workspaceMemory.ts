@@ -31,6 +31,8 @@ export class WorkspaceMemory {
   private waitingTurns = 0;
   private listeners = new Set<() => void>();
   private pending = new Set<Promise<void>>();
+  // Generation stays separate so listing progress never waits for the model.
+  private runTask?: Promise<void>;
   // A disk failure cannot be persisted to that disk. Keep it visible for this host's lifetime.
   private unsaved = new Map<string, MemoryAttempt>();
   private unsubscribe: () => void;
@@ -39,7 +41,7 @@ export class WorkspaceMemory {
       if (foregroundBusy()) this.active?.controller.abort();
       else this.schedule();
     });
-    this.track(this.restore());
+    void this.restore();
   }
   onChange(listener: () => void): { dispose(): void } {
     this.listeners.add(listener);
@@ -136,7 +138,8 @@ export class WorkspaceMemory {
     }
   }
   /** Rehydrate only this workspace; explicit cancellation is never undone by reload. */
-  async restore(): Promise<void> {
+  restore(): Promise<void> { return this.track(this.restorePending()); }
+  private async restorePending(): Promise<void> {
     const storage = this.getStorage(); const epoch = this.epoch;
     if (!storage || this.disposed) return;
     try {
@@ -199,11 +202,17 @@ export class WorkspaceMemory {
     if (this.active && !settingsStillMatch(this.active.endpoint, this.active.model)) this.active.controller.abort();
     this.schedule(); this.changed();
   }
-  dispose(): void { this.disposed = true; this.suspend(); this.unsubscribe(); this.listeners.clear(); }
+  /** Stop new work immediately, then finish admissions, restoration and in-flight storage writes. */
+  async dispose(): Promise<void> {
+    if (!this.disposed) {
+      this.disposed = true; this.suspend(); this.unsubscribe(); this.listeners.clear();
+    }
+    await Promise.allSettled([...this.pending, this.runTask]);
+  }
   private schedule(): void {
     if (this.disposed || this.active || this.timer || !this.queue.size || foregroundBusy() || this.waitingTurns) return;
     const earliest = Math.min(...[...this.queue.values()].map(a => a.retryAt ?? 0));
-    this.timer = setTimeout(() => { this.timer = undefined; void this.run(); }, Math.max(this.idleDelayMs, earliest - Date.now()));
+    this.timer = setTimeout(() => { this.timer = undefined; this.runTask = this.run(); }, Math.max(this.idleDelayMs, earliest - Date.now()));
   }
   private async run(): Promise<void> {
     if (this.disposed || this.active || foregroundBusy() || this.waitingTurns) return;

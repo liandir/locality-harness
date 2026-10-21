@@ -106,7 +106,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   );
 }
 
-export function deactivate(): void { /* noop */ }
+export async function deactivate(): Promise<void> { await memory?.dispose(); }
 
 async function refreshChatLists(): Promise<void> {
   await Promise.all([sideProvider.pushChats(), chatProvider.pushRecentChats(), sideProvider.pushMemories()]);

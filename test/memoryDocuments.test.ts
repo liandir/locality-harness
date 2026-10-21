@@ -47,7 +47,7 @@ beforeEach(async () => {
   await storage.save(record);
   id = record.id;
 });
-afterEach(async () => { documents.dispose(); memory.dispose(); await fs.rm(dir, { recursive: true, force: true }); });
+afterEach(async () => { documents.dispose(); await memory.dispose(); await fs.rm(dir, { recursive: true, force: true }); });
 
 describe("memory Markdown editors", () => {
   it("opens an editable Markdown document and saves validated memory to its source chat", async () => {

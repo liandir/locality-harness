@@ -31,7 +31,7 @@ beforeEach(async () => {
   mocks.tokenize.mockReset().mockImplementation(async (_endpoint, text: string) => Math.ceil(text.length / 4));
   mocks.context.mockReset().mockResolvedValue(8192);
 });
-afterEach(async () => { memory.dispose(); releases.forEach(release => release()); await fs.rm(dir, { recursive: true, force: true }); });
+afterEach(async () => { await memory.dispose(); releases.forEach(release => release()); await fs.rm(dir, { recursive: true, force: true }); });
 async function chat(text = "Parser change requested"): Promise<ChatRecord> {
   const rec = storage.newRecord("native"); rec.title = "Parser";
   rec.messages = [{ role: "user", content: text, ts: 1 }, { role: "assistant", content: "Parser changed and verified", ts: 2 }];
@@ -40,6 +40,85 @@ async function chat(text = "Parser change requested"): Promise<ChatRecord> {
 async function generated(id: string): Promise<void> {
   await vi.waitFor(async () => expect((await storage.load(id))?.memory?.text).toContain("Parser"));
 }
+describe("memory shutdown", () => {
+  it.each(["admission", "restoration"] as const)("waits for pending %s before releasing storage", async operation => {
+    const rec = await chat();
+    await memory.list(); // Finish construction's initial restoration first.
+    let release!: () => void;
+    const barrier = new Promise<void>(resolve => { release = resolve; });
+    let held = false;
+    const original = storage.metadata.bind(storage);
+    const read = vi.spyOn(storage, "metadata").mockImplementation(async (...args) => {
+      held = true; await barrier;
+      return original(...args);
+    });
+    const maintain = storage.maintainMemory.bind(storage);
+    const write = vi.spyOn(storage, "maintainMemory").mockImplementation(async (...args) => {
+      held = true; await barrier;
+      return maintain(...args);
+    });
+    const work = operation === "admission" ? memory.enqueue(rec.id) : memory.restore();
+    let closing: Promise<void> | undefined;
+    try {
+      await vi.waitFor(() => expect(held).toBe(true));
+      let closed = false;
+      closing = memory.dispose().then(() => { closed = true; });
+      await Promise.resolve();
+      expect(closed).toBe(false);
+      release();
+      await closing;
+      expect(mocks.complete).not.toHaveBeenCalled();
+    } finally {
+      release();
+      await work; await closing;
+      read.mockRestore(); write.mockRestore();
+    }
+  });
+
+  it.each(["succeeded", "queued"] as const)("waits for the %s write before releasing storage", async state => {
+    const rec = await chat();
+    if (state === "queued") {
+      mocks.complete.mockImplementationOnce((_endpoint, _req, signal: AbortSignal) => new Promise((_resolve, reject) => {
+        signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+      }));
+    }
+    let release!: () => void;
+    const barrier = new Promise<void>(resolve => { release = resolve; });
+    let held = false;
+    let holdWrites = state === "succeeded";
+    const original = storage.maintainMemory.bind(storage);
+    const write = vi.spyOn(storage, "maintainMemory").mockImplementation(async (id, update) => {
+      let savedState: string | undefined;
+      const saved = await original(id, current => {
+        const changed = update(current);
+        if (changed) savedState = current.memoryAttempt?.state;
+        return changed;
+      });
+      // A visible chat record does not mean its enclosing storage operation has finished.
+      if (holdWrites && savedState === state) { held = true; await barrier; }
+      return saved;
+    });
+    let closing: Promise<void> | undefined;
+    try {
+      await memory.enqueue(rec.id);
+      if (state === "succeeded") await vi.waitFor(() => expect(held).toBe(true));
+      else await vi.waitFor(() => expect(mocks.complete).toHaveBeenCalledOnce());
+      holdWrites = true;
+      let closed = false;
+      closing = Promise.resolve(memory.dispose()).then(() => { closed = true; });
+      await vi.waitFor(() => expect(held).toBe(true));
+      expect((await storage.load(rec.id))!.memoryAttempt?.state).toBe(state);
+      expect(closed).toBe(false);
+      release();
+      await closing;
+      expect(closed).toBe(true);
+    } finally {
+      release();
+      await closing;
+      write.mockRestore();
+    }
+  });
+});
 describe("memory generation", () => {
   it("activates new summaries for retrieval automatically", async () => {
     const rec = await chat();
@@ -164,7 +243,7 @@ describe("memory generation", () => {
     await vi.waitFor(async () => expect((await memory.creations(rec.id)).map(item => item.status)).toEqual(["created", "created"]));
     const reopened = new WorkspaceMemory(() => storage);
     expect((await reopened.creations(rec.id)).map(item => [item.messageTs, item.operation])).toEqual([[2, "create"], [4, "update"]]);
-    reopened.dispose();
+    await reopened.dispose();
     expect((await storage.fork(rec)).memoryCreations).toBeUndefined();
     rec.messages = rec.messages.slice(0, 1);
     await storage.save(rec);
@@ -574,7 +653,7 @@ describe("durable memory attempts", () => {
 
   it("retries transient failures twice and persists the exhausted diagnostics", async () => {
     const { StreamFailure } = await import("../src/llm/completion.js");
-    memory.dispose(); memory = new WorkspaceMemory(() => storage, 1, { retryDelay: () => 1 });
+    await memory.dispose(); memory = new WorkspaceMemory(() => storage, 1, { retryDelay: () => 1 });
     const rec = await chat();
     mocks.complete.mockRejectedValue(new StreamFailure("secret server body", { cause: "unexpected_eof", completionEvidence: "none", completionTokens: 23 }));
     await memory.enqueue(rec.id);
@@ -582,7 +661,7 @@ describe("durable memory attempts", () => {
     expect(mocks.complete).toHaveBeenCalledTimes(3);
     const attempt = (await storage.load(rec.id))!.memoryAttempt!;
     expect(attempt).toMatchObject({ retries: 2, requests: 3, state: "failed", diagnostic: { stage: "generation", cause: "unexpected_eof", attempt: 3, completion: { completionTokens: 23 } } });
-    memory.dispose(); memory = new WorkspaceMemory(() => storage, 1);
+    await memory.dispose(); memory = new WorkspaceMemory(() => storage, 1);
     await memory.list();
     expect((await memory.creations(rec.id))[0]).toMatchObject({ status: "failed", attemptId: attempt.id });
     expect(mocks.complete).toHaveBeenCalledTimes(3);
@@ -634,11 +713,11 @@ describe("durable memory attempts", () => {
     const end = beginForeground(); releases.push(end);
     const first = await chat(); const second = await chat("second");
     await memory.enqueue(first.id);
-    memory.dispose(); memory = new WorkspaceMemory(() => storage, 1);
+    await memory.dispose(); memory = new WorkspaceMemory(() => storage, 1);
     expect((await memory.creations(first.id))[0].status).toBe("queued");
     await memory.cancelAll();
     await memory.enqueue(second.id);
-    memory.dispose(); memory = new WorkspaceMemory(() => storage, 1);
+    await memory.dispose(); memory = new WorkspaceMemory(() => storage, 1);
     await memory.list(); end();
     await generated(second.id);
     expect((await storage.load(first.id))!.memoryAttempt?.state).toBe("cancelled");
@@ -658,7 +737,7 @@ describe("durable memory attempts", () => {
     const end = beginForeground(); releases.push(end);
     await vi.waitFor(async () => expect((await storage.load(rec.id))!.memoryAttempt?.state).toBe("queued"));
     expect((await storage.load(rec.id))!.memoryAttempt?.retries).toBe(0);
-    memory.dispose(); memory = new WorkspaceMemory(() => storage, 1);
+    await memory.dispose(); memory = new WorkspaceMemory(() => storage, 1);
     await memory.list(); end();
     await generated(rec.id);
     const resumed = JSON.parse(mocks.complete.mock.calls[2][1].messages[1].content);
@@ -681,7 +760,7 @@ describe("durable memory attempts", () => {
     expect(attempt.diagnostic).toMatchObject({ stage: "storage", cause: "storage", retryable: false });
     expect(attempt.checkpoint?.complete).toBe(true);
     write.mockRestore();
-    memory.dispose(); memory = new WorkspaceMemory(() => storage, 1);
+    await memory.dispose(); memory = new WorkspaceMemory(() => storage, 1);
     await memory.retry(rec.id, attempt.id);
     await generated(rec.id);
     expect(mocks.complete).toHaveBeenCalledOnce();
@@ -689,7 +768,7 @@ describe("durable memory attempts", () => {
 
   it("reports failures even if recording their status also fails", async () => {
     const reportError = vi.fn();
-    memory.dispose(); memory = new WorkspaceMemory(() => storage, 1, { reportError });
+    await memory.dispose(); memory = new WorkspaceMemory(() => storage, 1, { reportError });
     const rec = await chat();
     const original = storage.maintainMemory.bind(storage);
     const write = vi.spyOn(storage, "maintainMemory").mockImplementation((id, update) => original(id, current => {
@@ -709,18 +788,18 @@ describe("durable memory attempts", () => {
 
   it("keeps the retry budget across a reload during backoff", async () => {
     const { StreamFailure } = await import("../src/llm/completion.js");
-    memory.dispose(); memory = new WorkspaceMemory(() => storage, 1, { retryDelay: () => 100 });
+    await memory.dispose(); memory = new WorkspaceMemory(() => storage, 1, { retryDelay: () => 100 });
     const rec = await chat();
     mocks.complete.mockRejectedValue(new StreamFailure("offline", { cause: "transport" }));
     await memory.enqueue(rec.id);
     await vi.waitFor(async () => expect((await storage.load(rec.id))!.memoryAttempt).toMatchObject({ state: "retry_wait", retries: 1 }));
-    memory.dispose(); memory = new WorkspaceMemory(() => storage, 1, { retryDelay: () => 1 });
+    await memory.dispose(); memory = new WorkspaceMemory(() => storage, 1, { retryDelay: () => 1 });
     await vi.waitFor(async () => expect((await memory.list())[0].status).toBe("failed"));
     expect(mocks.complete).toHaveBeenCalledTimes(3);
   });
 
   it("bounds total active work independently of the per-request timeout", async () => {
-    memory.dispose(); memory = new WorkspaceMemory(() => storage, 1, { budgetMs: 200 });
+    await memory.dispose(); memory = new WorkspaceMemory(() => storage, 1, { budgetMs: 200 });
     const rec = await chat();
     mocks.complete.mockImplementationOnce((_endpoint, _req, signal: AbortSignal) => new Promise((_resolve, reject) => {
       signal.addEventListener("abort", () => reject(signal.reason), { once: true });
@@ -777,7 +856,7 @@ describe("memory recovery invalidation", () => {
     await storage.maintainMemory(rec.id, current => {
       current.memoryAttempt = { ...current.memoryAttempt!, state: "generating", retries: 2, requests: 3, startedAt: Date.now() }; return true;
     });
-    memory.dispose(); memory = new WorkspaceMemory(() => storage, 1);
+    await memory.dispose(); memory = new WorkspaceMemory(() => storage, 1);
     await memory.list(); end();
     expect((await storage.load(rec.id))!.memoryAttempt).toMatchObject({ state: "failed", retries: 3, diagnostic: { cause: "unexpected_eof" } });
     expect(mocks.complete).not.toHaveBeenCalled();
