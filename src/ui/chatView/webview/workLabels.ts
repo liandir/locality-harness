@@ -217,6 +217,7 @@ export function settledToolLabel(toolName: string, createsNewFile = false, inclu
     glob: "Searched",
     update_todos: "Updated todos",
     ask_user_question: "Asked question",
+    submit_plan: "Submitted plan",
     compact_context: "Compacted context"
   };
   return chatFeature.settled?.[toolName] ?? labels[toolName] ?? capitalizeSentence(humanizeToolName(toolName));
@@ -239,6 +240,7 @@ export function erroredToolLabel(
     glob: "File search",
     update_todos: "Todo update",
     ask_user_question: "Question",
+    submit_plan: "Plan submission",
     compact_context: "Compaction"
   };
   const subject = chatFeature.subjects?.[toolName] ?? subjects[toolName] ?? capitalizeSentence(humanizeToolName(toolName));

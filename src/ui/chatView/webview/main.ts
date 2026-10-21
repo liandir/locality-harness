@@ -1,3 +1,6 @@
+import { pendingPlanTimestamp } from "../../../chat/planning.js";
+import type { CompletionDiagnostics } from "../../../llm/completion.js";
+import { renderInterruptionDetails } from "./interruption.js";
 import { startShiki, normalizeHighlightLanguage, highlightCode, highlightLanguageForPath } from "./highlighting.js";
 import { escapeHtml } from "../../html.js";
 import {
@@ -177,7 +180,7 @@ type MessagePart =
   | { id: string; kind: "tool"; card: ToolCard; startedAt?: number }
   | { id: string; kind: "steering"; message: Message; startedAt?: number }
   | { id: string; kind: "summary"; text: string }
-  | { id: string; kind: "abort"; reason: string };
+  | { id: string; kind: "abort"; reason: string; diagnostics?: CompletionDiagnostics };
 
 interface Message {
   id: string;
@@ -192,6 +195,7 @@ interface Message {
   toolCards: ToolCard[];
   summary?: string;
   aborted?: string;
+  interruptionResolved?: boolean;
   workStartedAt?: number;
   workEndedAt?: number;
   startNewPart?: boolean;
@@ -205,7 +209,7 @@ interface Message {
 
 type ComposerDecision =
   | { kind: "tool"; tool: ToolCard }
-  | { kind: "plan"; messageTs?: number };
+  | { kind: "plan"; messageTs: number };
 
 interface CompactActivity {
   id: string;
@@ -708,6 +712,7 @@ function mountShell(): void {
     <footer class="composer">
       <div id="scrollDownSlot"></div>
       <div id="messageQueue" class="message-queue" hidden></div>
+      <div id="incompletePlanning" hidden></div>
       <div class="composer-row">
         <div id="approvalSlot"></div>
         <div id="composerInput" class="composer-input">
@@ -1025,6 +1030,11 @@ function renderAttachmentHtml(attachment: UiAttachment, removeAttribute = ""): s
   </span>`;
 }
 
+function isContinuableResponse(message: Message): boolean {
+  return !!message.aborted && !message.interruptionResolved && message.recordTs !== undefined
+    && [...state.messages].reverse().find(item => item.role === "assistant" || item.role === "user") === message;
+}
+
 function renderMessageActions(parent: HTMLElement, m: Message): HTMLElement | undefined {
   let actions = directChild(parent, "message-actions");
   const inner = renderMessageActionsInnerHtml(m);
@@ -1036,6 +1046,7 @@ function renderMessageActions(parent: HTMLElement, m: Message): HTMLElement | un
     actions = document.createElement("div");
     actions.className = "message-actions";
   }
+  actions.classList.toggle("recovery-actions", isContinuableResponse(m));
   if (actions.dataset.messageActions !== m.id) actions.dataset.messageActions = m.id;
   setHtml(actions, inner);
   return actions;
@@ -1044,7 +1055,7 @@ function renderMessageActions(parent: HTMLElement, m: Message): HTMLElement | un
 function renderMessageActionsHtml(m: Message): string {
   const inner = renderMessageActionsInnerHtml(m);
   if (!inner) return "";
-  return `<div class="message-actions" data-message-actions="${m.id}">${inner}</div>`;
+  return `<div class="message-actions${isContinuableResponse(m) ? " recovery-actions" : ""}" data-message-actions="${m.id}">${inner}</div>`;
 }
 
 function renderMessageActionsInnerHtml(m: Message): string {
@@ -1067,9 +1078,9 @@ function renderMessageActionsInnerHtml(m: Message): string {
     }
   }
   if (m.role === "assistant" && m.responseToTs !== undefined && !state.busy) {
-    const latestResponse = [...state.messages].reverse().find(message => message.role === "assistant" || message.role === "user");
-    if (m.aborted && m.recordTs !== undefined && latestResponse === m) {
+    if (isContinuableResponse(m)) {
       actions.push(`<button class="icon-btn copy-btn" type="button" data-continue-chat="${m.recordTs}" data-tip="Continue" aria-label="Continue">${rightArrowIcon()}</button>`);
+      if (!state.planning && state.queuedMessages.length) actions.push(`<button class="action-btn" type="button" data-resume-queue="${m.recordTs}">Run queued messages</button>`);
     } else if (!m.aborted) {
       actions.push(`<button class="icon-btn copy-btn" type="button" data-fork-chat="${m.responseToTs}" data-tip="Fork chat" aria-label="Fork chat">${forkIcon()}</button>`);
     }
@@ -1539,7 +1550,7 @@ function renderPartInto(
     return;
   } else {
     cls = "part abort-part";
-    html = `<div class="assistant-markdown abort">${escapeHtml(part.reason)}</div>`;
+    html = `<div class="assistant-markdown abort">${escapeHtml(part.reason)}</div>${renderInterruptionDetails(part.diagnostics)}`;
   }
   if (el.className !== cls) el.className = cls;
   setHtml(el, html);
@@ -1911,6 +1922,11 @@ function ensureThinkingIcon(head: HTMLElement): void {
 
 function updateComposer(): void {
   const pendingDecision = findPendingComposerDecision();
+  const incomplete = root.querySelector<HTMLElement>("#incompletePlanning");
+  if (incomplete) {
+    incomplete.hidden = !state.planning || state.busy || !!pendingDecision;
+    setHtml(incomplete, '<button class="action-btn" type="button" data-cancel-planning="">Cancel planning</button>');
+  }
   const queue = root.querySelector("#messageQueue") as HTMLElement | null;
   if (queue) {
     const editingInput = document.activeElement?.hasAttribute("data-queued-edit-input")
@@ -2073,7 +2089,7 @@ function findPendingComposerDecision(): ComposerDecision | undefined {
       }
     }
   }
-  if (state.planning && !state.busy) {
+  if (state.pendingPlanMessageTs !== undefined && !state.busy) {
     return { kind: "plan", messageTs: state.pendingPlanMessageTs };
   }
   return undefined;
@@ -2170,24 +2186,24 @@ function renderToolApprovalComposer(tc: ToolCard): string {
   </div>`;
 }
 
-function renderPlanApprovalComposer(messageTs?: number): string {
+function renderPlanApprovalComposer(messageTs: number): string {
   return renderQuestionLayout({
     title: "Plan", icon: scrollIcon(),
-    content: `<p>${messageTs === undefined ? "Planning is paused. " : ""}Accepting the plan switches to Act mode and starts implementation. Request changes to stay in Plan mode, or cancel planning to release queued messages.</p>`,
-    options: `<button class="action-btn question-option" type="button" data-accept-plan="${messageTs ?? ""}"${messageTs === undefined ? " disabled" : ""}>
+    content: `<p>Accepting the plan switches to Act mode and starts implementation. Request changes to stay in Plan mode, or cancel planning to release queued messages.</p>`,
+    options: `<button class="action-btn question-option" type="button" data-accept-plan="${messageTs}">
       <span class="question-option-badge" aria-hidden="true">${pawnIcon()}</span>
       <span class="question-option-label">Accept plan</span>
       <span class="question-option-arrow" aria-hidden="true">${sendIcon()}</span>
     </button>`,
-    secondary: { attribute: `data-cancel-planning="${messageTs ?? ""}"`, label: "Cancel planning", kind: "cancel" },
-    submit: { attribute: `data-plan-changes="${messageTs ?? ""}"`, label: "Request changes" },
+    secondary: { attribute: `data-cancel-planning="${messageTs}"`, label: "Cancel planning", kind: "cancel" },
+    submit: { attribute: `data-plan-changes="${messageTs}"`, label: "Request changes" },
     placeholder: "Request changes", inputLabel: "Suggest changes to the plan"
   });
 }
 
 function submitPlanResponse(messageTs: number | undefined, feedback?: string): void {
   if (state.busy || !state.planning || state.pendingPlanMessageTs !== messageTs || (feedback !== undefined && !feedback.trim())) return;
-  if (feedback === undefined && messageTs === undefined) return;
+  if (messageTs === undefined) return;
   state.mode = feedback === undefined ? "act" : "plan";
   state.busy = true;
   state.serverPending = "server";
@@ -2489,6 +2505,7 @@ function toolIcon(tc: ToolCard): string {
   if (tc.toolName === "compact_context") return compactIcon();
   if (tc.toolName === "update_todos") return checklistIcon();
   if (tc.toolName === "ask_user_question") return questionIcon();
+  if (tc.toolName === "submit_plan") return scrollIcon();
   if (isFeatureTool(tc)) return chatFeature.icon?.() ?? searchIcon();
   if (isWriteToolCard(tc)) return pencilIcon();
   if (tc.toolName === "search_memories" || tc.toolName === "recall_memory") return memoryIcon();
@@ -2680,6 +2697,7 @@ function diffStatHtml(stats: { added: number; removed: number }): string {
 }
 
 function renderToolCardLabel(tc: ToolCard): string {
+  if (tc.toolName === "submit_plan") return "";
   const featureLabel = chatFeature.renderLabel?.(tc, toolArgs(tc), escapeHtml);
   if (featureLabel !== undefined) return featureLabel;
   if (tc.toolName === "update_todos") {
@@ -2814,7 +2832,8 @@ function restoreAssistantParts(msg: Message, recordMessage: ChatRecord["messages
   msg.recordTs = recordMessage.ts;
   if (recordMessage.interruption) {
     msg.aborted = recordMessage.interruption.reason;
-    msg.parts.push({ id: nextPartId("abort"), kind: "abort", reason: msg.aborted });
+    msg.interruptionResolved = recordMessage.interruption.resolved;
+    msg.parts.push({ id: nextPartId("abort"), kind: "abort", reason: msg.aborted, diagnostics: recordMessage.interruption.diagnostics });
   }
   let restoredText = "";
   let restoredThought = "";
@@ -3202,6 +3221,11 @@ function bindOnce(): void {
       state.busy = true;
       state.serverPending = "context";
       render();
+      return;
+    }
+    const resumeQueue = target.closest<HTMLElement>("[data-resume-queue]");
+    if (resumeQueue && !state.busy) {
+      send({ type: "resumeMessageQueue", messageTs: Number(resumeQueue.dataset.resumeQueue) });
       return;
     }
     const forkChat = target.closest("[data-fork-chat]") as HTMLElement | null;
@@ -3766,12 +3790,10 @@ function saveQueuedMessageEdit(): void {
 
 function loadFromRecord(rec: ChatRecord): void {
   state.tokens = rec.totalTokens;
-  state.pendingPlanMessageTs = rec.pendingPlanMessageTs;
-  state.planning = rec.planning === true || rec.pendingPlanMessageTs !== undefined;
-  if (state.pendingPlanMessageTs !== undefined) {
-    state.mode = "plan";
-    state.chatModeMenuOpen = false;
-  }
+  state.pendingPlanMessageTs = pendingPlanTimestamp(rec);
+  state.planning = rec.planning === true || state.pendingPlanMessageTs !== undefined;
+  state.mode = state.planning ? "plan" : rec.mode;
+  if (state.planning) state.chatModeMenuOpen = false;
   state.messages = [];
   state.pendingFileUndo = undefined;
   state.notices = [];
@@ -4335,6 +4357,13 @@ function handleHostMessage(msg: ExtToChat): void {
       render();
       break;
     }
+    case "turnRecovery": {
+      const message = getOrCreateMsg(msg.messageId, "assistant");
+      finalizeLiveThoughts(message);
+      appendPartText(message, "text", `${msg.text}\n\n`);
+      render();
+      break;
+    }
     case "abort": {
       state.serverPending = undefined;
       let target = state.messages[state.messages.length - 1];
@@ -4363,10 +4392,10 @@ function handleHostMessage(msg: ExtToChat): void {
         target.workEndedAt = Date.now();
       }
       if (!target.parts.some(part => part.kind === "abort" && part.reason === msg.reason)) {
-        target.parts.push({ id: nextPartId("abort"), kind: "abort", reason: msg.reason });
+        target.parts.push({ id: nextPartId("abort"), kind: "abort", reason: msg.reason, diagnostics: msg.diagnostics });
       }
-      state.busy = !state.planning && state.queuedMessages.length > 0;
-      state.serverPending = state.busy ? "server" : undefined;
+      state.busy = false;
+      state.serverPending = undefined;
       render();
       break;
     }

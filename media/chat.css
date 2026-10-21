@@ -92,6 +92,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 }
 .msg.user > .message-actions { align-self: flex-end; flex-direction: row-reverse; gap: 15px; max-width: 90%; padding-right: 2px; }
 .msg.assistant > .message-actions { align-self: flex-start; }
+.msg > .message-actions.recovery-actions { opacity: 1; pointer-events: auto; }
 .message-actions .message-mode { margin-inline-start: 7px; margin-inline-end: 4px; }
 .message-date { flex: 0 0 auto; margin-inline: 7px; font-variant-numeric: tabular-nums; color: var(--vscode-descriptionForeground); font-size: 0.82em; line-height: 1.35; white-space: nowrap; }
 .msg.user .message-actions > :is(.message-mode, .message-date) { margin-inline: 0; }
@@ -754,3 +755,8 @@ body.image-preview-open .chat-body { overflow: hidden; }
 .chat-tab-label > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chat-tab-close svg { width: 16px; height: 16px; display: block; }
 .chat-tab-label:focus-visible { background: var(--surface-fill-hover); color: var(--vscode-foreground); }
+
+.interruption-details { margin-top: 8px; }
+.interruption-details > summary { display: flex; align-items: center; gap: 6px; width: fit-content; font-size: 0.86em; }
+.interruption-details > .tool-output-surface { margin-top: 6px; padding: 8px 10px; }
+#incompletePlanning { align-self: flex-end; margin-bottom: 6px; }

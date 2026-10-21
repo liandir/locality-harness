@@ -1,37 +1,9 @@
 import { test, expect, type Page, type Locator } from "@playwright/test";
 import type { ChatRecord } from "../../src/chat/types.js";
 import type { MemoryCreation } from "../../src/chat/memory.js";
-import type { ExtToChat, ExtToSide } from "../../src/ui/messaging.js";
+import { hostMessage, webview, type Theme } from "./harness.js";
 
-type Theme = "light" | "dark";
-type Row = "memory-created" | "memory-failed" | "memory-generating" | "tool-executed" | "tool-failed" | "tool-rejected" | "future-tool";
-
-async function hostMessage(page: Page, message: ExtToChat | ExtToSide): Promise<void> {
-  await page.evaluate(data => window.dispatchEvent(new MessageEvent("message", { data })), message);
-}
-
-async function webview(page: Page, theme: Theme, view = "chat"): Promise<void> {
-  await page.setContent(`<html><head></head><body class="vscode-${theme}"><div id="app"></div></body></html>`);
-  // Theme inputs only: production CSS owns every interaction and semantic fill.
-  await page.addStyleTag({ content: `:root {
-    --vscode-foreground: ${theme === "dark" ? "#cccccc" : "#333333"};
-    --vscode-descriptionForeground: ${theme === "dark" ? "#999999" : "#666666"};
-    --vscode-sideBar-background: ${theme === "dark" ? "#181818" : "#f3f3f3"};
-    --vscode-editor-background: ${theme === "dark" ? "#1f1f1f" : "#ffffff"};
-    --vscode-errorForeground: ${theme === "dark" ? "#f48771" : "#a1260d"};
-    --vscode-font-family: sans-serif; --vscode-font-size: 13px;
-  }
-  /* These checks assert states, independently of transition timing. */
-  *, *::before, *::after { transition: none !important; }` });
-  await page.addStyleTag({ path: `media/${view}.css` });
-  await page.addStyleTag({ path: "media/chatControls.css" });
-  await page.evaluate(() => {
-    Object.assign(window, { acquireVsCodeApi: () => ({
-      postMessage: () => undefined, getState: () => undefined, setState: () => undefined
-    }) });
-  });
-  await page.addScriptTag({ path: `dist/webview/${view}.js` });
-}
+type Row = "memory-created" | "memory-failed" | "memory-generating" | "tool-executed" | "tool-failed" | "tool-rejected" | "future-tool" | "plan-submitted" | "plan-failed";
 
 async function chatRow(page: Page, theme: Theme, row: Row): Promise<Locator> {
   await webview(page, theme);
@@ -47,9 +19,9 @@ async function chatRow(page: Page, theme: Theme, row: Row): Promise<Locator> {
     record.memoryCreations = [{ messageTs: 3, operation: "update", status,
       text: "Parser decisions.", generatedAt: 4, error: status === "failed" ? "Memory generation failed." : undefined }];
   } else {
-    const status = row === "tool-failed" ? "failed" : row === "tool-rejected" ? "rejected" : "executed";
+    const status = row.endsWith("-failed") ? "failed" : row === "tool-rejected" ? "rejected" : "executed";
     record.messages.push({ role: "tool", content: status === "executed" ? "Parser contents" : "Could not read parser", ts: 2,
-      toolCall: { name: row === "future-tool" ? "future_tool" : row === "tool-executed" ? "list_dir" : "read_file", argsJson: '{"path":"parser.ts"}', status } });
+      toolCall: { name: row.startsWith("plan-") ? "submit_plan" : row === "future-tool" ? "future_tool" : row === "tool-executed" ? "list_dir" : "read_file", argsJson: row.startsWith("plan-") ? '{"markdown":"Implement and verify"}' : '{"path":"parser.ts"}', status } });
     record.messages.push({ role: "assistant", content: "Parser checked.", ts: 3 });
   }
   await hostMessage(page, { kind: "chatLoaded", record });
@@ -86,7 +58,7 @@ async function foreground(head: Locator): Promise<string[]> {
 
 for (const theme of ["light", "dark"] as const) {
   test.describe(theme, () => {
-    for (const row of ["memory-created", "memory-failed", "tool-executed", "tool-failed", "tool-rejected", "future-tool"] as const) {
+    for (const row of ["memory-created", "memory-failed", "tool-executed", "tool-failed", "tool-rejected", "future-tool", "plan-submitted", "plan-failed"] as const) {
       test(`${row}: pointer focus does not latch emphasis; keyboard focus remains visible`, async ({ page }) => {
         const head = await chatRow(page, theme, row);
         const icon = head.locator(":scope > .disclosure-icon");

@@ -1,3 +1,4 @@
+import { unresolvedInterruption } from "../../chat/interruption.js";
 import { featureStyles } from "../../build/assets.js";
 import { fetchServerMetadata } from "../../llm/client.js";
 import { fileURLToPath } from "node:url";
@@ -708,6 +709,22 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         this.onChatListChanged();
         break;
       }
+      case "resumeMessageQueue": {
+        const runtime = this.active;
+        const session = runtime.session;
+        if (!session || runtime.messageLoopRunning || session.isTurnActive() || session.isPlanning()) break;
+        runtime.messageLoopRunning = true;
+        try {
+          if (await session.resolveInterruption(m.messageTs)) {
+            session.emitLoaded();
+            this.activateRuntime(runtime, true);
+          }
+        } finally {
+          runtime.messageLoopRunning = false;
+          this.drainMessageQueueIfIdle(runtime);
+        }
+        break;
+      }
       case "continueChat": {
         const runtime = this.active;
         if (!runtime.session) break;
@@ -877,6 +894,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     const first = firstMessage !== undefined || firstAttachments.length
       ? { text: firstMessage?.trim() ?? "", mode: firstMode, attachments: firstAttachments.length ? firstAttachments : undefined }
       : undefined;
+    const idle = !this.fileUndoTask && !runtime.messageLoopRunning && !session.isTurnActive();
+    if (first?.mode === "plan" && idle && session.isPlanning() && session.getRecord().pendingPlanMessageTs === undefined) {
+      priority = true;
+    }
     if (priority && first) runtime.planResponse = first;
     if (this.fileUndoTask || runtime.messageLoopRunning || session.isTurnActive() || (session.isPlanning() && !runtime.planResponse)) {
       const text = firstMessage?.trim() ?? "";
@@ -902,7 +923,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           runtime.planResponse = undefined;
         }
         if (!pending) {
-          if (session.isPlanning()) return;
+          if (session.isPlanning() || unresolvedInterruption(session.getRecord())) return;
           const next = runtime.queuedMessages.shift();
           this.pushMessageQueue(runtime);
           pending = next;
@@ -913,6 +934,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           runtime.stagedAttachmentIds.delete(attachment.id);
           runtime.pendingAttachments.delete(attachment.id);
         }
+        if (unresolvedInterruption(session.getRecord())) await session.resolveInterruption();
         await session.sendUserMessage(text, attachments, mode);
         pending = undefined;
         if (runtime.removed) return;
@@ -930,7 +952,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   private drainMessageQueueIfIdle(runtime = this.active): void {
     const session = runtime.session;
-    if (this.fileUndoTask || runtime.removed || !session || (session.isPlanning() && !runtime.planResponse) || !shouldDrainMessageQueue({
+    if (this.fileUndoTask || runtime.removed || !session || unresolvedInterruption(session.getRecord()) || (session.isPlanning() && !runtime.planResponse) || !shouldDrainMessageQueue({
       queueLength: runtime.queuedMessages.length + (runtime.planResponse ? 1 : 0),
       messageLoopRunning: runtime.messageLoopRunning,
       sessionCreationPending: runtime.sessionCreationPending,

@@ -1,3 +1,4 @@
+import type { CompletionDiagnostics } from "../llm/completion.js";
 /** Session events shared by the host, feature facades, and webviews. */
 import type { ChatAttachment, ChatMessage, ChatRecord, ChatToolProcess } from "./types.js";
 import type { ChatMode } from "./mode.js";
@@ -70,6 +71,7 @@ export interface ChatTurnEnd {
 
 /** Terminal response timestamp comes from the saved host transcript. */
 export interface ChatTurnAbort {
+  diagnostics?: CompletionDiagnostics;
   kind: "abort";
   reason: string;
   messageTs?: number;
@@ -106,6 +108,7 @@ export type UiEvent =
   | { kind: "summary"; messageId: string; text: string }
   | ChatPlanFinal
   | ChatPlanningState
+  | { kind: "turnRecovery"; messageId: string; text: string }
   | ChatTurnAbort
   | { kind: "notice"; text: string }
   | ChatTurnEnd
@@ -122,6 +125,8 @@ export type UiEvent =
   | { kind: "reasoningEffortChanged"; effort: ReasoningEffort };
 
 export type ToolCategory =
+  | "plan"     // explicit submission; no execution approval
+
   | "read"      // gray, auto-approve via setting
   | "write"     // gray + approval, auto via setting
   | "todos"     // gray, no approval — UI/state only, available in Act

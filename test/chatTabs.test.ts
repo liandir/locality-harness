@@ -33,6 +33,7 @@ interface FakeSession {
   sent: string[];
   sentModes: ChatMode[];
   finish(): void;
+  fail(): void;
   finishPlan(messageTs: number): void;
   renameTitle: ReturnType<typeof vi.fn>;
 }
@@ -64,6 +65,11 @@ vi.mock("../src/chat/session.js", () => ({
     steerUserMessage = vi.fn((_text: string, _attachments: ChatAttachment[]) => this.active);
     continueTurn = vi.fn(async (_messageTs: number) => {
       if (this.active) return false;
+      const message = this.args.record.messages.at(-1);
+      if (message?.interruption) {
+        if (message.ts !== _messageTs || message.interruption.resolved) return false;
+        this.args.record.messages.pop();
+      }
       this.active = true;
       this.emit({ kind: "turnPreparing", reason: "context" });
       this.turn = new Promise<void>(resolve => { this.finishTurn = resolve; });
@@ -117,6 +123,17 @@ vi.mock("../src/chat/session.js", () => ({
       this.args.record.planning = true;
       this.setMode("plan");
       this.emit({ kind: "planFinal", messageId: "plan", messageTs, markdown: "The plan" });
+      this.finish();
+    }
+    async resolveInterruption(messageTs?: number) {
+      const message = this.args.record.messages.at(-1);
+      if (this.active || !message?.interruption || message.interruption.resolved || (messageTs !== undefined && message.ts !== messageTs)) return false;
+      message.interruption.resolved = true;
+      return true;
+    }
+    fail() {
+      this.args.record.messages.push({ role: "assistant", content: "", ts: 50, interruption: { reason: "Disconnected", mode: this.args.record.mode, reasoningEffort: "default" } });
+      this.emit({ kind: "abort", reason: "Disconnected", messageTs: 50 });
       this.finish();
     }
     async sendUserMessage(text: string, _attachments: ChatAttachment[], mode: ChatMode) {
@@ -1141,5 +1158,50 @@ describe("chat tab context menu", () => {
     finish([{ sourceId: "a", text: "Late memory", status: "ready" }]);
     await Promise.resolve();
     expect(posted).not.toContainEqual(expect.objectContaining({ type: "chatMemories" }));
+  });
+});
+
+describe("failure queue holds", () => {
+  it.each(["continue", "skip", "new-message"] as const)("holds queued work after failure until %s", async action => {
+    const { provider, send } = setup();
+    provider.openChat(record("failed"));
+    const first = send({ type: "send", text: "First", mode: "act" });
+    const session = mocks.sessions.get("failed")!;
+    await send({ type: "queueMessage", id: "next", text: "Queued", mode: "act" });
+    session.fail();
+    await first;
+    expect(session.sent).toEqual(["First"]);
+    await send({ type: "resumeMessageQueue", messageTs: 49 });
+    expect(session.sent).toEqual(["First"]);
+    const recovery = action === "skip" ? send({ type: "resumeMessageQueue", messageTs: 50 })
+      : action === "continue" ? send({ type: "continueChat", messageTs: 50 })
+      : send({ type: "send", text: "New request", mode: "act" });
+    if (action !== "skip") {
+      await vi.waitFor(() => {
+        if (action === "continue") expect(session.continueTurn).toHaveBeenCalledOnce();
+        else expect(session.sent).toContain("New request");
+      });
+      expect(session.sent).not.toContain("Queued");
+      session.finish();
+    }
+    await vi.waitFor(() => expect(session.sent).toContain("Queued"));
+    session.finish();
+    await recovery;
+    expect(session.sent.filter(text => text === "Queued")).toHaveLength(1);
+  });
+
+  it("runs a direct Plan follow-up while retaining independently queued work", async () => {
+    const { provider, send } = setup();
+    provider.openChat(record("planning"));
+    const first = send({ type: "send", text: "Explore", mode: "plan" });
+    const session = mocks.sessions.get("planning")!;
+    await send({ type: "queueMessage", id: "next", text: "Later task", mode: "act" });
+    session.fail();
+    await first;
+    const followup = send({ type: "send", text: "Please finish planning", mode: "plan" });
+    await vi.waitFor(() => expect(session.sent).toEqual(["Explore", "Please finish planning"]));
+    session.finishPlan(70);
+    await followup;
+    expect(session.sent).not.toContain("Later task");
   });
 });

@@ -98,6 +98,7 @@ export type ChatToExt = (
   | { type: "discardAttachment"; attachmentId: string }
   | { type: "forkChat"; throughUserMessageTs: number }
   | { type: "continueChat"; messageTs: number }
+  | { type: "resumeMessageQueue"; messageTs: number }
   | { type: "openChat"; id: string }
   | { type: "cancel" }
   | { type: "approveTool"; toolId: string; approved: boolean; autoApprove?: boolean }
@@ -111,7 +112,7 @@ export type ChatToExt = (
   | { type: "openChats" }
   | { type: "openSettings" }
   | { type: "acceptPlan"; messageTs: number }
-  | { type: "revisePlan"; messageTs?: number; text: string }
+  | { type: "revisePlan"; messageTs: number; text: string }
   | { type: "cancelPlanning"; messageTs?: number }
   | { type: "classifyWorkspacePaths"; requestId: number; paths: string[] }
   | { type: "openFile"; path: string; line?: number }

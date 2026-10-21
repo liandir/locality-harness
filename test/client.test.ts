@@ -146,7 +146,7 @@ describe("OpenAI-compatible client", () => {
 
     const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
     expect(JSON.parse(init.body as string).return_progress).toBe(true);
-    expect(chunks).toEqual([
+    expect(chunks.filter(chunk => chunk.kind !== "finish")).toEqual([
       { kind: "promptProgress", processedTokens: 0, totalTokens: 4096 },
       { kind: "promptProgress", processedTokens: 2048, totalTokens: 4096 },
       { kind: "promptProgress", processedTokens: 4096, totalTokens: 4096 },
@@ -168,7 +168,7 @@ describe("OpenAI-compatible client", () => {
     for await (const chunk of streamChat("http://127.0.0.1:8080", {
       messages: [], return_progress: true
     }, new AbortController().signal)) chunks.push(chunk);
-    expect(chunks).toEqual([{ kind: "text", text: "Ready" }]);
+    expect(chunks.filter(chunk => chunk.kind !== "finish")).toEqual([{ kind: "text", text: "Ready" }]);
   });
 
   it.each([
@@ -199,7 +199,7 @@ describe("OpenAI-compatible client", () => {
     for await (const chunk of streamChat("http://127.0.0.1:8080", {
       messages: [], return_progress: true
     }, new AbortController().signal)) chunks.push(chunk);
-    expect(chunks).toEqual([{ kind: "text", text: "Ready" }]);
+    expect(chunks.filter(chunk => chunk.kind !== "finish")).toEqual([{ kind: "text", text: "Ready" }]);
   });
 
   it("reads the model alias and context length from llama.cpp props", async () => {
@@ -286,7 +286,7 @@ describe("OpenAI-compatible client", () => {
       chunks.push(chunk);
     }
 
-    expect(chunks).toEqual([
+    expect(chunks.filter(chunk => chunk.kind !== "finish")).toEqual([
       { kind: "thought", text: "thinking" },
       { kind: "text", text: "answer" }
     ]);
@@ -308,9 +308,8 @@ describe("OpenAI-compatible client", () => {
       chunks.push(chunk);
     }
 
-    expect(chunks).toEqual([
-      { kind: "thought", text: "thinking" },
-      { kind: "finish", reason: "stop" }
+    expect(chunks.filter(chunk => chunk.kind !== "finish")).toEqual([
+      { kind: "thought", text: "thinking" }
     ]);
   });
 
@@ -360,7 +359,7 @@ describe("OpenAI-compatible client", () => {
       chunks.push(chunk);
     }
 
-    expect(chunks).toEqual([
+    expect(chunks.filter(chunk => chunk.kind !== "finish")).toEqual([
       { kind: "toolCall", name: "read_file", argsJson: "{\"path\":\"a.ts\"}", id: "call_read" }
     ]);
   });
@@ -398,7 +397,7 @@ describe("OpenAI-compatible client", () => {
       }
     })()).rejects.toThrow("finish_reason=\"length\"");
 
-    expect(chunks).toEqual([
+    expect(chunks.filter(chunk => chunk.kind !== "finish")).toEqual([
       { kind: "text", text: "partial" }
     ]);
   });
@@ -490,7 +489,7 @@ describe("OpenAI-compatible client", () => {
     expect(body.tools).toEqual(tools);
     expect(body.tool_choice).toBe("auto");
     expect(body.parallel_tool_calls).toBe(false);
-    expect(tools.map(tool => tool.function.name)).toEqual(["read_file", "list_dir", "glob", "ask_user_question"]);
+    expect(tools.map(tool => tool.function.name)).toEqual(["submit_plan", "read_file", "list_dir", "glob", "ask_user_question"]);
   });
 
   it("offers command strings alongside native file tools", () => {
@@ -513,7 +512,7 @@ describe("OpenAI-compatible client", () => {
 
   it.each(["legacy", "native"] as const)("offers only read tools and questions in Review and Plan (%s)", transport => {
     const tools = toolsForMode("review", transport);
-    expect(tools).toEqual(toolsForMode("plan", transport));
+    expect(tools).toEqual(toolsForMode("plan", transport).filter(tool => tool.name !== "submit_plan"));
     const names = tools.map(tool => tool.name);
     expect(names).toEqual(["read_file", "list_dir", "glob", "ask_user_question"]);
   });

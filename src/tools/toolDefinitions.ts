@@ -8,6 +8,12 @@ const READ_FILE_DESCRIPTION = "Read a UTF-8 text file inside the open workspace,
 
 export const ALL_TOOLS: ToolSpec[] = [
   {
+    name: "submit_plan",
+    availability: { modes: ["plan"] },
+    description: "Submit the completed implementation plan for user approval and end planning. Call this on its own after exploration and clarification. Include the full actionable Markdown plan and verification steps. This does not authorize implementation.",
+    parameters: objectParameters({ markdown: { type: "string", description: "The complete implementation plan as non-empty Markdown." } }, ["markdown"])
+  },
+  {
     name: "search_memories",
     description: "Search active memories from other chats in this workspace by deterministic keywords. Returns matching names, IDs, and full UTC dates, ranked by relevance; no memory contents. Use recall_memory to read a match.",
     parameters: objectParameters({
