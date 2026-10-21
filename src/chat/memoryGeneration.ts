@@ -1,4 +1,6 @@
-import { complete, fetchServerContextSize, GenerationLengthError } from "../llm/client.js";
+import { GenerationLengthError } from "../llm/completion.js";
+import { MemoryFailure, memoryFailure, invalidMemoryOutput, MEMORY_REQUEST_TIMEOUT_MS, type MemoryCheckpoint, type MemoryStage } from "./memoryJobs.js";
+import { complete, fetchServerContextSize } from "../llm/client.js";
 import { countTokens } from "./contextTracker.js";
 import type { ChatRecord } from "./types.js";
 import { MEMORY_SUMMARY_TOKENS, redactMemorySecrets } from "./memory.js";
@@ -15,76 +17,93 @@ function instruction(tokens: number): string {
   return INSTRUCTION + `Return only the memory, at most ${tokens} tokens.`;
 }
 
+/** The checkpoint cursor addresses this redacted, visible source only. */
+export function memoryInput(record: ChatRecord): string {
+  return record.messages.filter(m => m.role === "user" || m.role === "assistant")
+    .map(m => redactMemorySecrets(`[${m.role}] ${m.content}\n${(m.fileChanges ?? []).map(c => c.path).join("\n")}`)).join("\n");
+}
+
+export interface MemoryGenerationProgress {
+  checkpoint?: MemoryCheckpoint;
+  shorterAttempt?: 0 | 1;
+  request?: boolean;
+}
+export interface MemoryGenerationOptions {
+  checkpoint?: MemoryCheckpoint;
+  shorterAttempt?: 0 | 1;
+  onProgress?: (progress: MemoryGenerationProgress) => Promise<void>;
+  /** Yield between requests/checkpoints when a chat is waiting for the model. */
+  shouldYield?: () => boolean;
+}
+export class MemoryYield extends Error {}
+
 export async function generateMemory(
-  record: ChatRecord, endpoint: string, model: string, signal: AbortSignal
+  record: ChatRecord, endpoint: string, model: string, signal: AbortSignal, options: MemoryGenerationOptions = {}
 ): Promise<string> {
-  const limit = await fetchServerContextSize(endpoint, model);
-  signal.throwIfAborted();
-  if (!limit) throw new Error("The local server context size is unavailable.");
-  // Leave room for the running draft and new transcript even on small contexts.
+  const step = async <T>(stage: MemoryStage, work: () => Promise<T>): Promise<T> => {
+    signal.throwIfAborted();
+    try { const value = await work(); signal.throwIfAborted(); return value; }
+    catch (error) { signal.throwIfAborted(); throw new MemoryFailure(memoryFailure(error, stage)); }
+  };
+  const count = (text: string) => step("tokenization", () => countTokens(endpoint, text, model, { signal, exact: true }));
+  const limit = await step("metadata", () => fetchServerContextSize(endpoint, model, { signal, strict: true }));
+  if (!limit) throw new MemoryFailure(memoryFailure(undefined, "metadata"));
   const summaryTokens = Math.min(MEMORY_SUMMARY_TOKENS, Math.floor(limit / 4));
   const instructions = [instruction(summaryTokens), instruction(Math.floor(summaryTokens * 0.75))];
-  // Allow the model to finish before checking size; never save a capped fragment.
   const outputTokens = summaryTokens + 256;
-  const reserved = Math.max(...await Promise.all(instructions.map(text => countTokens(endpoint, text, model)))) + outputTokens + 64;
+  const reserved = Math.max(...await Promise.all(instructions.map(count))) + outputTokens + 64;
   const budget = Math.min(4096, Math.floor(limit * 0.5), limit - reserved);
-  if (budget < 512) throw new Error("The model context is too small to generate a memory.");
-  // Tool results and reasoning never enter this input. User/assistant visible
-  // text provides the narrative; file-change metadata supplies exact paths.
-  const input = record.messages.filter(m => m.role === "user" || m.role === "assistant")
-    .map(m => redactMemorySecrets(`[${m.role}] ${m.content}\n${(m.fileChanges ?? []).map(c => c.path).join("\n")}`));
-  let running = "";
-  let chunk = "";
-  const flush = async () => {
-    if (!chunk.trim()) return;
+  if (budget < 512) throw invalidMemoryOutput("The model context is too small to generate a memory.");
+  const input = memoryInput(record);
+  let running = options.checkpoint?.summary ?? "";
+  let offset = options.checkpoint?.offset ?? 0;
+  let shorterAttempt = options.shorterAttempt ?? 0;
+  if (offset > input.length || (offset > 0 && !running.trim())) throw invalidMemoryOutput("The saved memory checkpoint is invalid. Regenerate this memory.");
+  if (running && await count(running) > summaryTokens) throw invalidMemoryOutput("The saved memory exceeds the current model budget. Regenerate this memory.");
+  while (offset < input.length) {
     signal.throwIfAborted();
-    // Retry from the same source with a smaller target instead of cutting facts
-    // out of the middle or feeding a context-guard marker into the next draft.
-    for (const [attempt, prompt] of instructions.entries()) {
+    if (options.shouldYield?.()) throw new MemoryYield();
+    let size = Math.min(input.length - offset, budget * 2);
+    while (await count(JSON.stringify({ priorDraft: running, conversation: input.slice(offset, offset + size) })) > budget) {
+      if (size <= 1) throw invalidMemoryOutput("Unable to fit memory input into the model context.");
+      size = Math.max(1, Math.floor(size / 2));
+    }
+    const conversation = input.slice(offset, offset + size);
+    let accepted = false;
+    for (let attempt = shorterAttempt; attempt < instructions.length; attempt++) {
       signal.throwIfAborted();
+      if (options.shouldYield?.()) throw new MemoryYield();
+      await options.onProgress?.({ shorterAttempt: attempt as 0 | 1, request: true });
       let text: string;
       try {
-        text = await complete(endpoint, {
+        text = await step("generation", () => complete(endpoint, {
           model, background: true, temperature: 0.1, max_tokens: outputTokens, thinking_budget_tokens: 0,
           chat_template_kwargs: { enable_thinking: false },
-          messages: [
-            { role: "system", content: prompt },
-            { role: "user", content: JSON.stringify({ priorDraft: running, conversation: chunk }) }
-          ]
-        }, AbortSignal.any([signal, AbortSignal.timeout(120000)]));
+          messages: [{ role: "system", content: instructions[attempt] },
+            { role: "user", content: JSON.stringify({ priorDraft: running, conversation }) }]
+        }, AbortSignal.any([signal, AbortSignal.timeout(MEMORY_REQUEST_TIMEOUT_MS)])));
       } catch (error) {
-        if (error instanceof GenerationLengthError && attempt === 0) continue;
+        const length = error instanceof GenerationLengthError || error instanceof MemoryFailure && error.diagnostic.cause === "generation_limit";
+        if (length && attempt === 0) {
+          await options.onProgress?.({ shorterAttempt: 1 });
+          continue;
+        }
         throw error;
       }
-      signal.throwIfAborted();
       const summary = redactMemorySecrets(text.trim());
-      if (!summary) throw new Error("The model returned an empty memory. Retry generation.");
-      if (await countTokens(endpoint, summary, model) <= summaryTokens) {
+      if (!summary) throw invalidMemoryOutput("The model returned an empty memory. Retry generation.");
+      if (summary.length <= 20000 && await count(summary) <= summaryTokens) {
         running = summary;
-        chunk = "";
-        return;
+        offset += size;
+        shorterAttempt = 0;
+        await options.onProgress?.({ checkpoint: { offset, summary, complete: offset === input.length }, shorterAttempt: 0 });
+        accepted = true;
+        break;
       }
+      if (attempt === 0) await options.onProgress?.({ shorterAttempt: 1 });
     }
-    throw new Error("The model returned an oversized memory. Retry generation.");
-  };
-  for (const message of input) {
-    // Split large messages instead of dropping their middle from the memory source.
-    let rest = message;
-    while (rest.length) {
-      signal.throwIfAborted();
-      let size = Math.min(rest.length, budget * 2);
-      while (await countTokens(endpoint, JSON.stringify({ priorDraft: running, conversation: chunk + rest.slice(0, size) + "\n" }), model) > budget) {
-        signal.throwIfAborted();
-        if (chunk) { await flush(); continue; }
-        if (size <= 1) throw new Error("Unable to fit memory input into the model context.");
-        size = Math.max(1, Math.floor(size / 2));
-      }
-      chunk += rest.slice(0, size) + "\n";
-      rest = rest.slice(size);
-      if (rest.length) await flush();
-    }
+    if (!accepted) throw invalidMemoryOutput("The model returned an oversized memory. Retry generation.");
   }
-  await flush();
-  if (!running.trim()) throw new Error("The model returned an empty memory. Retry generation.");
+  if (!running.trim()) throw invalidMemoryOutput("The model returned an empty memory. Retry generation.");
   return running;
 }

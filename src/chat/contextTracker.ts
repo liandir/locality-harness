@@ -14,11 +14,16 @@ const tokenCountCache = new Map<string, number>();
 const TOKEN_CACHE_MAX = 1024;
 
 /** Authoritative token count for a single string, with a bounded content cache. */
-export async function countTokens(endpoint: string, text: string, model?: string): Promise<number> {
+export async function countTokens(endpoint: string, text: string, model?: string, options: { signal?: AbortSignal; exact?: boolean } = {}): Promise<number> {
+  options.signal?.throwIfAborted();
   const cacheKey = `${endpoint}\n${model ?? ""}\n${text}`;
   const cached = tokenCountCache.get(cacheKey);
   if (cached !== undefined) return cached;
-  const n = await tokenize(endpoint, text, model);
+  let estimated = false;
+  const n = await tokenize(endpoint, text, model, { ...options, onEstimate: () => { estimated = true; } });
+  options.signal?.throwIfAborted();
+  // Best-effort callers retain their fallback; estimates never become exact cache entries.
+  if (estimated) return n;
   if (tokenCountCache.size >= TOKEN_CACHE_MAX) tokenCountCache.clear();
   tokenCountCache.set(cacheKey, n);
   return n;

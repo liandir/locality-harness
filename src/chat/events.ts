@@ -1,3 +1,4 @@
+import type { CompletionDiagnostics } from "../llm/completion.js";
 /** Session events shared by the host, feature facades, and webviews. */
 import type { ChatAttachment, ChatMessage, ChatRecord, ChatToolProcess } from "./types.js";
 import type { ChatMode } from "./mode.js";
@@ -70,6 +71,7 @@ export interface ChatTurnEnd {
 
 /** Terminal response timestamp comes from the saved host transcript. */
 export interface ChatTurnAbort {
+  diagnostics?: CompletionDiagnostics;
   kind: "abort";
   reason: string;
   messageTs?: number;
@@ -96,8 +98,8 @@ export type UiEvent =
   | { kind: "turnStart"; messageId: string }
   | { kind: "text"; messageId: string; delta: string }
   | { kind: "thought"; messageId: string; delta: string }
-  | { kind: "toolCallProgress"; toolId: string; messageId: string; toolName: string; path?: string; contentLines: number; added?: number; removed?: number; createsNewFile?: boolean; replacedLines?: number; startLine?: number; endLine?: number; line?: number }
-  | ({ kind: "toolCallProposed"; toolId: string; messageId: string; toolName: string; argsJson: string; category: ToolCategory; approvalRequired: boolean; reason?: string; diffPreview?: string; createsNewFile?: boolean } & ChatToolProcess)
+  | { kind: "toolCallProgress"; toolId: string; messageId: string; toolName: string; path?: string; contentLines: number; createsNewFile?: boolean; startLine?: number; endLine?: number; line?: number }
+  | ({ kind: "toolCallProposed"; toolId: string; messageId: string; toolName: string; argsJson: string; category: ToolCategory; approvalRequired: boolean; reason?: string; diffPreview?: string; added?: number; removed?: number; createsNewFile?: boolean } & ChatToolProcess)
   | ({ kind: "toolCallOutput"; toolId: string; resultPreview: string } & ChatToolProcess)
   | ({ kind: "toolCallResolved"; toolId: string; status: "approved" | "rejected" | "executed" | "failed"; fileUndoState?: "available" | "undone"; fileUndoPath?: string; resultPreview?: string; diffPreview?: string; added?: number; removed?: number; createsNewFile?: boolean } & ChatToolProcess)
   | ({ kind: "processJobState"; toolId: string; jobId: string; running: boolean; resultPreview?: string; status?: "failed" } & ChatToolProcess)
@@ -106,6 +108,7 @@ export type UiEvent =
   | { kind: "summary"; messageId: string; text: string }
   | ChatPlanFinal
   | ChatPlanningState
+  | { kind: "turnRecovery"; messageId: string; text: string }
   | ChatTurnAbort
   | { kind: "notice"; text: string }
   | ChatTurnEnd
@@ -122,6 +125,8 @@ export type UiEvent =
   | { kind: "reasoningEffortChanged"; effort: ReasoningEffort };
 
 export type ToolCategory =
+  | "plan"     // historical submitted-plan cards; no execution approval
+
   | "read"      // gray, auto-approve via setting
   | "write"     // gray + approval, auto via setting
   | "todos"     // gray, no approval — UI/state only, available in Act

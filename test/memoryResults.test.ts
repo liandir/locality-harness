@@ -19,7 +19,7 @@ describe("memory tool result rendering", () => {
   it.each(["queued", "generating"] as const)("shows %s creation as live tool activity", status => {
     const html = renderMemoryCreation({ messageTs: 2, status }, md, "");
     expect(html).toContain("Creating memory");
-    expect(html).toContain("active-tool-head");
+    expect(html.includes("active-tool-head")).toBe(status === "generating");
     expect(html).not.toContain("Created memory");
   });
 

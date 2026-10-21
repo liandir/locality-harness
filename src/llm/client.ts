@@ -1,5 +1,7 @@
+import { GenerationLengthError, StreamFailure, serverErrorMessage, type CompletionDiagnostics } from "./completion.js";
+export { GenerationLengthError, StreamFailure } from "./completion.js";
 import { beginForeground } from "./activity.js";
-import { safeFetch } from "../network/safeFetch.js";
+import { safeFetch, NetworkPolicyError } from "../network/safeFetch.js";
 import { progressSignature, writeProgressFromJsonToolBody } from "./toolProgress.js";
 import type { OpenAiTool } from "../tools/toolDefinitions.js";
 
@@ -69,21 +71,10 @@ export class VisionUnsupportedError extends Error {
   }
 }
 
-export class GenerationLengthError extends Error {
-  constructor() {
-    super(
-      "LLM generation stopped early because llama.cpp reported finish_reason=\"length\". " +
-      "The model reached its output or context limit; compact context before retrying, " +
-      "or restart the server with a larger --ctx-size."
-    );
-    this.name = "GenerationLengthError";
-  }
-}
-
 export type LlmStreamChunk =
   | { kind: "text"; text: string }
   | { kind: "thought"; text: string }
-  | { kind: "finish"; reason?: string }
+  | { kind: "finish"; reason?: string; diagnostics?: CompletionDiagnostics }
   | { kind: "usage"; promptTokens: number; completionTokens?: number }
   | { kind: "promptProgress"; processedTokens: number; totalTokens: number }
   | { kind: "toolCallProgress"; name: string; path?: string; content?: string; contentBytes: number; contentLines: number; startLine?: number; endLine?: number; line?: number; id?: string }
@@ -109,6 +100,7 @@ interface StreamChoice {
 }
 
 interface StreamPayload {
+  error?: { message?: unknown } | string;
   choices?: StreamChoice[];
   usage?: { prompt_tokens?: unknown; completion_tokens?: unknown };
   prompt_progress?: { processed?: unknown; total?: unknown };
@@ -133,6 +125,10 @@ export async function* streamChat(
   const end = req.background ? () => undefined : beginForeground();
   try {
     yield* streamChatRequest(endpoint, req, signal);
+  } catch (error) {
+    if (signal.aborted || error instanceof StreamFailure || error instanceof NetworkPolicyError || error instanceof NativeToolsUnsupportedError
+      || error instanceof MalformedNativeToolCallError || error instanceof VisionUnsupportedError) throw error;
+    throw new StreamFailure("The connection to the model server failed. Check the server and continue when it is available.", { cause: "transport", completionEvidence: "none" });
   } finally {
     end();
   }
@@ -177,7 +173,7 @@ async function* streamChatRequest(
     if (visionUnsupported(res.status, text)) {
       throw new VisionUnsupportedError(text.slice(0, 500) || `HTTP ${res.status}`);
     }
-    throw new Error(`LLM endpoint returned ${res.status}: ${text.slice(0, 500)}`);
+    throw new StreamFailure(`The model server returned HTTP ${res.status}. ${serverErrorMessage(text)}`, { cause: "server_error", httpStatus: res.status, completionEvidence: "none" });
   }
   req.onResponseAccepted?.();
   const reader = res.body.getReader();
@@ -216,84 +212,84 @@ async function* streamChatRequest(
   };
 
   let finished = false;
-  let sawText = false;
-  let sawTool = false;
   let generationStarted = false;
-  let lastFinishReason: string | undefined;
+  const diagnostics: CompletionDiagnostics = { completionEvidence: "none" };
+  function* processLine(raw: string): Generator<LlmStreamChunk> {
+    const line = raw.trim();
+    if (!line.startsWith("data:")) return;
+    const payload = line.slice(5).trim();
+    if (!payload) return;
+    if (payload === "[DONE]") {
+      finished = true;
+      if (diagnostics.completionEvidence === "none") diagnostics.completionEvidence = "done";
+      return;
+    }
+    let obj: StreamPayload;
+    try {
+      obj = JSON.parse(payload) as StreamPayload;
+      if (!obj || typeof obj !== "object" || Array.isArray(obj)) throw new Error();
+    } catch {
+      throw new StreamFailure("The server sent malformed streaming data. The response may be incomplete.", { ...diagnostics, cause: "protocol_error" });
+    }
+    if (obj.error !== undefined) {
+      const message = typeof obj.error === "string" ? obj.error : obj.error?.message;
+      throw new StreamFailure(`Generation failed: ${serverErrorMessage(message)}`, { ...diagnostics, cause: "server_error" });
+    }
+    const total = obj.prompt_progress?.total;
+    const processed = obj.prompt_progress?.processed;
+    if (!generationStarted && typeof total === "number" && Number.isSafeInteger(total) && total > 0
+      && typeof processed === "number" && Number.isSafeInteger(processed) && processed >= 0 && processed <= total) {
+      yield { kind: "promptProgress", processedTokens: processed, totalTokens: total };
+    }
+    const promptTokens = obj.usage?.prompt_tokens;
+    const completionTokens = obj.usage?.completion_tokens;
+    if (typeof completionTokens === "number" && Number.isFinite(completionTokens) && completionTokens >= 0) diagnostics.completionTokens = completionTokens;
+    if (typeof promptTokens === "number" && Number.isFinite(promptTokens) && promptTokens >= 0) {
+      diagnostics.promptTokens = promptTokens;
+      yield { kind: "usage", promptTokens, completionTokens: diagnostics.completionTokens };
+    }
+    const choice = obj.choices?.[0];
+    if (!choice) return;
+    const delta = choice.delta ?? {};
+    const thought = delta.reasoning_content ?? delta.reasoning ?? delta.thought ?? choice.reasoning_content ?? "";
+    const text = delta.content ?? choice.text ?? "";
+    generationStarted ||= !!(thought || text || delta.tool_calls?.length || choice.finish_reason);
+    yield* collectToolCalls(delta);
+    if (thought) yield { kind: "thought", text: String(thought) };
+    if (text) yield { kind: "text", text: String(text) };
+    const reason = typeof choice.finish_reason === "string" ? choice.finish_reason : undefined;
+    if (!reason) return;
+    diagnostics.finishReason = serverErrorMessage(reason);
+    diagnostics.completionEvidence = "finish_reason";
+    if (reason === "length") throw new GenerationLengthError(diagnostics);
+    if (reason !== "stop" && reason !== "tool_calls") {
+      throw new StreamFailure(`The server ended generation with finish_reason="${serverErrorMessage(reason)}".`, { ...diagnostics, cause: "server_error" });
+    }
+  }
   try {
     while (!finished) {
       const { value, done } = await reader.read();
-      if (done) break;
-      buf += decoder.decode(value, { stream: true });
+      buf += done ? decoder.decode() : decoder.decode(value, { stream: true });
       let nl: number;
-      while ((nl = buf.indexOf("\n")) !== -1) {
-        const line = buf.slice(0, nl).trim();
+      while (!finished && (nl = buf.indexOf("\n")) !== -1) {
+        const line = buf.slice(0, nl);
         buf = buf.slice(nl + 1);
-        if (!line.startsWith("data:")) continue;
-        const payload = line.slice(5).trim();
-        if (payload === "[DONE]") { finished = true; break; }
-        let obj: StreamPayload;
-        try {
-          obj = JSON.parse(payload) as StreamPayload;
-        } catch {
-          continue;
-        }
-        // llama.cpp sends these before output, including an initial update
-        // when a queued request starts evaluating its prompt. Older servers
-        // omit them, leaving the caller's generic pending status intact.
-        const total = obj.prompt_progress?.total;
-        const processed = obj.prompt_progress?.processed;
-        if (!generationStarted
-          && typeof total === "number" && Number.isSafeInteger(total) && total > 0
-          && typeof processed === "number" && Number.isSafeInteger(processed) && processed >= 0 && processed <= total) {
-          yield { kind: "promptProgress", processedTokens: processed, totalTokens: total };
-        }
-        const promptTokens = Number(obj.usage?.prompt_tokens);
-        const completionTokens = Number(obj.usage?.completion_tokens);
-        if (Number.isFinite(promptTokens) && promptTokens >= 0) {
-          yield {
-            kind: "usage",
-            promptTokens,
-            completionTokens: Number.isFinite(completionTokens) && completionTokens >= 0 ? completionTokens : undefined
-          };
-        }
-        const choice = obj.choices?.[0];
-        if (!choice) continue;
-        const delta = choice?.delta ?? {};
-        const thought = delta.reasoning_content
-          ?? delta.reasoning
-          ?? delta.thought
-          ?? choice?.reasoning_content
-          ?? "";
-        const text = delta.content
-          ?? choice?.text
-          ?? "";
-        generationStarted ||= !!(thought || text || delta.tool_calls?.length || choice.finish_reason);
-        for (const tc of collectToolCalls(delta)) yield tc;
-        if (thought) yield { kind: "thought", text: String(thought) };
-        if (text) { sawText = true; yield { kind: "text", text: String(text) }; }
-
-        const finishReason = typeof choice?.finish_reason === "string" ? choice.finish_reason : undefined;
-        if (finishReason) lastFinishReason = finishReason;
-        if (finishReason === "tool_calls") {
-          for (const tc of flushToolCalls()) { sawTool = true; yield tc; }
-          finished = true;
-          break;
-        }
-        if (finishReason === "length") {
-          throw new GenerationLengthError();
-        }
+        yield* processLine(line);
+      }
+      if (done) {
+        if (!finished && buf) yield* processLine(buf);
+        break;
       }
     }
-    // Emit any structured tool calls collected from delta.tool_calls.
-    for (const tc of flushToolCalls()) { sawTool = true; yield tc; }
-    // A stream that produced neither visible text nor a tool call is the
-    // "model stopped without a reply" case — log finish_reason to help diagnose
-    // stop-token / template issues (the session surfaces a user-facing notice).
-    if (!sawText && !sawTool) {
-      yield { kind: "finish", reason: lastFinishReason };
-      console.warn(`[llm] stream produced no text or tool call; finish_reason=${lastFinishReason ?? "none"}`);
+    if (diagnostics.completionEvidence === "none") {
+      throw new StreamFailure("The server stream ended before confirming completion. The response is incomplete.", { ...diagnostics, cause: "unexpected_eof" });
     }
+    // Publish terminal evidence before any executable calls. Progress is never executable.
+    yield { kind: "finish", reason: diagnostics.finishReason, diagnostics: { ...diagnostics } };
+    yield* flushToolCalls();
+  } catch (error) {
+    if (signal.aborted || error instanceof StreamFailure) throw error;
+    throw new StreamFailure("The connection to the model server was interrupted. The response may be incomplete.", { ...diagnostics, cause: "transport" });
   } finally {
     await reader.cancel().catch(() => undefined);
   }
@@ -362,8 +358,9 @@ const SERVER_CTX_TTL_MS = 60_000;
  */
 export async function fetchServerMetadata(
   endpoint: string,
-  options: { model?: string; force?: boolean } = {}
+  options: { model?: string; force?: boolean; signal?: AbortSignal } = {}
 ): Promise<ServerMetadata> {
+  options.signal?.throwIfAborted();
   const cacheKey = `${endpoint}\n${options.model ?? ""}`;
   const cached = serverMetadataCache.get(cacheKey);
   if (!options.force && cached && Date.now() - cached.at < SERVER_CTX_TTL_MS) return cached.value;
@@ -372,15 +369,16 @@ export async function fetchServerMetadata(
   const url = new URL("/props", endpoint);
   if (options.model) url.searchParams.set("model", options.model);
   const res = await safeFetch(endpoint, url.toString(), {
-    signal: AbortSignal.timeout(5_000)
+    signal: options.signal ? AbortSignal.any([options.signal, AbortSignal.timeout(5_000)]) : AbortSignal.timeout(5_000)
   });
-  if (!res.ok) throw new Error(`llama.cpp /props returned HTTP ${res.status}.`);
+  if (!res.ok) throw new StreamFailure(`llama.cpp /props returned HTTP ${res.status}.`, { cause: "server_error", httpStatus: res.status });
   const obj = (await res.json()) as {
     modalities?: { vision?: unknown };
     model_alias?: unknown;
     model_path?: unknown;
     default_generation_settings?: { n_ctx?: unknown; model?: unknown };
   };
+  if (!obj || typeof obj !== "object") throw new StreamFailure("The server returned invalid model metadata.", { cause: "protocol_error" });
   const n = obj.default_generation_settings?.n_ctx;
   if (typeof n !== "number" || !Number.isFinite(n) || n <= 0) {
     throw new Error("llama.cpp /props did not report a valid context length.");
@@ -396,10 +394,12 @@ export async function fetchServerMetadata(
   return value;
 }
 
-export async function fetchServerContextSize(endpoint: string, model?: string): Promise<number | undefined> {
+export async function fetchServerContextSize(endpoint: string, model?: string, options: { signal?: AbortSignal; strict?: boolean } = {}): Promise<number | undefined> {
   try {
-    return (await fetchServerMetadata(endpoint, { model })).contextSize;
-  } catch {
+    return (await fetchServerMetadata(endpoint, { model, signal: options.signal })).contextSize;
+  } catch (error) {
+    options.signal?.throwIfAborted();
+    if (options.strict) throw error;
     return undefined;
   }
 }
@@ -430,19 +430,27 @@ function modelNameFromPath(value: unknown): string {
 }
 
 /** Use llama.cpp's /tokenize for authoritative token counts. */
-export async function tokenize(endpoint: string, text: string, model?: string): Promise<number> {
+export async function tokenize(endpoint: string, text: string, model?: string, options: { signal?: AbortSignal; exact?: boolean; onEstimate?: () => void } = {}): Promise<number> {
+  options.signal?.throwIfAborted();
   const url = new URL("/tokenize", endpoint).toString();
   try {
     const res = await safeFetch(endpoint, url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ content: text, model }),
-      signal: AbortSignal.timeout(5000)
+      signal: options.signal ? AbortSignal.any([options.signal, AbortSignal.timeout(5000)]) : AbortSignal.timeout(5000)
     });
-    if (!res.ok) throw new Error(`tokenize ${res.status}`);
+    if (!res.ok) throw new StreamFailure(`tokenize ${res.status}`, { cause: "server_error", httpStatus: res.status });
     const obj = (await res.json()) as { tokens?: number[] };
-    return obj.tokens?.length ?? Math.ceil(text.length / 4);
-  } catch {
+    if (!obj || !Array.isArray(obj.tokens) || !obj.tokens.every(Number.isSafeInteger) || (text.trim() && !obj.tokens.length)) {
+      throw new StreamFailure("The tokenizer returned invalid data.", { cause: "protocol_error" });
+    }
+    options.signal?.throwIfAborted();
+    return obj.tokens.length;
+  } catch (error) {
+    options.signal?.throwIfAborted();
+    if (options.exact) throw error;
+    options.onEstimate?.();
     return Math.ceil(text.length / 4);
   }
 }

@@ -2,7 +2,7 @@
   "name": "locality",
   "displayName": "Locality",
   "description": "Drive a LAN-hosted llama.cpp LLM from VS Code with hard network isolation, workspace-scoped tools, and an approval-gated terminal.",
-  "version": "2.1.5",
+  "version": "2.1.6",
   "repository": {
     "type": "git",
     "url": "https://github.com/liandir/locality.git"
@@ -175,7 +175,7 @@
             "Prefer structured calls and recover leaked Muse Glimmer ATEM syntax. Muse requires native server tool support.",
             "Prefer structured calls, recover leaked GPT-OSS Harmony syntax, and fall back to the Harmony legacy adapter when native tools are rejected."
           ],
-          "default": "compat-gemma4",
+          "default": "native",
           "description": "Tool-call transport and compatibility profile. Native server only requires a tool-aware server template; family profiles add narrowly scoped recovery and, where reliable, a legacy fallback."
         },
         "locality.temperature": {
@@ -337,12 +337,14 @@
     "watch": "node esbuild.config.mjs --watch",
     "lint": "eslint src test --ext .ts,.tsx",
     "test": "vitest run",
+    "test:ui": "npm run build && playwright test",
     "eval:memory": "node scripts/eval-memory.mjs",
     "typecheck": "tsc --noEmit",
     "package:vsix": "node scripts/package-vsix.mjs",
     "vscode:prepublish": "npm run build"
   },
   "devDependencies": {
+    "@playwright/test": "^1.64.1",
     "@types/markdown-it": "^14.1.2",
     "@types/node": "^20.11.0",
     "@types/vscode": "^1.90.0",
@@ -352,13 +354,13 @@
     "esbuild": "^0.28.0",
     "eslint": "^8.57.0",
     "typescript": "^5.4.0",
-    "vitest": "^4.1.8"
+    "vitest": "^4.1.12"
   },
   "dependencies": {
     "@vscode/markdown-it-katex": "^1.1.2",
     "htmlparser2": "^10.1.0",
     "katex": "^0.18.2",
-    "markdown-it": "^14.1.0",
+    "markdown-it": "^14.3.3",
     "shiki": "^4.1.0",
     "undici": "^6.29.0"
   },

@@ -5,6 +5,9 @@ import * as path from "node:path";
 import type { ChatRecord } from "../src/chat/storage.js";
 import type { ChatSession, UiEvent } from "../src/chat/session.js";
 import type { WorkspaceMemory } from "../src/chat/workspaceMemory.js";
+import { editDiffCases } from "./fixtures/editDiff.js";
+
+const planText = (markdown: string) => `<proposed_plan>\n${markdown}\n</proposed_plan>`;
 
 const mocks = vi.hoisted(() => ({
   GenerationLengthError: class GenerationLengthError extends Error {},
@@ -74,7 +77,15 @@ vi.mock("../src/llm/client.js", () => ({
   MalformedNativeToolCallError: mocks.MalformedNativeToolCallError,
   NativeToolsUnsupportedError: mocks.NativeToolsUnsupportedError,
   VisionUnsupportedError: mocks.VisionUnsupportedError,
-  streamChat: mocks.streamChat,
+  streamChat: async function* (...args: unknown[]) {
+    let finished = false;
+    for await (const chunk of mocks.streamChat(...args)) {
+      if (chunk.kind === "finish") finished = true;
+      yield chunk;
+    }
+    // Successful client generations always carry terminal evidence.
+    if (!finished) yield { kind: "finish", reason: "stop", diagnostics: { completionEvidence: "finish_reason", finishReason: "stop" } };
+  },
   tokenize: mocks.tokenize,
   complete: mocks.complete,
   fetchServerMetadata: async () => {
@@ -172,12 +183,12 @@ describe("interrupted turn continuation", () => {
       expect(completed?.toolCall?.status).toBe("executed");
       if (outcome === "tokenizer failure") expect(completed?.tokens).toBeUndefined();
       const output = record.messages.find(message => message.content === "I will create the file.");
-      expect(output?.reasoningContent).toBe("Completed reasoning.");
+      expect(output?.reasoningContent).toBe(outcome === "tokenizer failure" ? "Completed reasoning." : "Completed reasoning.Unfinished next block");
       expect(output?.events).toEqual(expect.arrayContaining([
         expect.objectContaining({ kind: "thought", text: "Completed reasoning." }),
         expect.objectContaining({ kind: "text", text: "I will create the file." })
       ]));
-      expect(JSON.stringify(record.messages)).not.toContain("Unfinished next block");
+      expect(JSON.stringify(record.contextMessages)).not.toContain("Unfinished next block");
       const terminal = record.messages.at(-1)!;
       expect(terminal.interruption).toBeDefined();
       expect(terminal.ts).toBeGreaterThan(output!.ts);
@@ -218,8 +229,8 @@ describe("interrupted turn continuation", () => {
     try {
       await session.sendUserMessage("Explain it");
       const thinking = record.messages.find(message => message.reasoningContent === "Finished thinking.");
-      expect(thinking?.events).toEqual([expect.objectContaining({ kind: "thought", text: "Finished thinking." })]);
-      expect(JSON.stringify(record.messages)).not.toContain("Unfinished answer");
+      expect(thinking?.events).toEqual([expect.objectContaining({ kind: "thought", text: "Finished thinking." }), expect.objectContaining({ kind: "text", text: "Unfinished answer" })]);
+      expect(JSON.stringify(record.contextMessages)).not.toContain("Unfinished answer");
       mocks.streamChat.mockImplementation(async function* () { yield { kind: "text", text: "Completed answer" }; });
       await session.continueTurn(record.messages.at(-1)!.ts);
       expect(record.messages).toContainEqual(thinking);
@@ -282,8 +293,8 @@ describe("interrupted turn continuation", () => {
     try {
       await session.sendUserMessage("Create the files");
       const terminal = record.messages.at(-1)!;
-      expect(terminal.interruption?.reason).toBe(outcome === "cancel" ? "Cancelled" : "Connection lost");
-      expect(events.at(-1)).toEqual({ kind: "abort", reason: terminal.interruption?.reason, messageTs: terminal.ts });
+      expect(terminal.interruption?.reason).toBe(outcome === "cancel" ? "Stopped by user." : "Connection lost");
+      expect(events.at(-1)).toEqual({ kind: "abort", reason: terminal.interruption?.reason, diagnostics: terminal.interruption?.diagnostics, messageTs: terminal.ts });
       expect(await fs.readFile(path.join(ws, "done.txt"), "utf8")).toBe("completed");
       await expect(fs.stat(path.join(ws, "pending.txt"))).rejects.toThrow();
       await session.shutdown();
@@ -426,7 +437,7 @@ describe("interrupted turn continuation", () => {
       expect(record.mode).toBe("act");
       mocks.streamChat.mockImplementation(async function* (_endpoint, request) {
         expect(request.tools.some((tool: { function: { name: string } }) => tool.function.name === "create_file")).toBe(false);
-        yield { kind: "text", text: "Completed plan" };
+        yield { kind: "text", text: planText("Completed plan") };
       });
       await session.continueTurn(record.messages.at(-1)!.ts);
       expect(record.mode).toBe("plan");
@@ -526,7 +537,7 @@ describe("ChatSession", () => {
     await vi.waitFor(() => expect(events).toContainEqual(expect.objectContaining({ kind: "userMessage", text: "next" })));
     await session.shutdown();
     await turn;
-    expect(events).toContainEqual({ kind: "abort", reason: "Stopped by user.", messageTs: expect.any(Number) });
+    expect(events).toContainEqual({ kind: "abort", reason: "Stopped by user.", messageTs: expect.any(Number), diagnostics: { cause: "user_cancel" } });
     expect(session.isTurnActive()).toBe(false);
     expect(mocks.streamChat).not.toHaveBeenCalled();
     expect(mocks.fetchServerContextSize).not.toHaveBeenCalled();
@@ -757,7 +768,7 @@ describe("ChatSession", () => {
     expect(pass).toBe(2);
     expect(events.filter(event => event.kind === "toolCallResolved" && event.status === "executed")).toHaveLength(1);
     expect(events.filter(event => event.kind === "contextActivity" && !event.activityIds.length)).toHaveLength(1);
-    if (outcome !== "empty") expect(events).toContainEqual({ kind: "abort", reason: outcome === "cancel" ? "Cancelled" : "Server disconnected", messageTs: expect.any(Number) });
+    if (outcome !== "empty") expect(events).toContainEqual(expect.objectContaining({ kind: "abort", reason: outcome === "cancel" ? "Stopped by user." : "Server disconnected", messageTs: expect.any(Number) }));
     expect(record.messages.find(message => message.role === "tool")?.toolCall?.status).toBe("executed");
   });
 
@@ -983,6 +994,7 @@ describe("ChatSession", () => {
     await fs.writeFile(path.join(ws, "a.txt"), "hello\n", "utf8");
     mocks.settings.toolCallingMode = "native";
     const requests: Array<{
+      messages: Array<{ content: unknown }>;
       thinking_budget_tokens?: number;
       reasoning_effort?: string;
       chat_template_kwargs?: Record<string, unknown>;
@@ -996,7 +1008,8 @@ describe("ChatSession", () => {
         await firstRequestGate;
         yield { kind: "toolCall", name: "read_file", argsJson: '{"path":"a.txt"}', id: "call_read_modes" };
       } else {
-        yield { kind: "text", text: "done" };
+        if (JSON.stringify(request.messages[0]?.content).includes("You are in plan mode.")) yield { kind: "text", text: planText("done") };
+        else yield { kind: "text", text: "done" };
       }
     });
 
@@ -1036,10 +1049,11 @@ describe("ChatSession", () => {
 
   it.each(["act", "plan", "review"] as const)("executes a submitted %s message independently of the composer mode", async mode => {
     mocks.settings.toolCallingMode = "native";
-    const requests: Array<{ tools?: Array<{ function: { name: string } }> }> = [];
+    const requests: Array<{ messages: Array<{ content: unknown }>; tools?: Array<{ function: { name: string } }> }> = [];
     mocks.streamChat.mockImplementation(async function* (_endpoint: string, request: typeof requests[number]) {
       requests.push(request);
-      yield { kind: "text", text: "Done" };
+      if (mode === "plan") yield { kind: "text", text: planText("Done") };
+      else yield { kind: "text", text: "Done" };
     });
     const { ChatSession } = await import("../src/chat/session.js");
     const record = newRecord();
@@ -1066,10 +1080,11 @@ describe("ChatSession", () => {
   it("retains plan approval after reload and keeps revisions in Plan until acceptance", async () => {
     const ws = await fs.mkdtemp(path.join(os.tmpdir(), "locality-plan-approval-"));
     mocks.settings.toolCallingMode = "native";
-    const requests: Array<{ tools?: Array<{ function: { name: string } }> }> = [];
+    const requests: Array<{ messages: Array<{ content: unknown }>; tools?: Array<{ function: { name: string } }> }> = [];
     mocks.streamChat.mockImplementation(async function* (_endpoint: string, request: typeof requests[number]) {
       requests.push(request);
-      yield { kind: "text", text: "A concrete plan or completed response." };
+      if (JSON.stringify(request.messages[0]?.content).includes("You are in plan mode.")) yield { kind: "text", text: planText("A concrete plan or completed response.") };
+      else yield { kind: "text", text: "A concrete plan or completed response." };
     });
     const { ChatSession } = await import("../src/chat/session.js");
     const { ChatStorage } = await import("../src/chat/storage.js");
@@ -1118,7 +1133,7 @@ describe("ChatSession", () => {
     const { ChatStorage } = await import("../src/chat/storage.js");
     mocks.settings.toolCallingMode = "native";
     mocks.streamChat.mockImplementation(async function* () {
-      if (outcome === "pending") yield { kind: "text", text: "The plan" };
+      if (outcome === "pending") yield { kind: "text", text: planText("The plan") };
     });
     const storage = new ChatStorage(ws, path.join(ws, "chats"));
     const record = storage.newRecord("native");
@@ -1138,7 +1153,7 @@ describe("ChatSession", () => {
       expect(session.isPlanning()).toBe(false);
       expect(loaded.mode).toBe("act");
       expect(loaded.messages.filter(message => message.role === "user").map(message => message.content)).toEqual(["Plan this"]);
-      expect(mocks.streamChat).toHaveBeenCalledOnce();
+      expect(mocks.streamChat).toHaveBeenCalledTimes(outcome === "pending" ? 1 : 3);
       expect(events).toContainEqual({ kind: "planningState", active: false, pendingPlanMessageTs: undefined });
       const saved = (await storage.load(record.id))!;
       expect(saved.pendingPlanMessageTs).toBeUndefined();
@@ -2042,7 +2057,8 @@ describe("ChatSession", () => {
         expect(request.messages.at(-1)).toMatchObject({
           role: "tool", tool_call_id: "call_question", content: "The user skipped this question"
         });
-        yield { kind: "text", text: "Continuing with the available information." };
+        if (mode === "plan") yield { kind: "text", text: planText("Continuing with the available information.") };
+        else yield { kind: "text", text: "Continuing with the available information." };
       }
     });
     const { ChatSession } = await import("../src/chat/session.js");
@@ -3325,10 +3341,10 @@ describe("ChatSession", () => {
 
     await session.sendUserMessage("hi");
 
-    expect(events.some(e => e.kind === "notice")).toBe(true);
+    expect(events.some(e => e.kind === "abort")).toBe(true);
     expect(events.some(e => e.kind === "summary")).toBe(false);
-    // No empty assistant message is persisted (thought-only turns are UI state).
-    expect(record.messages.some(m => m.role === "assistant")).toBe(false);
+    expect(record.messages.at(-1)?.interruption?.diagnostics?.cause).toBe("no_answer");
+    expect(record.messages.some(m => m.reasoningContent)).toBe(true);
   });
 
   it("includes the server finish reason in a thought-only notice", async () => {
@@ -3350,12 +3366,12 @@ describe("ChatSession", () => {
     await session.sendUserMessage("hi");
 
     const notice = events.find(
-      (e): e is Extract<UiEvent, { kind: "notice" }> =>
-        e.kind === "notice" && e.text.includes("finish_reason")
+      (e): e is Extract<UiEvent, { kind: "abort" }> =>
+        e.kind === "abort" && e.reason.includes("finish_reason")
     );
-    expect(notice?.text).toContain('finish_reason="stop"');
-    expect(events.some(event => event.kind === "notice" && event.text.includes("Retrying native continuation"))).toBe(true);
-    expect(events.some(event => event.kind === "notice" && event.text.includes("retry was already attempted"))).toBe(true);
+    expect(notice?.reason).toContain('finish_reason="stop"');
+    expect(events.some(event => event.kind === "turnRecovery" && event.text.includes("Retrying native continuation"))).toBe(true);
+    expect(events.some(event => event.kind === "abort" && event.reason.includes("retry was already attempted"))).toBe(true);
     expect(mocks.streamChat).toHaveBeenCalledTimes(2);
   });
 
@@ -3388,7 +3404,7 @@ describe("ChatSession", () => {
     const retryMessages = requests[1].messages as Array<{ role: string; content: string }>;
     expect(retryMessages.at(-1)?.content).toContain("[harness recovery]");
     expect(retryMessages.at(-1)?.content).toContain("structured tool call or a final answer");
-    expect(events.some(event => event.kind === "notice" && event.text.includes("Retrying native continuation"))).toBe(true);
+    expect(events.some(event => event.kind === "turnRecovery" && event.text.includes("Retrying native continuation"))).toBe(true);
     expect(events.some(event => event.kind === "summary" && event.text === "Recovered answer.")).toBe(true);
     expect(record.messages.at(-1)?.content).toBe("Recovered answer.");
   });
@@ -4174,7 +4190,7 @@ describe("length-limited generation recovery", () => {
     await session.sendUserMessage("Continue");
     expect(mocks.streamChat).toHaveBeenCalledTimes(outcome === "repeated-limit" ? 2 : 1);
     expect(events.filter(event => event.kind === "compactStart")).toHaveLength(outcome === "auto-disabled" || outcome === "cancelled-before-summary" ? 0 : 1);
-    expect(events).toContainEqual({ kind: "abort", reason: outcome.startsWith("cancelled") ? "Cancelled." : "Generation limit", messageTs: expect.any(Number) });
+    expect(events).toContainEqual(expect.objectContaining({ kind: "abort", reason: outcome.startsWith("cancelled") ? "Cancelled." : "Generation limit", messageTs: expect.any(Number) }));
     expect(events.filter(event => event.kind === "turnEnd")).toEqual([]);
     expect(record.messages.at(-1)?.interruption).toBeDefined();
     expect(record.contextMessages?.at(-1)?.role).toBe("user");
@@ -4303,7 +4319,7 @@ describe("separate transcript and model context", () => {
     await session.sendUserMessage("Continue");
     expect(events).toContainEqual({ kind: "contextActivity", activityIds: [] });
     expect(events).toContainEqual({ kind: "turnPreparing", reason: "context" });
-    if (outcome !== "complete") expect(events).toContainEqual({ kind: "abort", reason: outcome === "cancel" ? "Cancelled" : "Server disconnected", messageTs: expect.any(Number) });
+    if (outcome !== "complete") expect(events).toContainEqual(expect.objectContaining({ kind: "abort", reason: outcome === "cancel" ? "Stopped by user." : "Server disconnected", messageTs: expect.any(Number) }));
     else expect(events.some(event => event.kind === "abort")).toBe(false);
 
     events.length = 0;
@@ -5097,7 +5113,8 @@ describe("steering an active turn", () => {
           signal.addEventListener("abort", () => reject(new Error("Generation interrupted")), { once: true });
         });
       } else {
-        yield { kind: "text", text: "Revised approach." };
+        if (mode === "plan") yield { kind: "text", text: planText("Revised approach.") };
+        else yield { kind: "text", text: "Revised approach." };
       }
     });
     const turn = session.sendUserMessage("Work on this", [], mode);
@@ -5120,7 +5137,7 @@ describe("steering an active turn", () => {
     expect(events.some(e => e.kind === "abort")).toBe(false);
     const textEvents = events.filter(e => e.kind === "text");
     const before = textEvents.find(e => e.delta === "Initial approach.")!;
-    const after = textEvents.find(e => e.delta === "Revised approach.")!;
+    const after = textEvents.find(e => e.delta.trim() === "Revised approach.")!;
     expect(after.messageId).toBe(before.messageId);
     expect(events.filter(e => e.kind === "turnStart")).toHaveLength(1);
     expect(events.find(e => e.kind === "turnEnd")).toMatchObject({ messageId: before.messageId });
@@ -5273,6 +5290,250 @@ describe("saved response file Undo", () => {
     } finally {
       await session.shutdown();
       await fs.rm(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("streamed final plans and terminal failures", () => {
+  it("waits for a planning question answer, then finishes with a visible plan", async () => {
+    const { ChatSession } = await import("../src/chat/session.js");
+    const record = newRecord();
+    record.toolCallingMode = "native";
+    mocks.settings.toolCallingMode = "native";
+    const events: UiEvent[] = [];
+    const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record, emit: event => events.push(event) });
+    let pass = 0;
+    mocks.streamChat.mockImplementation(async function* (_endpoint, request) {
+      if (pass++ === 0) yield {
+        kind: "toolCall", name: "ask_user_question", id: "scope",
+        argsJson: JSON.stringify({ question: "Which scope?", suggestions: ["Source files", "All files"] })
+      };
+      else {
+        expect(request.messages.at(-1)).toMatchObject({
+          role: "tool", tool_call_id: "scope", content: 'the user has answered your question: "Source files"'
+        });
+        yield { kind: "text", text: planText("- Update source files\n- Run tests") };
+      }
+    });
+    try {
+      const turn = session.sendUserMessage("Plan the changes", [], "plan");
+      await vi.waitFor(() => expect(events.some(event => event.kind === "toolCallProposed")).toBe(true));
+      const question = events.find((event): event is Extract<UiEvent, { kind: "toolCallProposed" }> => event.kind === "toolCallProposed")!;
+      expect(record.pendingPlanMessageTs).toBeUndefined();
+      expect(events.some(event => event.kind === "turnEnd")).toBe(false);
+      session.answerQuestion(question.toolId, "Source files");
+      await turn;
+      expect(record.messages.at(-1)?.content).toBe("- Update source files\n- Run tests");
+      expect(record.pendingPlanMessageTs).toBe(record.messages.at(-1)?.ts);
+      expect(events.filter(event => event.kind === "turnEnd")).toHaveLength(1);
+      expect(events.some(event => event.kind === "abort")).toBe(false);
+    } finally { await session.shutdown(); }
+  });
+
+  const profiles = ["native", "compat-gemma4", "compat-qwen3", "compat-muse-glimmer", "compat-gpt-oss"] as const;
+  for (const profile of profiles) {
+    for (const transport of (profile === "native" || profile === "compat-muse-glimmer") ? ["native"] as const : ["native", "legacy"] as const) {
+      it.each(["valid", "empty", "malformed", "missing", "corrected", "duplicate", "interrupted"] as const)(`${profile}/${transport}: %s final plan`, async outcome => {
+        const { ChatSession } = await import("../src/chat/session.js");
+        const { StreamFailure } = await import("../src/llm/completion.js");
+        const record = newRecord();
+        record.toolCallingMode = profile;
+        mocks.settings.toolCallingMode = profile;
+        const events: UiEvent[] = [];
+        const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record, emit: event => events.push(event) });
+        let generations = 0;
+        mocks.streamChat.mockImplementation(async function* (_endpoint, request) {
+          expect(request.tools?.some((tool: { function: { name: string } }) => tool.function.name === "submit_plan")).not.toBe(true);
+          if (transport === "legacy" && request.tools) throw new mocks.NativeToolsUnsupportedError("tools unsupported");
+          generations++;
+          if (outcome === "missing" || outcome === "corrected" && generations === 1) {
+            yield { kind: "text", text: "I will inspect the code." }; return;
+          }
+          if (outcome === "corrected") expect(JSON.stringify(request.messages)).toContain("Planning is still active");
+          yield { kind: "text", text: "<proposed_" };
+          yield { kind: "text", text: "plan>\n" };
+          yield { kind: "text", text: outcome === "empty" ? "  " : "- [ ] Implement the change\n- [ ] Run tests" };
+          // The plan is already visible while the server is still generating it.
+          if (outcome !== "empty") expect(events).toContainEqual(expect.objectContaining({ kind: "text", delta: expect.stringContaining("Implement the change") }));
+          expect(events.some(event => event.kind === "planFinal")).toBe(false);
+          if (outcome !== "malformed") yield { kind: "text", text: "\n</proposed_plan>" };
+          if (outcome === "duplicate") yield { kind: "text", text: "\n" + planText("Second plan") };
+          if (outcome === "interrupted") throw new StreamFailure("Connection interrupted", { cause: "unexpected_eof", completionEvidence: "none" });
+        });
+        try {
+          await session.sendUserMessage("Plan this", [], "plan");
+          if (outcome === "valid" || outcome === "corrected") {
+            expect(record.pendingPlanMessageTs).toBe(record.messages.at(-1)?.ts);
+            expect(record.messages.at(-1)?.content).toContain("Run tests");
+            expect(events.filter(event => event.kind === "planFinal")).toHaveLength(1);
+            expect(events.some(event => event.kind === "abort")).toBe(false);
+            expect(session.resolvePlan(record.pendingPlanMessageTs! - 1, "act")).toBe(false);
+            expect(session.resolvePlan(record.pendingPlanMessageTs!, "act")).toBe(true);
+          } else {
+            expect(record.pendingPlanMessageTs).toBeUndefined();
+            expect(record.planning).toBe(true);
+            expect(events.some(event => event.kind === "planFinal")).toBe(false);
+            expect(record.messages.at(-1)?.interruption?.diagnostics?.cause).toBe(outcome === "interrupted" ? "unexpected_eof" : "plan_incomplete");
+          }
+          expect(record.messages.some(message => message.toolCall?.name === "submit_plan")).toBe(false);
+          expect(JSON.stringify(events.filter(event => event.kind === "text"))).not.toContain("proposed_plan");
+          expect(generations).toBe(outcome === "corrected" ? 2 : ["valid", "interrupted"].includes(outcome) ? 1 : 3);
+        } finally { await session.shutdown(); }
+      });
+    }
+  }
+
+  it("does not flush an incomplete compatibility call after unexpected EOF", async () => {
+    const { ChatSession } = await import("../src/chat/session.js");
+    const { StreamFailure } = await import("../src/llm/completion.js");
+    const record = newRecord();
+    record.toolCallingMode = "compat-qwen3";
+    const events: UiEvent[] = [];
+    mocks.streamChat.mockImplementation(async function* (_endpoint, request) {
+      if (request.tools) throw new mocks.NativeToolsUnsupportedError("tools unsupported");
+      yield { kind: "text", text: '<tool_call>{"name":"list_dir","arguments":{"path":"."}}' };
+      throw new StreamFailure("Stream ended without completion", { cause: "unexpected_eof" });
+    });
+    const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record, emit: event => events.push(event) });
+    try {
+      await session.sendUserMessage("Inspect");
+      expect(events.some(event => event.kind === "toolCallProposed")).toBe(false);
+      expect(record.messages.at(-1)?.interruption?.diagnostics?.cause).toBe("unexpected_eof");
+    } finally { await session.shutdown(); }
+  });
+
+  it("persists explicit interruption resolution and rejects stale queue recovery", async () => {
+    const { ChatSession } = await import("../src/chat/session.js");
+    const { unresolvedInterruption } = await import("../src/chat/interruption.js");
+    const record = newRecord();
+    const save = vi.fn();
+    mocks.streamChat.mockImplementation(async function* () { yield { kind: "text", text: "Partial" }; throw new Error("Disconnected"); });
+    const session = new ChatSession({ storage: { save } as never, workspaceRoot: "/tmp/workspace", record, emit: vi.fn() });
+    try {
+      await session.sendUserMessage("Work");
+      const terminal = unresolvedInterruption(record)!;
+      expect(await session.resolveInterruption(terminal.ts - 1)).toBe(false);
+      expect(await session.resolveInterruption(terminal.ts)).toBe(true);
+      expect(unresolvedInterruption(record)).toBeUndefined();
+      expect(terminal.interruption?.resolved).toBe(true);
+      expect(save).toHaveBeenLastCalledWith(record);
+      expect(await session.continueTurn(terminal.ts)).toBe(false);
+    } finally { await session.shutdown(); }
+  });
+});
+
+it("keeps user cancellation distinct from a socket abort and releases the queue hold", async () => {
+  const { ChatSession } = await import("../src/chat/session.js");
+  const { unresolvedInterruption } = await import("../src/chat/interruption.js");
+  const record = newRecord();
+  const events: UiEvent[] = [];
+  const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record, emit: event => events.push(event) });
+  mocks.streamChat.mockImplementation(async function* () {
+    yield { kind: "thought", text: "Thinking" };
+    session.cancel();
+    throw new DOMException("This operation was aborted", "AbortError");
+  });
+  try {
+    await session.sendUserMessage("Inspect");
+    expect(record.messages.at(-1)?.interruption).toMatchObject({ reason: "Stopped by user.", diagnostics: { cause: "user_cancel" } });
+    expect(events.filter(event => event.kind === "abort")).toHaveLength(1);
+    expect(unresolvedInterruption(record)).toBeUndefined();
+    expect(mocks.streamChat).toHaveBeenCalledOnce();
+  } finally { await session.shutdown(); }
+});
+
+it("rejects an old approval after a plan revision in the same millisecond", async () => {
+  const { ChatSession } = await import("../src/chat/session.js");
+  const record = newRecord();
+  record.toolCallingMode = "native";
+  const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record, emit: vi.fn() });
+  const now = vi.spyOn(Date, "now").mockReturnValue(1000);
+  mocks.streamChat.mockImplementation(async function* () {
+    yield { kind: "text", text: planText("Implement and verify") };
+  });
+  try {
+    await session.sendUserMessage("Plan this", [], "plan");
+    const first = record.pendingPlanMessageTs!;
+    expect(session.resolvePlan(first, "plan")).toBe(true);
+    await session.sendUserMessage("Revise this", [], "plan");
+    expect(record.pendingPlanMessageTs).toBeGreaterThan(first);
+    expect(session.resolvePlan(first, "act")).toBe(false);
+    expect(session.resolvePlan(record.pendingPlanMessageTs!, "act")).toBe(true);
+  } finally { now.mockRestore(); await session.shutdown(); }
+});
+
+describe("complete edit proposal counts", () => {
+  const cases = [
+    ...editDiffCases.map(scenario => ({ ...scenario, decision: "approve" })),
+    { ...editDiffCases[0], decision: "reject" },
+    { ...editDiffCases[0], decision: "changed" }
+  ];
+  it.each(cases)("$name / $decision", async scenario => {
+    const { ChatSession } = await import("../src/chat/session.js");
+    const { ChatStorage } = await import("../src/chat/storage.js");
+    const { readFile } = await import("../src/tools/fsTools.js");
+    const { writeProgressFromJsonToolBody } = await import("../src/llm/toolProgress.js");
+    const { restoredToolFileChanges } = await import("../src/ui/chatView/webview/toolHistory.js");
+    const ws = await fs.mkdtemp(path.join(os.tmpdir(), "locality-edit-counts-"));
+    const file = path.join(ws, "sample.txt");
+    const legacy = scenario.tool === "write_file";
+    mocks.settings.toolCallingMode = legacy ? "compat-qwen3" : "native";
+    mocks.settings.autoapproveWrites = false;
+    const storage = new ChatStorage(ws, path.join(ws, "chats"));
+    const record = storage.newRecord(legacy ? "compat-qwen3" : "native");
+    record.title = "Edit counts";
+    const events: UiEvent[] = [];
+    const session = new ChatSession({ storage, workspaceRoot: ws, record, emit: event => events.push(event) });
+    try {
+      if (scenario.previous !== undefined) await fs.writeFile(file, scenario.previous);
+      const args = { path: "sample.txt", ...scenario.args,
+        ...(scenario.tool === "edit_file" ? { baseRevision: (await readFile({ workspaceRoot: ws }, { path: "sample.txt" })).revision } : {}) };
+      const argsJson = JSON.stringify(args);
+      let pass = 0;
+      mocks.streamChat.mockImplementation(async function* (_endpoint, request) {
+        if (legacy && request.tools) throw new mocks.NativeToolsUnsupportedError("tools unsupported");
+        if (pass++ > 0) { yield { kind: "text", text: "Done." }; return; }
+        if (legacy) yield { kind: "text", text: `<tool_call>${JSON.stringify({ name: scenario.tool, arguments: args })}</tool_call>` };
+        else {
+          yield { kind: "toolCallProgress", ...writeProgressFromJsonToolBody(argsJson, scenario.tool), id: "edit" };
+          yield { kind: "toolCall", name: scenario.tool, argsJson, id: "edit" };
+        }
+      });
+      const turn = session.sendUserMessage("Edit the file");
+      await vi.waitFor(() => expect(events.some(event => event.kind === "toolCallProposed")).toBe(true));
+      const proposal = events.find((event): event is Extract<UiEvent, { kind: "toolCallProposed" }> => event.kind === "toolCallProposed")!;
+      expect(proposal).toMatchObject({ approvalRequired: true, added: scenario.added, removed: scenario.removed, diffPreview: expect.any(String) });
+      if (scenario.name === "capped preview") expect(proposal.diffPreview).toContain("large diff preview capped");
+      for (const progress of events.filter(event => event.kind === "toolCallProgress")) {
+        expect(progress).not.toHaveProperty("added");
+        expect(progress).not.toHaveProperty("removed");
+      }
+      if (scenario.previous === undefined) await expect(fs.stat(file)).rejects.toMatchObject({ code: "ENOENT" });
+      else await expect(fs.readFile(file, "utf8")).resolves.toBe(scenario.previous);
+      expect(events.some(event => event.kind === "toolCallResolved" && event.status === "executed")).toBe(false);
+      if (scenario.decision === "changed") await fs.writeFile(file, "Changed externally\n");
+      session.approve(proposal.toolId, scenario.decision !== "reject");
+      await turn;
+      if (scenario.decision === "approve") {
+        await expect(fs.readFile(file, "utf8")).resolves.toBe(scenario.next);
+        expect(events).toContainEqual(expect.objectContaining({
+          kind: "toolCallResolved", toolId: proposal.toolId, status: "executed",
+          added: proposal.added, removed: proposal.removed, diffPreview: proposal.diffPreview
+        }));
+        const restored = (await storage.load(record.id))!;
+        expect([...restoredToolFileChanges(restored).values()]).toEqual([
+          { path: "sample.txt", added: scenario.added, removed: scenario.removed, diffPreview: proposal.diffPreview }
+        ]);
+      } else {
+        await expect(fs.readFile(file, "utf8")).resolves.toBe(scenario.decision === "changed" ? "Changed externally\n" : scenario.previous);
+        expect(events).toContainEqual(expect.objectContaining({
+          kind: "toolCallResolved", toolId: proposal.toolId, status: scenario.decision === "reject" ? "rejected" : "failed"
+        }));
+        expect([...restoredToolFileChanges((await storage.load(record.id))!).values()]).toEqual([]);
+      }
+    } finally {
+      await session.shutdown();
+      await fs.rm(ws, { recursive: true, force: true });
     }
   });
 });

@@ -27,6 +27,10 @@ export function lineDiffStats(previous: string, next: string): { added: number; 
   const a = splitLines(previous);
   const b = splitLines(next);
   const rows = diffRows(a, b);
+  return countDiffRows(rows, a, b);
+}
+
+function countDiffRows(rows: DiffRow[] | null, a: string[], b: string[]): { added: number; removed: number } {
   if (!rows) return multisetLineStats(a, b);
   let added = 0;
   let removed = 0;
@@ -56,14 +60,18 @@ function multisetLineStats(a: string[], b: string[]): { added: number; removed: 
 }
 
 export function renderLineDiff(previous: string, next: string): string {
-  if (previous === next) return "(no line changes)";
+  return buildLineDiff(previous, next).diffPreview;
+}
+
+/** One complete pair of file contents supplies both the preview and its counts. */
+export function buildLineDiff(previous: string, next: string): { diffPreview: string; added: number; removed: number } {
+  if (previous === next) return { diffPreview: "(no line changes)", added: 0, removed: 0 };
 
   const a = splitLines(previous);
   const b = splitLines(next);
   const rows = diffRows(a, b);
-  if (!rows) return renderCappedDiff(a, b);
-  const out = renderContextualRows(rows);
-  return out.length === 0 ? "(no line changes)" : out.join("\n");
+  const diffPreview = rows ? renderContextualRows(rows).join("\n") || "(no line changes)" : renderCappedDiff(a, b);
+  return { diffPreview, ...countDiffRows(rows, a, b) };
 }
 
 /**

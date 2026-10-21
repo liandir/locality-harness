@@ -26,8 +26,8 @@ tab in the side panel. Configure the server and tool calling before chatting:
   refused. Click **Set** to validate the endpoint, list `/v1/models`, and read
   `/props` metadata. Choose the model below the URL; its reported alias and
   context length are shown alongside it.
-- **Tool calling** — choose **Native server only** when the server reliably
-  returns OpenAI-compatible structured calls. The Gemma 4, Qwen 3, Muse
+- **Tool calling** — defaults to **Native server only**, which requires
+  OpenAI-compatible structured calls from the server. The Gemma 4, Qwen 3, Muse
   Glimmer, and GPT-OSS compatibility profiles still prefer structured calls,
   but can recover that family's exact syntax when it leaks into text. Gemma,
   Qwen, and GPT-OSS can also fall back to their legacy adapters when the server
@@ -317,7 +317,7 @@ Only settings supported by the installed edition are available.
 | --- | --- | --- |
 | `endpoint` | `http://localhost:8080/v1` | URL of your llama.cpp server. Use `localhost` or a private IP literal such as `http://127.0.0.1:8080/v1` or `http://192.168.1.50:8080/v1`. |
 | `model` | `local` | Model id sent with requests. The Settings view replaces this fallback with a selection from llama.cpp's `/v1/models` response. |
-| `toolCallingMode` | `compat-gemma4` | Select `native`, `compat-gemma4`, `compat-qwen3`, `compat-muse-glimmer`, or `compat-gpt-oss`. Compatibility profiles are native-first and add only the selected family's recovery behavior. |
+| `toolCallingMode` | `native` | Select `native`, `compat-gemma4`, `compat-qwen3`, `compat-muse-glimmer`, or `compat-gpt-oss`. Compatibility profiles are native-first and add only the selected family's recovery behavior. |
 | `temperature` | `0.8` | Sampling temperature for chat requests. Lower is more deterministic, higher more varied. |
 | `topK` | `40` | Top-k sampling: keep only the K most likely tokens at each step (`0` disables). |
 | `topP` | `0.95` | Top-p (nucleus) sampling: keep the smallest token set whose cumulative probability reaches p (`1` disables). |

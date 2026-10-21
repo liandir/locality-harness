@@ -92,6 +92,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 }
 .msg.user > .message-actions { align-self: flex-end; flex-direction: row-reverse; gap: 15px; max-width: 90%; padding-right: 2px; }
 .msg.assistant > .message-actions { align-self: flex-start; }
+.msg > .message-actions.recovery-actions { opacity: 1; pointer-events: auto; }
 .message-actions .message-mode { margin-inline-start: 7px; margin-inline-end: 4px; }
 .message-date { flex: 0 0 auto; margin-inline: 7px; font-variant-numeric: tabular-nums; color: var(--vscode-descriptionForeground); font-size: 0.82em; line-height: 1.35; white-space: nowrap; }
 .msg.user .message-actions > :is(.message-mode, .message-date) { margin-inline: 0; }
@@ -192,6 +193,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .work-section, .thinking { color: var(--tool-idle); padding: 4px 0; }
 .server-status-fallback[hidden], .server-status-part[hidden] { display: none; }
 .work-head, .thinking-head, .tool-head {
+  --disclosure-foreground: var(--tool-idle);
+  color: var(--disclosure-emphasis, var(--disclosure-foreground));
   display: inline-flex;
   width: fit-content;
   max-width: 100%;
@@ -203,7 +206,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   padding: 3px 0;
   transition: color 0.12s;
 }
-.work-head, .thinking-head { gap: 8px; color: var(--tool-idle); }
+.work-head, .thinking-head { gap: 8px; }
 .work-head[hidden] { display: none; }
 .work-title, .work-current-name, .thinking-label { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .work-current-name { font-weight: inherit; }
@@ -217,12 +220,12 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .work-section { position: relative; }
 .work-head, .thinking-head, .tool-head { position: relative; }
 /* History remains readable at rest; hover and focus emphasize the foreground. */
-.thinking, .thinking-head { color: var(--tool-idle); }
-/* Highlight the complete tool heading, including compact file reads and links. */
-.work-head:is(:hover, :focus-visible), .thinking-head:is(:hover, :focus-visible),
-.tool-head:is(:hover, :focus-visible, :has(:focus-visible)) { color: var(--vscode-foreground); }
-.disclosure-trigger:hover > .disclosure-icon {
-  color: var(--vscode-foreground);
+.thinking { color: var(--tool-idle); }
+/* Non-disclosing rows keep their existing hover affordance. Interactive rows
+   use the shared disclosure contract, including keyboard focus on child links. */
+:is(.work-head, .thinking-head, .tool-head):not(.disclosure-trigger):is(:hover, :focus-visible, :has(:focus-visible)) {
+  --disclosure-emphasis: var(--vscode-foreground);
+  color: var(--disclosure-emphasis);
 }
 /* Keep the live stream's spacing when its chronology moves into Worked
    history: 6px between render units, with compact rows inside sub-sessions. */
@@ -260,18 +263,6 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .thinking-body > :first-child { margin-top: 0; }
 .thinking-body > :last-child { margin-bottom: 0; }
 .thinking-body p { margin: 0.3em 0; }
-.disclosure-icon { flex: 0 0 auto; opacity: 1; transform: rotate(0deg); transition: transform 0.16s ease, opacity 0.12s; }
-.work-section.open > .work-head .disclosure-icon,
-.thinking.open .disclosure-icon,
-.tool-card.open .disclosure-icon,
-.change-summary.open > .change-summary-head .disclosure-icon,
-.change-file-item.open > .change-file-row .disclosure-icon {
-  transform: rotate(90deg);
-  opacity: 1;
-}
-/* The activity in a collapsed live session discloses its parent history, so
-   its chevron stays right-facing even if that tool retained an open state. */
-.work-body.current-only .disclosure-icon { transform: rotate(0deg); }
 /* One continuous sweep across the tool name, file links, ranges and counts.
    Hovered targets become opaque below without interrupting the animation. */
 .shimmer,
@@ -291,38 +282,15 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   -webkit-background-clip: text;
   background-clip: text;
 }
-.shimmer { color: transparent; }
-.active-tool-head > :is(.tool-name, .tool-label) { color: transparent; }
-/* Hover/keyboard focus takes precedence over the running shimmer. The animation
-   remains attached to the heading, while opaque foreground colors make the
-   complete active row (including its bouncing icon) read like other hovered
-   tools. Retained pointer focus on native summaries must not latch this state. */
-.active-tool-head:is(:hover, :focus-visible, :has(:focus-visible)) > :is(.tool-name, .tool-label, .tool-icon) {
-  color: var(--vscode-foreground);
-}
-/* Live thinking and work summaries shimmer across the complete measured
-   label. Keep the text opaque while hovered without stopping the animation. */
-.work-head:is(:hover, :focus-within) .shimmer,
-.thinking-head:is(:hover, :focus-within) .shimmer {
-  color: var(--vscode-foreground);
-}
-/* With thinking history hidden, a temporary standalone Thinking row is only
-   informational. Preserve its idle shimmer on hover unless the row is acting
-   as the disclosure for earlier activity in its sub-session. */
-.thinking.history-hidden .thinking-head:not(.disclosure-trigger) {
-  cursor: default;
-}
-.thinking.history-hidden .thinking-head:not(.disclosure-trigger):is(:hover, :focus-within) {
+.shimmer,
+.active-tool-head > :is(.tool-name, .tool-label) { color: var(--disclosure-emphasis, transparent); }
+/* Informational thinking/server statuses keep their idle shimmer, unless they
+   disclose earlier activity. This semantic override also works without motion. */
+.thinking.history-hidden .thinking-head:not(.disclosure-trigger),
+.server-status-part .tool-head:not(.disclosure-trigger) {
+  --disclosure-emphasis: initial;
   color: var(--tool-idle);
-}
-.thinking.history-hidden .thinking-head:not(.disclosure-trigger):is(:hover, :focus-within) .shimmer {
-  color: transparent;
-}
-/* Transient server statuses are informational, not interactive tool rows.
-   Keep their shimmer unchanged unless the row discloses existing history. */
-.server-status-part .tool-head:not(.disclosure-trigger):hover { color: var(--tool-idle); }
-.server-status-part .active-tool-head:not(.disclosure-trigger):is(:hover, :focus-within) > .tool-name {
-  color: transparent;
+  cursor: default;
 }
 .tool-card { color: var(--tool-idle); padding: 4px 0; }
 .tool-head { gap: 0; }
@@ -331,27 +299,17 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
    marker, including rows which disclose their collapsed parent session. */
 .tool-head:not(.disclosure-trigger) { cursor: default; }
 .tool-head > .disclosure-icon { margin-left: 8px; }
-.disclosure-trigger > .disclosure-icon {
-  color: var(--tool-idle);
-  opacity: 0;
-}
-.disclosure-trigger:is(:hover, :focus-within) > .disclosure-icon { opacity: 1; }
-/* Keep the collapse affordance visible for expanded tools and native details. */
-.tool-card:is(.open, [open]) > .tool-head > .disclosure-icon,
-.change-summary.open > .change-summary-head .disclosure-icon,
-.change-file-item.open > .change-file-row .disclosure-icon { opacity: 1; }
 .tool-icon { margin-right: 8px; }
-.active-tool-head > .tool-icon { color: var(--tool-idle); }
+.active-tool-head > .tool-icon { color: var(--disclosure-emphasis, var(--tool-idle)); }
 .active-tool-head > .tool-icon svg {
   animation: active-tool-icon-shimmer var(--shimmer-duration, 4s) linear infinite;
 }
 /* The icon sits at the leading edge of the heading, so its brief color pulse
    lands during the first third of the shared left-to-right shimmer sweep. */
 @keyframes active-tool-icon-shimmer {
-  0%, 20%, 36%, 100% { color: var(--shimmer-edge); }
-  28% { color: var(--shimmer-peak); }
+  0%, 20%, 36%, 100% { color: var(--disclosure-emphasis, var(--shimmer-edge)); }
+  28% { color: var(--disclosure-emphasis, var(--shimmer-peak)); }
 }
-.active-tool-head:is(:hover, :focus-visible, :has(:focus-visible)) > .tool-icon svg { color: var(--vscode-foreground) !important; }
 /* While the model is working, the active tool icon (and the live thinking
    brain) lifts gently from a slightly lowered rest position. Finished icons
    do not receive this transform and retain their existing alignment. */
@@ -393,19 +351,19 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 /* tabular-nums: every digit the same width, so a counting stat never makes the
    label wobble horizontally. */
 .diff-stat { font-family: var(--vscode-editor-font-family); font-weight: 400; font-size: 0.95em; font-variant-numeric: tabular-nums; transition: color 0.12s; }
-.diff-stat.add { color: var(--success-foreground); }
-.diff-stat.del { color: var(--error-highlight-foreground); }
+.diff-stat.add { color: var(--diff-added-foreground); }
+.diff-stat.del { color: var(--diff-removed-foreground); }
 /* Settled edit/create counts stay colored for an open diff or row hover.
    Active counts share the heading's shimmer. */
 .tool-head .diff-stat, .change-file-row .diff-stat { color: inherit; }
 .tool-card:not(.failed):not(.rejected) > .tool-head:hover .diff-stat.add,
 .tool-card.open:not(.failed):not(.rejected) > .tool-head:not(.active-tool-head) .diff-stat.add,
-.change-summary:is(.open, :hover, :focus-within) > .change-summary-head .diff-stat.add,
-.change-file-item:is(.open, :hover, :focus-within) > .change-file-row .diff-stat.add { color: var(--success-foreground); }
+.change-summary:is(.open, :hover, :has(:focus-visible)) > .change-summary-head .diff-stat.add,
+.change-file-item:is(.open, :hover, :has(:focus-visible)) > .change-file-row .diff-stat.add { color: var(--diff-added-foreground); }
 .tool-card:not(.failed):not(.rejected) > .tool-head:hover .diff-stat.del,
 .tool-card.open:not(.failed):not(.rejected) > .tool-head:not(.active-tool-head) .diff-stat.del,
-.change-summary:is(.open, :hover, :focus-within) > .change-summary-head .diff-stat.del,
-.change-file-item:is(.open, :hover, :focus-within) > .change-file-row .diff-stat.del { color: var(--error-highlight-foreground); }
+.change-summary:is(.open, :hover, :has(:focus-visible)) > .change-summary-head .diff-stat.del,
+.change-file-item:is(.open, :hover, :has(:focus-visible)) > .change-file-row .diff-stat.del { color: var(--diff-removed-foreground); }
 .tool-expanded { padding: 3px 0 1px 24px; margin-top: 0; font-size: inherit; font-weight: 400; line-height: 1.4; }
 /* Expanded tool payloads inherit from the chat rather than the editor's font
    size setting. Code-oriented payloads step down slightly because the editor
@@ -508,14 +466,11 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   /* Resolve the highlight here so it includes the inherited theme adjustment. */
   --error-highlight-foreground: var(--error-foreground);
 }
-.tool-card:is(.failed, .rejected) .tool-head,
-.tool-card:is(.failed, .rejected) .tool-head * {
-  color: var(--tool-error-idle);
+.tool-card:is(.failed, .rejected) > .tool-head {
+  --disclosure-foreground: var(--tool-error-idle);
+  --disclosure-highlight: var(--error-highlight-foreground);
 }
-.tool-card:is(.failed, .rejected) .tool-head:is(:hover, :focus-within),
-.tool-card:is(.failed, .rejected) .tool-head:is(:hover, :focus-within) * {
-  color: var(--error-highlight-foreground);
-}
+.tool-card:is(.failed, .rejected) > .tool-head * { color: inherit; }
 .tool-error-result {
   margin: 0;
   padding: 0;
@@ -560,12 +515,11 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .change-file-toggle { flex: 1; align-self: stretch; display: flex; align-items: center; gap: 6px; padding: 0; border: 0; border-radius: 0; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
 .change-file-toggle > .diff-stat-group { transform: translateY(1px); }
 .change-file-toggle:focus-visible { outline: none; }
-.change-file-row:is(:hover, :focus-within) { color: var(--vscode-foreground); background: var(--surface-fill); }
-.change-file-row:is(:hover, :focus-within) .disclosure-icon { opacity: 1; }
+.change-file-row:is(:hover, :has(:focus-visible)) { color: var(--vscode-foreground); background: var(--surface-fill); }
 /* Continue the row fill across adjacent dividers, including their side insets. */
-.change-file-list > .card-separator:has(+ .change-file-item > .change-file-row:is(:hover, :focus-within)),
-.change-file-item:not(.open):has(> .change-file-row:is(:hover, :focus-within)) + .card-separator,
-.change-file-row:is(:hover, :focus-within) + .card-separator {
+.change-file-list > .card-separator:has(+ .change-file-item > .change-file-row:hover, + .change-file-item > .change-file-row :focus-visible),
+.change-file-item:not(.open):has(> .change-file-row:hover, > .change-file-row :focus-visible) + .card-separator,
+.change-file-row:is(:hover, :has(:focus-visible)) + .card-separator {
   margin-inline: 0;
   border-color: transparent;
   background: var(--surface-fill);
@@ -574,14 +528,14 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .tool-diff .diff-lines { display: grid; width: max-content; min-width: 100%; }
 .tool-diff .diff-line { position: relative; display: grid; width: 100%; min-width: 0; grid-template-columns: 6ch minmax(0, 1fr); min-height: 0; padding: 2px 0; line-height: 1.2; white-space: pre; }
 .tool-diff .diff-line::before { content: ""; position: absolute; inset: 0 auto 0 0; width: 3px; background: transparent; }
-.tool-diff .diff-line.add { background: color-mix(in srgb, var(--success-foreground) 15%, transparent); }
-.tool-diff .diff-line.del { background: color-mix(in srgb, var(--error-foreground) 15%, transparent); }
-.tool-diff .diff-line.add::before { background: var(--success-foreground); }
-.tool-diff .diff-line.del::before { background: var(--error-foreground); }
+.tool-diff .diff-line.add { background: color-mix(in srgb, var(--diff-added-foreground) 15%, transparent); }
+.tool-diff .diff-line.del { background: color-mix(in srgb, var(--diff-removed-foreground) 15%, transparent); }
+.tool-diff .diff-line.add::before { background: var(--diff-added-foreground); }
+.tool-diff .diff-line.del::before { background: var(--diff-removed-foreground); }
 .tool-diff .diff-line.neutral { color: var(--vscode-descriptionForeground); }
 .tool-diff .diff-no { color: var(--vscode-editorLineNumber-foreground, var(--vscode-descriptionForeground)); text-align: right; padding: 0 10px 0 5px; user-select: none; opacity: 0.82; }
-.tool-diff .diff-line.add .diff-no { color: var(--success-foreground); opacity: 1; }
-.tool-diff .diff-line.del .diff-no { color: var(--error-foreground); opacity: 1; }
+.tool-diff .diff-line.add .diff-no { color: var(--diff-added-foreground); opacity: 1; }
+.tool-diff .diff-line.del .diff-no { color: var(--diff-removed-foreground); opacity: 1; }
 .tool-diff .diff-code { min-width: 0; padding-right: 9px; color: var(--vscode-editor-foreground, var(--vscode-foreground)); }
 
 .card { padding: 8px 10px; }
@@ -772,7 +726,6 @@ body.image-preview-open .chat-body { overflow: hidden; }
   .shimmer,
   .active-tool-head > .tool-name,
   .active-tool-head > .tool-label { color: inherit; }
-  .server-status-part .active-tool-head:not(.disclosure-trigger):is(:hover, :focus-within) > .tool-name { color: inherit; }
   .active-tool-head > .tool-icon svg { animation: none; color: inherit; }
   .tool-card.streaming .tool-icon,
   .tool-card.approved .tool-icon,
@@ -786,15 +739,7 @@ body.image-preview-open .chat-body { overflow: hidden; }
   .ctx-pill.nudge { animation: none; }
 }
 
-.memory-source > summary { list-style: none; outline: none; }
-.memory-source > summary::-webkit-details-marker { display: none; }
-.memory-source > summary:is(:focus-visible, :has(:focus-visible)) { color: var(--vscode-foreground); }
-.memory-source[open] > summary .disclosure-icon { transform: rotate(90deg); }
 .memory-source { padding: 0; }
-/* Native memory summaries retain pointer focus after clicks. Keep their
-   keyboard-only focus affordance separate from tool rows' focus-within rule. */
-.memory-source > summary.disclosure-trigger > .disclosure-icon { opacity: 0; }
-.memory-source > summary.disclosure-trigger:is(:hover, :focus-visible, :has(:focus-visible)) > .disclosure-icon { opacity: 1; }
 .memory-date { color: var(--vscode-descriptionForeground); margin-bottom: 4px; font-size: 0.85em; }
 .tool-memory-item { align-items: flex-start; }
 .tool-memory-item > .tool-filelist-icon { margin-top: 2px; }
@@ -811,6 +756,4 @@ body.image-preview-open .chat-body { overflow: hidden; }
 .chat-tab-close svg { width: 16px; height: 16px; display: block; }
 .chat-tab-label:focus-visible { background: var(--surface-fill-hover); color: var(--vscode-foreground); }
 
-.disclosure-trigger[role="button"] { outline: none; }
-.thinking-head[role="button"], .tool-head[role="button"], .work-section.session > .work-head[role="button"] { border-radius: var(--control-radius); }
-.disclosure-trigger[role="button"]:focus-visible { background: var(--surface-fill-hover); color: var(--vscode-foreground); }
+#incompletePlanning { align-self: flex-end; margin-bottom: 6px; }

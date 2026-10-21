@@ -1,3 +1,4 @@
+import { validMemoryDiagnostic, type MemoryAttempt, type MemoryDiagnostic } from "./memoryJobTypes.js";
 import { createHash } from "node:crypto";
 import type { ChatRecord } from "./types.js";
 import { DEFAULT_MEMORY_MAX_COUNT, MAX_MEMORY_COUNT } from "./memoryLimits.js";
@@ -14,7 +15,9 @@ export interface ChatMemory {
 /** UI history, kept outside the transcript and model context. */
 export interface MemoryCreation {
   messageTs: number;
-  status: "queued" | "generating" | "created" | "failed";
+  status: "queued" | "generating" | "retry_wait" | "cancelled" | "created" | "failed";
+  attemptId?: string;
+  diagnostic?: MemoryDiagnostic;
   /** Whether a summary existed before this operation; absent in older history. */
   operation?: "create" | "update";
   text?: string;
@@ -26,10 +29,13 @@ export function validMemoryCreation(value: unknown): value is MemoryCreation {
   if (!value || typeof value !== "object") return false;
   const item = value as MemoryCreation;
   return validTimestamp(item.messageTs)
+    && (item.attemptId === undefined || typeof item.attemptId === "string" && /^[a-f0-9-]{36}$/.test(item.attemptId))
+    && (item.diagnostic === undefined || validMemoryDiagnostic(item.diagnostic))
     && (item.operation === undefined || item.operation === "create" || item.operation === "update")
     && ((item.status === "created" && typeof item.text === "string" && item.text.length <= 20000
       && typeof item.generatedAt === "number" && validTimestamp(item.generatedAt))
-      || (item.status === "failed" && typeof item.error === "string"));
+      || (item.status === "failed" && typeof item.error === "string")
+      || ["queued", "generating", "retry_wait", "cancelled"].includes(item.status));
 }
 export interface MemorySnapshot {
   sourceId: string;
@@ -54,7 +60,7 @@ export function transcriptRevision(rec: ChatRecord): string {
   })))).digest("hex");
 }
 /** Headers carry the revision so memory browsing never needs a transcript. */
-export type MemorySource = Pick<ChatRecord, "id" | "title" | "memory"> &
+export type MemorySource = Pick<ChatRecord, "id" | "title" | "memory" | "memoryAttempt"> &
   ({ messages: ChatRecord["messages"] } | { revision: string });
 
 export function usableMemory(rec: MemorySource): boolean {
@@ -71,12 +77,20 @@ export function memoryListItem(rec: MemorySource): MemoryListItem {
   return {
     sourceId: rec.id, title: rec.title, sourceRevision: rec.memory?.sourceRevision ?? sourceRevision(rec),
     generatedAt: rec.memory?.generatedAt ?? 0, text: rec.memory?.text ?? "", enabled: rec.memory?.enabled ?? false,
-    usable: usableMemory(rec), error: rec.memory?.error,
-    status: rec.memory?.error ? "failed" : rec.memory?.manual ? "manual"
+    usable: usableMemory(rec), error: rec.memoryAttempt?.state === "failed" ? rec.memoryAttempt.diagnostic?.message : rec.memory?.error,
+    status: rec.memoryAttempt?.state === "failed" || rec.memory?.error ? "failed" : rec.memory?.manual ? "manual"
       : usableMemory({ ...rec, memory: rec.memory && { ...rec.memory, enabled: true } }) ? "ready"
         : rec.memory ? "stale" : "missing"
   };
 }
+/** One projection for persisted history and live progress; no state invented by the webview. */
+export function memoryCreation(attempt: MemoryAttempt): MemoryCreation | undefined {
+  if (attempt.messageTs === undefined) return;
+  return { messageTs: attempt.messageTs, operation: attempt.operation, attemptId: attempt.id,
+    status: attempt.state === "succeeded" ? "created" : attempt.state,
+    error: attempt.diagnostic?.message, diagnostic: attempt.diagnostic };
+}
+
 export function validMemory(value: unknown): value is ChatMemory {
   if (!value || typeof value !== "object") return false;
   const m = value as ChatMemory;

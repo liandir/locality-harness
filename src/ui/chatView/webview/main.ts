@@ -1,3 +1,6 @@
+import { pendingPlanTimestamp } from "../../../chat/planning.js";
+import type { CompletionDiagnostics } from "../../../llm/completion.js";
+import { interruptionMessage } from "./interruption.js";
 import { startShiki, normalizeHighlightLanguage, highlightCode, highlightLanguageForPath } from "./highlighting.js";
 import { escapeHtml } from "../../html.js";
 import {
@@ -158,9 +161,6 @@ interface ToolCard extends ChatToolProcess {
   // other settled write/edit (including a failed one) → "Edited file".
   createsNewFile?: boolean;
   processStopping?: boolean;
-  // replace_range only: the number of lines the edit replaces, for the live
-  // "Replacing Y with X lines" note and the -Y in the heading.
-  replacedLines?: number;
   progress?: {
     path?: string;
     contentLines: number;
@@ -177,7 +177,7 @@ type MessagePart =
   | { id: string; kind: "tool"; card: ToolCard; startedAt?: number }
   | { id: string; kind: "steering"; message: Message; startedAt?: number }
   | { id: string; kind: "summary"; text: string }
-  | { id: string; kind: "abort"; reason: string };
+  | { id: string; kind: "abort"; reason: string; diagnostics?: CompletionDiagnostics };
 
 interface Message {
   id: string;
@@ -192,6 +192,7 @@ interface Message {
   toolCards: ToolCard[];
   summary?: string;
   aborted?: string;
+  interruptionResolved?: boolean;
   workStartedAt?: number;
   workEndedAt?: number;
   startNewPart?: boolean;
@@ -205,7 +206,7 @@ interface Message {
 
 type ComposerDecision =
   | { kind: "tool"; tool: ToolCard }
-  | { kind: "plan"; messageTs?: number };
+  | { kind: "plan"; messageTs: number };
 
 interface CompactActivity {
   id: string;
@@ -708,6 +709,7 @@ function mountShell(): void {
     <footer class="composer">
       <div id="scrollDownSlot"></div>
       <div id="messageQueue" class="message-queue" hidden></div>
+      <div id="incompletePlanning" hidden></div>
       <div class="composer-row">
         <div id="approvalSlot"></div>
         <div id="composerInput" class="composer-input">
@@ -1025,6 +1027,11 @@ function renderAttachmentHtml(attachment: UiAttachment, removeAttribute = ""): s
   </span>`;
 }
 
+function isContinuableResponse(message: Message): boolean {
+  return !!message.aborted && !message.interruptionResolved && message.recordTs !== undefined
+    && [...state.messages].reverse().find(item => item.role === "assistant" || item.role === "user") === message;
+}
+
 function renderMessageActions(parent: HTMLElement, m: Message): HTMLElement | undefined {
   let actions = directChild(parent, "message-actions");
   const inner = renderMessageActionsInnerHtml(m);
@@ -1036,6 +1043,7 @@ function renderMessageActions(parent: HTMLElement, m: Message): HTMLElement | un
     actions = document.createElement("div");
     actions.className = "message-actions";
   }
+  actions.classList.toggle("recovery-actions", isContinuableResponse(m));
   if (actions.dataset.messageActions !== m.id) actions.dataset.messageActions = m.id;
   setHtml(actions, inner);
   return actions;
@@ -1044,7 +1052,7 @@ function renderMessageActions(parent: HTMLElement, m: Message): HTMLElement | un
 function renderMessageActionsHtml(m: Message): string {
   const inner = renderMessageActionsInnerHtml(m);
   if (!inner) return "";
-  return `<div class="message-actions" data-message-actions="${m.id}">${inner}</div>`;
+  return `<div class="message-actions${isContinuableResponse(m) ? " recovery-actions" : ""}" data-message-actions="${m.id}">${inner}</div>`;
 }
 
 function renderMessageActionsInnerHtml(m: Message): string {
@@ -1067,9 +1075,9 @@ function renderMessageActionsInnerHtml(m: Message): string {
     }
   }
   if (m.role === "assistant" && m.responseToTs !== undefined && !state.busy) {
-    const latestResponse = [...state.messages].reverse().find(message => message.role === "assistant" || message.role === "user");
-    if (m.aborted && m.recordTs !== undefined && latestResponse === m) {
+    if (isContinuableResponse(m)) {
       actions.push(`<button class="icon-btn copy-btn" type="button" data-continue-chat="${m.recordTs}" data-tip="Continue" aria-label="Continue">${rightArrowIcon()}</button>`);
+      if (!state.planning && state.queuedMessages.length) actions.push(`<button class="action-btn" type="button" data-resume-queue="${m.recordTs}">Run queued messages</button>`);
     } else if (!m.aborted) {
       actions.push(`<button class="icon-btn copy-btn" type="button" data-fork-chat="${m.responseToTs}" data-tip="Fork chat" aria-label="Fork chat">${forkIcon()}</button>`);
     }
@@ -1539,7 +1547,7 @@ function renderPartInto(
     return;
   } else {
     cls = "part abort-part";
-    html = `<div class="assistant-markdown abort">${escapeHtml(part.reason)}</div>`;
+    html = `<div class="assistant-markdown abort">${escapeHtml(interruptionMessage(part.reason, part.diagnostics))}</div>`;
   }
   if (el.className !== cls) el.className = cls;
   setHtml(el, html);
@@ -1777,9 +1785,8 @@ function renderToolHead(card: HTMLElement, tc: ToolCard): void {
 }
 
 /**
- * Patch the head label in place. For write cards the ±stats change on every
- * progress frame. Keep the path and stat nodes mounted and update only their
- * text so changing counts remain visually stable.
+ * Keep path and count nodes mounted as an edit moves from streaming through
+ * approval and execution, so changes do not disturb the card's layout.
  */
 function renderToolHeadLabel(label: HTMLElement, tc: ToolCard): void {
   if (!isWriteToolCard(tc) || toolBodyOpen(tc)) {
@@ -1911,6 +1918,11 @@ function ensureThinkingIcon(head: HTMLElement): void {
 
 function updateComposer(): void {
   const pendingDecision = findPendingComposerDecision();
+  const incomplete = root.querySelector<HTMLElement>("#incompletePlanning");
+  if (incomplete) {
+    incomplete.hidden = !state.planning || state.busy || !!pendingDecision;
+    setHtml(incomplete, '<button class="action-btn" type="button" data-cancel-planning="">Cancel planning</button>');
+  }
   const queue = root.querySelector("#messageQueue") as HTMLElement | null;
   if (queue) {
     const editingInput = document.activeElement?.hasAttribute("data-queued-edit-input")
@@ -2073,7 +2085,7 @@ function findPendingComposerDecision(): ComposerDecision | undefined {
       }
     }
   }
-  if (state.planning && !state.busy) {
+  if (state.pendingPlanMessageTs !== undefined && !state.busy) {
     return { kind: "plan", messageTs: state.pendingPlanMessageTs };
   }
   return undefined;
@@ -2170,24 +2182,24 @@ function renderToolApprovalComposer(tc: ToolCard): string {
   </div>`;
 }
 
-function renderPlanApprovalComposer(messageTs?: number): string {
+function renderPlanApprovalComposer(messageTs: number): string {
   return renderQuestionLayout({
     title: "Plan", icon: scrollIcon(),
-    content: `<p>${messageTs === undefined ? "Planning is paused. " : ""}Accepting the plan switches to Act mode and starts implementation. Request changes to stay in Plan mode, or cancel planning to release queued messages.</p>`,
-    options: `<button class="action-btn question-option" type="button" data-accept-plan="${messageTs ?? ""}"${messageTs === undefined ? " disabled" : ""}>
+    content: `<p>Accepting the plan switches to Act mode and starts implementation. Request changes to stay in Plan mode, or cancel planning to release queued messages.</p>`,
+    options: `<button class="action-btn question-option" type="button" data-accept-plan="${messageTs}">
       <span class="question-option-badge" aria-hidden="true">${pawnIcon()}</span>
       <span class="question-option-label">Accept plan</span>
       <span class="question-option-arrow" aria-hidden="true">${sendIcon()}</span>
     </button>`,
-    secondary: { attribute: `data-cancel-planning="${messageTs ?? ""}"`, label: "Cancel planning", kind: "cancel" },
-    submit: { attribute: `data-plan-changes="${messageTs ?? ""}"`, label: "Request changes" },
+    secondary: { attribute: `data-cancel-planning="${messageTs}"`, label: "Cancel planning", kind: "cancel" },
+    submit: { attribute: `data-plan-changes="${messageTs}"`, label: "Request changes" },
     placeholder: "Request changes", inputLabel: "Suggest changes to the plan"
   });
 }
 
 function submitPlanResponse(messageTs: number | undefined, feedback?: string): void {
   if (state.busy || !state.planning || state.pendingPlanMessageTs !== messageTs || (feedback !== undefined && !feedback.trim())) return;
-  if (feedback === undefined && messageTs === undefined) return;
+  if (messageTs === undefined) return;
   state.mode = feedback === undefined ? "act" : "plan";
   state.busy = true;
   state.serverPending = "server";
@@ -2489,6 +2501,7 @@ function toolIcon(tc: ToolCard): string {
   if (tc.toolName === "compact_context") return compactIcon();
   if (tc.toolName === "update_todos") return checklistIcon();
   if (tc.toolName === "ask_user_question") return questionIcon();
+  if (tc.toolName === "submit_plan") return scrollIcon();
   if (isFeatureTool(tc)) return chatFeature.icon?.() ?? searchIcon();
   if (isWriteToolCard(tc)) return pencilIcon();
   if (tc.toolName === "search_memories" || tc.toolName === "recall_memory") return memoryIcon();
@@ -2665,13 +2678,12 @@ function toolCardLabel(tc: ToolCard): string {
 }
 
 function writeStats(tc: ToolCard): { added: number; removed: number } | undefined {
-  // Streaming counts describe the proposed payload, not a disk mutation. Once
-  // an individual write fails or is rejected, do not present them as changes.
-  if (isErrorToolCard(tc)) return undefined;
+  // Only complete host-computed counts are meaningful. A partial payload or
+  // capped diff preview cannot supply them; failed/rejected edits never landed.
+  if (tc.status === "streaming" || isErrorToolCard(tc)) return undefined;
   if (typeof tc.added === "number" && typeof tc.removed === "number") {
     return { added: tc.added, removed: tc.removed };
   }
-  if (tc.diffPreview) return diffStats(tc.diffPreview);
   return undefined;
 }
 
@@ -2680,6 +2692,7 @@ function diffStatHtml(stats: { added: number; removed: number }): string {
 }
 
 function renderToolCardLabel(tc: ToolCard): string {
+  if (tc.toolName === "submit_plan") return "";
   const featureLabel = chatFeature.renderLabel?.(tc, toolArgs(tc), escapeHtml);
   if (featureLabel !== undefined) return featureLabel;
   if (tc.toolName === "update_todos") {
@@ -2793,16 +2806,6 @@ function toolArgs(tc: ToolCard): Record<string, unknown> {
   }
 }
 
-function diffStats(diff: string): { added: number; removed: number } {
-  let added = 0;
-  let removed = 0;
-  for (const line of diff.split("\n")) {
-    if (line.startsWith("+ ") || line.startsWith("+\t")) added++;
-    else if (line.startsWith("- ") || line.startsWith("-\t")) removed++;
-  }
-  return { added, removed };
-}
-
 function summaryRepeatsVisibleText(m: Message, summary: string): boolean {
   const normalizedSummary = summary.trim();
   if (!normalizedSummary) return true;
@@ -2814,7 +2817,8 @@ function restoreAssistantParts(msg: Message, recordMessage: ChatRecord["messages
   msg.recordTs = recordMessage.ts;
   if (recordMessage.interruption) {
     msg.aborted = recordMessage.interruption.reason;
-    msg.parts.push({ id: nextPartId("abort"), kind: "abort", reason: msg.aborted });
+    msg.interruptionResolved = recordMessage.interruption.resolved;
+    msg.parts.push({ id: nextPartId("abort"), kind: "abort", reason: msg.aborted, diagnostics: recordMessage.interruption.diagnostics });
   }
   let restoredText = "";
   let restoredThought = "";
@@ -3195,6 +3199,11 @@ function bindOnce(): void {
       submitMessageEdit();
       return;
     }
+    const retryMemory = target.closest<HTMLElement>("[data-retry-memory]");
+    if (retryMemory && activeChatId && retryMemory.dataset.retryMemory) {
+      send({ type: "retryMemory", id: activeChatId, attemptId: retryMemory.dataset.retryMemory });
+      return;
+    }
     const continueChat = target.closest("[data-continue-chat]") as HTMLElement | null;
     if (continueChat) {
       if (state.busy) return;
@@ -3202,6 +3211,11 @@ function bindOnce(): void {
       state.busy = true;
       state.serverPending = "context";
       render();
+      return;
+    }
+    const resumeQueue = target.closest<HTMLElement>("[data-resume-queue]");
+    if (resumeQueue && !state.busy) {
+      send({ type: "resumeMessageQueue", messageTs: Number(resumeQueue.dataset.resumeQueue) });
       return;
     }
     const forkChat = target.closest("[data-fork-chat]") as HTMLElement | null;
@@ -3766,12 +3780,10 @@ function saveQueuedMessageEdit(): void {
 
 function loadFromRecord(rec: ChatRecord): void {
   state.tokens = rec.totalTokens;
-  state.pendingPlanMessageTs = rec.pendingPlanMessageTs;
-  state.planning = rec.planning === true || rec.pendingPlanMessageTs !== undefined;
-  if (state.pendingPlanMessageTs !== undefined) {
-    state.mode = "plan";
-    state.chatModeMenuOpen = false;
-  }
+  state.pendingPlanMessageTs = pendingPlanTimestamp(rec);
+  state.planning = rec.planning === true || state.pendingPlanMessageTs !== undefined;
+  state.mode = state.planning ? "plan" : rec.mode;
+  if (state.planning) state.chatModeMenuOpen = false;
   state.messages = [];
   state.pendingFileUndo = undefined;
   state.notices = [];
@@ -3976,6 +3988,7 @@ function handleHostMessage(msg: ExtToChat): void {
     case "initialMemoryCalls": setInitialMemoryCalls(msg.calls); render(); break;
     case "memoryCreations": state.memoryCreations = msg.creations; render(); break;
     case "chatLoaded": {
+      activeChatId = msg.record.id;
       state.initialMemoryParts = [];
       state.memoryCreations = msg.record.memoryCreations ?? [];
       closeImagePreview(false);
@@ -4143,10 +4156,7 @@ function handleHostMessage(msg: ExtToChat): void {
           argsJson: "{}",
           category: "write",
           status: "streaming",
-          added: msg.added,
-          removed: msg.removed,
           createsNewFile: msg.createsNewFile,
-          replacedLines: msg.replacedLines,
           progress: {
             path: msg.path,
             contentLines: msg.contentLines,
@@ -4163,10 +4173,9 @@ function handleHostMessage(msg: ExtToChat): void {
         card.status = "streaming";
         card.category = "write";
         card.toolName = msg.toolName;
-        if (typeof msg.added === "number") card.added = msg.added;
-        if (typeof msg.removed === "number") card.removed = msg.removed;
+        card.added = undefined;
+        card.removed = undefined;
         if (typeof msg.createsNewFile === "boolean") card.createsNewFile = msg.createsNewFile;
-        if (typeof msg.replacedLines === "number") card.replacedLines = msg.replacedLines;
         card.progress = {
           path: msg.path ?? card.progress?.path,
           contentLines: msg.contentLines,
@@ -4192,6 +4201,8 @@ function handleHostMessage(msg: ExtToChat): void {
           approvalRequired: msg.approvalRequired,
           reason: msg.reason,
           diffPreview: msg.diffPreview,
+          added: msg.added,
+          removed: msg.removed,
           diffRequested: false,
           status: msg.approvalRequired || msg.category === "question" ? "pending" : "approved",
           createsNewFile: msg.createsNewFile,
@@ -4212,6 +4223,8 @@ function handleHostMessage(msg: ExtToChat): void {
         card.approvalRequired = msg.approvalRequired;
         card.reason = msg.reason;
         card.diffPreview = msg.diffPreview;
+        card.added = msg.added;
+        card.removed = msg.removed;
         card.diffRequested = false;
         card.progress = undefined;
         card.status = msg.approvalRequired || msg.category === "question" ? "pending" : "approved";
@@ -4335,6 +4348,13 @@ function handleHostMessage(msg: ExtToChat): void {
       render();
       break;
     }
+    case "turnRecovery": {
+      const message = getOrCreateMsg(msg.messageId, "assistant");
+      finalizeLiveThoughts(message);
+      appendPartText(message, "text", `\n\n${msg.text}\n\n`);
+      render();
+      break;
+    }
     case "abort": {
       state.serverPending = undefined;
       let target = state.messages[state.messages.length - 1];
@@ -4363,10 +4383,10 @@ function handleHostMessage(msg: ExtToChat): void {
         target.workEndedAt = Date.now();
       }
       if (!target.parts.some(part => part.kind === "abort" && part.reason === msg.reason)) {
-        target.parts.push({ id: nextPartId("abort"), kind: "abort", reason: msg.reason });
+        target.parts.push({ id: nextPartId("abort"), kind: "abort", reason: msg.reason, diagnostics: msg.diagnostics });
       }
-      state.busy = !state.planning && state.queuedMessages.length > 0;
-      state.serverPending = state.busy ? "server" : undefined;
+      state.busy = false;
+      state.serverPending = undefined;
       render();
       break;
     }

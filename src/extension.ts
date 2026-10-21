@@ -21,7 +21,7 @@ let storageWatcher: { dispose(): void } | undefined;
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   let ws = currentWorkspaceRoot();
   if (ws) storage = new ChatStorage(ws);
-  memory = new WorkspaceMemory(() => storage);
+  memory = new WorkspaceMemory(() => storage, 1000, { reportError: message => { void vscode.window.showErrorMessage(message); } });
 
   chatProvider = new ChatViewProvider(
     context,
@@ -92,9 +92,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       const r = currentWorkspaceRoot();
       if (r === ws) return;
       ws = r;
-      memory.reset();
+      memory.suspend();
       void chatProvider.closeAll();
       storage = r ? new ChatStorage(r) : undefined;
+      void memory.restore();
       watchStorage();
       chatProvider.pushSettings();
       void chatProvider.pushRecentChats();
@@ -105,7 +106,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   );
 }
 
-export function deactivate(): void { /* noop */ }
+export async function deactivate(): Promise<void> { await memory?.dispose(); }
 
 async function refreshChatLists(): Promise<void> {
   await Promise.all([sideProvider.pushChats(), chatProvider.pushRecentChats(), sideProvider.pushMemories()]);
@@ -189,7 +190,7 @@ async function clearChats(): Promise<void> {
     "Delete all"
   );
   if (choice !== "Delete all" || targetStorage !== storage) return;
-  memory.reset();
+  await memory.cancelAll();
   await chatProvider.clearChats();
   void sideProvider.pushMemories();
   await sideProvider.pushChats();

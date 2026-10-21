@@ -28,7 +28,6 @@ beforeEach(() => {
   mocks.workspace.clear();
   mocks.folders.clear();
   mocks.update.mockClear();
-  mocks.values.set("toolCallingMode", "compat-gemma4");
 });
 
 describe("tool calling settings", () => {
@@ -47,7 +46,7 @@ describe("tool calling settings", () => {
 
   it("uses the default profile when unset", async () => {
     const { readSettings } = await import("../src/config/settings.js");
-    expect(readSettings().toolCallingMode).toBe("compat-gemma4");
+    expect(readSettings().toolCallingMode).toBe("native");
   });
 
   it("uses the selected profile", async () => {

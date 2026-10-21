@@ -152,7 +152,7 @@ export class SideViewProvider implements vscode.WebviewViewProvider {
         try {
           if (m.type === "setMemoryEnabled") await this.memory?.setEnabled(m.id, m.enabled);
           else if (m.type === "regenerateMemory") await this.memory?.regenerate(m.id);
-          else this.memory?.reset();
+          else await this.memory?.cancelAll();
           await this.pushMemories();
         } catch (error) { this.post({ type: "memoryError", error: (error as Error).message }); }
         break;

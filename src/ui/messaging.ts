@@ -1,6 +1,8 @@
 /**
  * Webview commands and presentation messages. Session events and chat data
  * live in shared chat contracts, independently of their host implementations.
+ * Tool proposals carry host-computed full-file diff counts; streaming progress
+ * carries no added/removed counts, and previews may be capped independently.
  */
 import type { MemoryListItem } from "../chat/memory.js";
 import type { UiEvent } from "../chat/events.js";
@@ -79,6 +81,7 @@ export type ChatToExt = (
   | { type: "openMemory"; id: string; readonly?: boolean }
   | { type: "openMemoryChat"; id: string }
   | { type: "regenerateMemory"; id: string }
+  | { type: "retryMemory"; id: string; attemptId: string }
   | { type: "deleteChat"; id: string }
   | { type: "ready" }
   | { type: "send"; text: string; mode: ChatMode; attachmentIds?: string[] }
@@ -98,6 +101,7 @@ export type ChatToExt = (
   | { type: "discardAttachment"; attachmentId: string }
   | { type: "forkChat"; throughUserMessageTs: number }
   | { type: "continueChat"; messageTs: number }
+  | { type: "resumeMessageQueue"; messageTs: number }
   | { type: "openChat"; id: string }
   | { type: "cancel" }
   | { type: "approveTool"; toolId: string; approved: boolean; autoApprove?: boolean }
@@ -111,7 +115,7 @@ export type ChatToExt = (
   | { type: "openChats" }
   | { type: "openSettings" }
   | { type: "acceptPlan"; messageTs: number }
-  | { type: "revisePlan"; messageTs?: number; text: string }
+  | { type: "revisePlan"; messageTs: number; text: string }
   | { type: "cancelPlanning"; messageTs?: number }
   | { type: "classifyWorkspacePaths"; requestId: number; paths: string[] }
   | { type: "openFile"; path: string; line?: number }

@@ -1,4 +1,4 @@
-import { lineDiffStats, renderLineDiff } from "./diffPreview.js";
+import { buildLineDiff, lineDiffStats } from "./diffPreview.js";
 
 export interface FileChangeSummary {
   path: string;
@@ -39,27 +39,11 @@ export function summarizeFileChanges(changes: Iterable<TrackedFileWrite>): FileC
   const out: FileChangeSummary[] = [];
   for (const change of changes) {
     if (change.previous === change.next) continue;
-    const diffPreview = change.diffPreview ?? renderLineDiff(change.previous, change.next);
-    // Count from the texts, not the (possibly capped) preview, so a small edit
-    // to a large file isn't misreported as a full +N/-N rewrite.
-    const stats = lineDiffStats(change.previous, change.next);
-    if (stats.added === 0 && stats.removed === 0) continue;
-    out.push({
-      path: change.path,
-      added: stats.added,
-      removed: stats.removed,
-      diffPreview
-    });
+    const diff = change.diffPreview === undefined
+      ? buildLineDiff(change.previous, change.next)
+      : { diffPreview: change.diffPreview, ...lineDiffStats(change.previous, change.next) };
+    if (diff.added === 0 && diff.removed === 0) continue;
+    out.push({ path: change.path, ...diff });
   }
   return out;
-}
-
-export function diffStats(diff: string): { added: number; removed: number } {
-  let added = 0;
-  let removed = 0;
-  for (const line of diff.split("\n")) {
-    if (line.startsWith("+ ") || line.startsWith("+\t")) added++;
-    else if (line.startsWith("- ") || line.startsWith("-\t")) removed++;
-  }
-  return { added, removed };
 }

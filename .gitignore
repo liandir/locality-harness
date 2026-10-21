@@ -2,6 +2,8 @@ node_modules/
 dist/
 *.vsix
 .vscode-test/
+test-results/
+playwright-report/
 .DS_Store
 
 # Local Claude folder (plans, memory) — keep out of public repo

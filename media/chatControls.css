@@ -8,6 +8,9 @@
   --surface-stroke: color-mix(in srgb, var(--vscode-foreground) 9%, transparent);
   --surface-stroke-strong: color-mix(in srgb, var(--vscode-foreground) 14%, transparent);
   --success-foreground: var(--vscode-gitDecoration-addedResourceForeground, var(--vscode-testing-iconPassed, #3fb950));
+  /* File changes have their own semantics; error text can be white in themes. */
+  --diff-added-foreground: var(--vscode-gitDecoration-addedResourceForeground, var(--vscode-editorGutter-addedBackground, #608b4e));
+  --diff-removed-foreground: var(--vscode-gitDecoration-deletedResourceForeground, var(--vscode-editorGutter-deletedBackground, #c74e39));
   --surface-fill-hover: color-mix(in srgb, var(--vscode-foreground) 8%, transparent);
   --scrollbar-size: 4px;
   --scrollbar-hover-size: calc(1.5 * var(--scrollbar-size));
@@ -21,6 +24,28 @@ body:is(.vscode-light, .vscode-high-contrast-light) {
   --error-foreground: color-mix(in srgb, var(--vscode-errorForeground) 70%, var(--vscode-foreground));
   --success-foreground: var(--vscode-gitDecoration-addedResourceForeground, #286b35);
 }
+/* One disclosure contract for native summaries, buttons and custom headings.
+   Components supply semantic colors; pointer focus and expansion never imply
+   hover. Descendants (including shimmer) consume the same emphasis token. */
+.disclosure-trigger {
+  --disclosure-emphasis: initial;
+  color: var(--disclosure-emphasis, var(--disclosure-foreground, inherit));
+  border-radius: var(--control-radius);
+  outline: none;
+}
+.disclosure-trigger:is(:hover, :focus-visible, :has(:focus-visible)) {
+  --disclosure-emphasis: var(--disclosure-highlight, var(--vscode-foreground));
+}
+.disclosure-trigger:focus-visible { background: var(--surface-fill-hover); }
+summary.disclosure-trigger { list-style: none; }
+summary.disclosure-trigger::-webkit-details-marker { display: none; }
+.disclosure-icon { flex: 0 0 auto; transform: rotate(0deg); transition: transform 0.16s ease, opacity 0.12s; }
+.disclosure-trigger > .disclosure-icon { color: inherit; opacity: 0; }
+.disclosure-trigger:is(:hover, :focus-visible, :has(:focus-visible), [aria-expanded=true]) > .disclosure-icon,
+details[open] > summary.disclosure-trigger > .disclosure-icon { opacity: 1; }
+.disclosure-trigger[aria-expanded=true] > .disclosure-icon,
+details[open] > summary.disclosure-trigger > .disclosure-icon { transform: rotate(90deg); }
+
 /* Shared filled actions and quiet toolbar actions; icon-btn adds square geometry. */
 :where(button) { background: transparent; color: inherit; border: 1px solid transparent; border-radius: var(--control-radius); font: inherit; cursor: pointer; outline: none; transition: background 0.12s, color 0.12s; }
 :where(button):disabled { opacity: 0.55; cursor: default; }
@@ -128,3 +153,8 @@ pre, textarea { scrollbar-gutter: stable; }
 }
 
 .tooltip[hidden] { display: none; }
+
+/* Shared expandable diagnostics, standalone or embedded in an activity card. */
+.activity-details { margin-top: 8px; }
+.activity-details > summary { display: flex; align-items: center; gap: 6px; width: fit-content; font-size: 0.86em; }
+.activity-details > .activity-detail-contents, .activity-details > .tool-output-surface { margin-top: 6px; padding: 8px 10px; }

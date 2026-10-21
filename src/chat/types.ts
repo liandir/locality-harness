@@ -1,3 +1,5 @@
+import type { MemoryAttempt } from "./memoryJobTypes.js";
+import type { CompletionDiagnostics } from "../llm/completion.js";
 /** Shared chat data shapes; independent of storage and session implementations. */
 import type { ChatMemory, MemoryCreation, MemorySnapshot } from "./memory.js";
 import type { ToolCallingProfile } from "../llm/toolCallingProfile.js";
@@ -36,6 +38,17 @@ export interface ChatAttachment {
   fileType?: string;
 }
 
+export interface ChatInterruption {
+  reason: string;
+  mode: ChatMode;
+  reasoningEffort: ReasoningEffort;
+  diagnostics?: CompletionDiagnostics;
+  /** Explicitly skipped; stale Continue actions must be rejected. */
+  resolved?: boolean;
+  /** Cancelling planning releases the queue but retains the option to resume it. */
+  queueReleased?: boolean;
+}
+
 export interface ChatMessage {
   role: Role;
   /** Harness-issued recall tool result after the first user message; outside the transcript. */
@@ -44,7 +57,7 @@ export interface ChatMessage {
   fileUndoNotice?: boolean;
   content: string;
   /** Display-only terminal response; never included in model context. */
-  interruption?: { reason: string; mode: ChatMode; reasoningEffort: ReasoningEffort };
+  interruption?: ChatInterruption;
   /** Mode selected when a user message was submitted; absent in older history. */
   mode?: ChatMode;
   /** User guidance injected into the current turn without changing its mode. */
@@ -98,6 +111,7 @@ export interface ChatRecord {
   /** Model-only history after compaction, memory loading, or attachment expansion. */
   contextMessages?: ChatMessage[];
   memory?: ChatMemory;
+  memoryAttempt?: MemoryAttempt;
   memoryCreations?: MemoryCreation[];
   /** Source snapshots explicitly recalled by tools, retained with chat history. */
   recalledMemories?: MemorySnapshot[];

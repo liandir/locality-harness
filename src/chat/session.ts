@@ -1,3 +1,7 @@
+import { pendingPlanTimestamp } from "./planning.js";
+import { StreamFailure, type CompletionDiagnostics } from "../llm/completion.js";
+import { unresolvedInterruption } from "./interruption.js";
+import { PlanResponse, PLAN_CONTINUATION_NOTE } from "./planResponse.js";
 import {
   MultipleToolArgsError,
   normalizeToolArgs,
@@ -66,7 +70,7 @@ import {
 import { normalizeTodos, renderTodosMarkdown, todoCounts } from "./todos.js";
 import { compact, compactAvailableForMessageCount, KEEP_TAIL, MIN_COMPACT_MESSAGES, type CompactConfig } from "./compactor.js";
 import { countTokens, promptTokens, recomputeTokens, truncateToTokenBudget } from "./contextTracker.js";
-import { lineDiffStats, renderLineDiff } from "./diffPreview.js";
+import { buildLineDiff, lineDiffStats, renderLineDiff } from "./diffPreview.js";
 import { fileUndoPlan, turnFileEdits, undoFiles, type FileUndoSnapshot } from "./fileUndo.js";
 import { rememberFileWrite, summarizeFileChanges, type FileChangeSummary, type TrackedFileWrite } from "./fileChanges.js";
 import { generateChatTitle } from "./chatTitle.js";
@@ -86,6 +90,7 @@ const WRITE_TOOL_NAMES = new Set(["write_file", "create_file", "edit_file", "ins
 const MAX_EMPTY_NATIVE_RETRIES = 1;
 const MAX_MALFORMED_NATIVE_RETRIES = 1;
 const MAX_LENGTH_RECOVERY_RETRIES = 1;
+const MAX_PLAN_CONTINUATIONS = 2;
 const LENGTH_RECOVERY_NOTE =
   "[harness recovery] The previous generation reached its output or context limit. " +
   "Its unfinished text, reasoning, and incomplete tool call were discarded; incomplete calls were not executed. " +
@@ -166,13 +171,10 @@ export class ChatSession {
   private workspaceRoot: string;
   private activeFileWrites?: Map<string, TrackedFileWrite>;
   private streamingTools = new Map<string, { toolId: string; name: string }>();
-  // Last time a live-stat progress frame was emitted per streaming card. The
-  // parser yields a frame per token; this rate-limits the live +X/-Y updates.
+  // The parser yields a frame per token; throttle renders after the first frame.
   private lastProgressEmitAt = new Map<string, number>();
-  // The target file's prior state, captured on the first frame of a streaming
-  // write_file, so the live +X/-Y can diff the streamed body against it and the
-  // card can label a brand-new file "Created file" vs an edit "Edited file".
-  private streamingFileState = new Map<string, { exists: boolean; content: string }>();
+  // File existence controls the Write/Edit label while write_file streams.
+  private streamingFileState = new Map<string, { exists: boolean }>();
   private toolDiffSources = new Map<string, TrackedFileWrite>();
   // Net line-count shift per file (abs path) from edits executed in the
   // CURRENT model response. The model emits a whole response blind — it sees
@@ -209,6 +211,8 @@ export class ChatSession {
   // the new record values take effect when the next user turn starts.
   private activeTurnModes?: { mode: ChatMode; reasoningEffort: ReasoningEffort };
   private pendingInterruption?: ChatMessage;
+  private stagedPlanCalls?: Extract<ParsedEvent, { kind: "toolCall" }>[];
+  private planResponse?: PlanResponse;
   private lastInterruptionTs = 0;
   private pendingSteering: ChatMessage[] = [];
   private acceptingSteering = false;
@@ -226,16 +230,22 @@ export class ChatSession {
     this.storage = args.storage;
     this.workspaceRoot = args.workspaceRoot;
     this.record = args.record;
+    this.record.pendingPlanMessageTs = pendingPlanTimestamp(this.record);
     this.emit = event => {
       // Publish terminal errors only after tool cleanup and persistence. This
       // prevents Continue from racing a still-running or still-saving tool.
       if (event.kind === "abort" && event.messageTs === undefined && this.activeTurnModes) {
+        if (this.activeTurnModes.mode === "plan") {
+          this.record.mode = "plan";
+          args.emit({ kind: "chatModeChanged", mode: "plan" });
+        }
         this.pendingInterruption ??= {
           role: "assistant", content: "",
           ts: Math.max(Date.now(), (this.record.messages.at(-1)?.ts ?? 0) + 1, this.lastInterruptionTs + 1),
-          interruption: { reason: event.reason, ...this.activeTurnModes }
+          interruption: { reason: event.reason, diagnostics: event.diagnostics, ...this.activeTurnModes }
         };
         this.lastInterruptionTs = this.pendingInterruption.ts;
+        if (event.diagnostics) console.warn("[harness] interrupted generation", JSON.stringify(event.diagnostics));
         return;
       }
       if (event.kind === "turnEnd" && this.pendingInterruption) return;
@@ -422,9 +432,9 @@ export class ChatSession {
     this.emit({ kind: "planningState", active: this.isPlanning(), pendingPlanMessageTs: this.record.pendingPlanMessageTs });
   }
 
-  resolvePlan(messageTs: number | undefined, mode: "act" | "plan"): boolean {
+  resolvePlan(messageTs: number, mode: "act" | "plan"): boolean {
     if (this.disposed || this.activeTurn || !this.isPlanning() || this.record.pendingPlanMessageTs !== messageTs) return false;
-    if (mode === "act" && messageTs === undefined) return false;
+    if (messageTs === undefined || pendingPlanTimestamp(this.record) !== messageTs) return false;
     delete this.record.pendingPlanMessageTs;
     if (mode === "act") delete this.record.planning;
     else this.record.planning = true;
@@ -438,6 +448,8 @@ export class ChatSession {
     if (messageTs !== undefined && (this.activeTurn || this.record.pendingPlanMessageTs !== messageTs)) return false;
     this.cancel();
     await this.activeTurn?.catch(() => undefined);
+    const interrupted = unresolvedInterruption(this.record);
+    if (interrupted?.interruption) interrupted.interruption.queueReleased = true;
     delete this.record.pendingPlanMessageTs;
     delete this.record.planning;
     this.setMode("act");
@@ -628,7 +640,7 @@ export class ChatSession {
     if (!change) return;
     const diffPreview = change.diffPreview ?? renderLineDiff(change.previous, change.next);
     change.diffPreview = diffPreview;
-    this.emit({ kind: "toolCallResolved", toolId, status: "executed", diffPreview });
+    this.emit({ kind: "toolCallResolved", toolId, status: "executed", diffPreview, ...lineDiffStats(change.previous, change.next) });
   }
 
   steerUserMessage(text: string, attachments: ChatAttachment[] = []): boolean {
@@ -761,9 +773,20 @@ export class ChatSession {
     return deleted;
   }
 
+  /** Explicitly moving on leaves the diagnostic in history but releases its queue hold. */
+  async resolveInterruption(messageTs?: number): Promise<boolean> {
+    if (this.activeTurn || this.disposed) return false;
+    const message = unresolvedInterruption(this.record);
+    if (!message || (messageTs !== undefined && message.ts !== messageTs)) return false;
+    message.interruption!.resolved = true;
+    try { await this.saveRecord(); }
+    catch (error) { delete message.interruption!.resolved; throw error; }
+    return true;
+  }
+
   async continueTurn(messageTs: number): Promise<boolean> {
     const interrupted = this.record.messages.at(-1);
-    if (this.disposed || this.activeTurn || !interrupted?.interruption || interrupted.ts !== messageTs) return false;
+    if (this.disposed || this.activeTurn || !interrupted?.interruption || interrupted.interruption.resolved || interrupted.ts !== messageTs) return false;
     const { mode, reasoningEffort } = interrupted.interruption;
     this.activeTurnModes = { mode, reasoningEffort };
     this.record.mode = mode;
@@ -822,7 +845,7 @@ export class ChatSession {
         if (!result.ok) throw result.error;
       }, waitingForMemory);
     } catch (error) {
-      this.emit({ kind: "abort", reason: signal.aborted ? "Stopped by user." : (error as Error).message });
+      this.emit({ kind: "abort", reason: signal.aborted ? "Stopped by user." : (error instanceof Error ? error.message : String(error)) || "The request stopped unexpectedly.", diagnostics: signal.aborted ? { cause: "user_cancel" } : error instanceof StreamFailure ? error.diagnostics : undefined });
     } finally {
       this.acceptingSteering = false;
       this.responseAbort = undefined;
@@ -844,7 +867,7 @@ export class ChatSession {
           await this.saveRecord();
         } finally {
           this.pendingInterruption = undefined;
-          this.emit({ kind: "abort", reason: interrupted.interruption.reason, messageTs: interrupted.ts });
+          this.emit({ kind: "abort", reason: interrupted.interruption.reason, diagnostics: interrupted.interruption.diagnostics, messageTs: interrupted.ts });
         }
       }
     }
@@ -1389,6 +1412,8 @@ export class ChatSession {
     let finishReason: string | undefined;
     let ranAnyTool = false;
     let emptyNativeRetries = 0;
+    let planCorrectionAttempts = 0;
+    let completion: CompletionDiagnostics | undefined;
     let malformedNativeRetries = 0;
     let lengthRecoveryRetries = 0;
     let disabledReasoningNoticeShown = false;
@@ -1402,12 +1427,10 @@ export class ChatSession {
     const recordEvent = (event: ParsedEvent): void => {
       if (event.kind === "text" || event.kind === "thought") {
         if (!event.text) return;
-        // Switching channels finishes the preceding visible block. The last
-        // streaming block stays unfinished until another block or tool starts.
         if (turnEvents.at(-1)?.kind !== event.kind) completedEventCount = turnEvents.length;
         if (event.kind === "text") assistantBuf += event.text;
         else thoughtBuf += event.text;
-      } else completedEventCount = turnEvents.length;
+      }
       if (event.kind === "toolCallProgress") return;
       turnEvents.push({ ...event, t: Date.now() });
       if (event.kind !== "text" && event.kind !== "thought") completedEventCount = turnEvents.length;
@@ -1427,6 +1450,9 @@ export class ChatSession {
       this.resumeContextActivities();
       this.emit({ kind: "turnPreparing", reason: "server" });
       finishReason = undefined;
+      completion = undefined;
+      const planResponse = this.planResponse = this.turnMode() === "plan" ? new PlanResponse() : undefined;
+      this.stagedPlanCalls = this.turnMode() === "plan" ? [] : undefined;
       const family = compatibilityFamily(this.record.toolCallingMode);
       const parser = makeParser(family ?? "gemma4");
       const nativeTextRecovery = this.toolProtocol === "native" && family
@@ -1633,7 +1659,8 @@ export class ChatSession {
           }
           if (chunk.kind === "finish") {
             finishReason = chunk.reason;
-            if (chunk.reason !== "length") completedEventCount = turnEvents.length;
+            completion = chunk.diagnostics ?? { finishReason: chunk.reason, completionEvidence: "finish_reason" };
+            completedEventCount = turnEvents.length;
             continue;
           }
           // Native mode normally executes only the protocol's `tool_calls`
@@ -1675,6 +1702,11 @@ export class ChatSession {
           const continueAfterTail = await this.handleEvents(tail, messageId, s, recordEvent);
           aborted = continueAfterTail.abort ?? false;
           toolLoop = toolLoop || (continueAfterTail.toolLoop ?? false);
+          const finalText = planResponse?.end();
+          if (finalText) {
+            recordEvent({ kind: "text", text: finalText });
+            this.emit({ kind: "text", messageId, delta: finalText });
+          }
         }
       } catch (e) {
         streamError = e;
@@ -1685,6 +1717,10 @@ export class ChatSession {
       // turn signal, so this interruption can resume without an error card.
       if (streamError !== undefined && !(responseAbort.signal.aborted && this.pendingSteering.length && !this.abort.signal.aborted)) {
         const e = streamError;
+        if (this.abort.signal.aborted) {
+          this.emit({ kind: "abort", reason: "Stopped by user.", diagnostics: { cause: "user_cancel" } });
+          break;
+        }
         if (e instanceof GenerationLengthError && readSettings().autoCompact
           && !this.abort.signal.aborted && !this.disposed && !toolLoop
           && lengthRecoveryRetries < MAX_LENGTH_RECOVERY_RETRIES) {
@@ -1776,7 +1812,7 @@ export class ChatSession {
           this.emitLiveTokenEstimate("");
           continue;
         }
-        this.emit({ kind: "abort", reason: (e as Error).message });
+        this.emit({ kind: "abort", reason: (e instanceof Error ? e.message : String(e)) || "The request stopped unexpectedly.", diagnostics: e instanceof StreamFailure ? e.diagnostics : e instanceof GenerationLengthError ? { cause: "generation_limit", finishReason: "length", completionEvidence: "finish_reason" } : undefined });
         aborted = true;
       }
 
@@ -1803,6 +1839,14 @@ export class ChatSession {
         continue;
       }
 
+      const planningCalls = this.stagedPlanCalls;
+      this.stagedPlanCalls = undefined;
+      if (planningCalls?.length && !aborted && !this.abort.signal.aborted) {
+        const result = await this.handleEvents(planningCalls, messageId, s, recordEvent);
+        aborted = result.abort ?? false;
+        toolLoop = result.toolLoop ?? false;
+      }
+
       // The model truncated mid-tool-call (an unclosed write_file the parser
       // dropped). Feed the error back as a tool result and re-prompt so the
       // agent can re-emit the call, instead of stopping with a dead red card.
@@ -1813,7 +1857,7 @@ export class ChatSession {
 
       // If a tool ran this iteration, the LLM needs another pass; otherwise we are done.
       if (aborted || this.abort.signal.aborted) {
-        this.emit({ kind: "abort", reason: "Stopped by user." });
+        if (this.abort.signal.aborted) this.emit({ kind: "abort", reason: "Stopped by user.", diagnostics: { cause: "user_cancel" } });
         break;
       }
       if (toolLoop) {
@@ -1840,7 +1884,8 @@ export class ChatSession {
         continue;
       }
       if (
-        this.toolProtocol === "native"
+        this.turnMode() !== "plan"
+        && this.toolProtocol === "native"
         && !assistantBuf.trim()
         && thoughtBuf.trim()
         && emptyNativeRetries < MAX_EMPTY_NATIVE_RETRIES
@@ -1852,13 +1897,35 @@ export class ChatSession {
           `finish_reason=${finishReason ?? "none"}`
         );
         this.emit({
-          kind: "notice",
+          kind: "turnRecovery", messageId,
           text: `The model stopped after thinking without a reply. Retrying native continuation (${emptyNativeRetries}/${MAX_EMPTY_NATIVE_RETRIES})…`
         });
         thoughtBuf = "";
         this.emitLiveTokenEstimate("");
         continue;
       }
+      if (this.turnMode() === "plan" && (!completion || !planResponse?.complete)) {
+        if (completion && planCorrectionAttempts++ < MAX_PLAN_CONTINUATIONS) {
+          // Preserve visible progress and give the model its previous reply as context.
+          // This is a continuation of planning, never a completed plan or approval state.
+          if (assistantBuf.trim() || thoughtBuf.trim()) appendChatMessage(this.record, {
+            role: "assistant", content: assistantBuf, reasoningContent: thoughtBuf || undefined,
+            events: turnEvents.splice(0), ts: Date.now()
+          });
+          assistantBuf = "";
+          thoughtBuf = "";
+          turnEvents.length = 0;
+          completedEventCount = 0;
+          repairNote = PLAN_CONTINUATION_NOTE;
+          this.emit({ kind: "turnRecovery", messageId, text: "Continuing planning to finish the plan…" });
+          await this.saveRecord();
+          continue;
+        }
+        completedEventCount = 0;
+        this.emit({ kind: "abort", reason: "The model stopped before completing the plan. Continue planning to try again.", diagnostics: { ...completion, cause: "plan_incomplete" } });
+        break;
+      }
+      if (planResponse?.complete) assistantBuf = assistantBuf.trim();
       // Done — flush the final assistant message, or report an empty turn.
       this.acceptingSteering = false;
       const fileChanges = summarizeFileChanges(fileWrites.values());
@@ -1871,14 +1938,19 @@ export class ChatSession {
           content: assistantBuf,
           reasoningContent: this.toolProtocol === "native" ? thoughtBuf || undefined : undefined,
           events: turnEvents,
-          ts: Date.now()
+          ts: this.turnMode() === "plan"
+            ? this.record.messages.reduce((next, message) => Math.max(next, message.ts + 1), Date.now())
+            : Date.now()
         };
         if (fileChanges.length > 0) assistantMessage.fileChanges = fileChanges;
         appendChatMessage(this.record, assistantMessage);
         responseTs = assistantMessage.ts;
         if (this.turnMode() === "plan") {
           this.record.pendingPlanMessageTs = responseTs;
-          this.setMode("plan");
+          this.record.mode = "plan";
+          try { await this.saveRecord(); }
+          catch (error) { delete this.record.pendingPlanMessageTs; throw error; }
+          this.emit({ kind: "chatModeChanged", mode: "plan" });
           this.emit({ kind: "planFinal", messageId, messageTs: responseTs, markdown: assistantBuf });
         }
       } else {
@@ -1890,8 +1962,9 @@ export class ChatSession {
           `[harness] empty turn: ranAnyTool=${ranAnyTool} thoughtChars=${thoughtBuf.trim().length} events=[${turnEvents.map(e => e.kind).join(",")}]`
         );
         this.emit({
-          kind: "notice",
-          text: emptyTurnNotice(ranAnyTool, !!thoughtBuf.trim(), finishReason, emptyNativeRetries > 0)
+          kind: "abort",
+          reason: emptyTurnNotice(ranAnyTool, !!thoughtBuf.trim(), finishReason, emptyNativeRetries > 0),
+          diagnostics: { ...completion, cause: "no_answer" }
         });
       }
       if (fileChanges.length > 0) {
@@ -1901,17 +1974,23 @@ export class ChatSession {
     }
 
     if (this.pendingInterruption || this.abort.signal.aborted) {
-      const events = turnEvents.slice(0, completedEventCount);
+      const events = turnEvents.slice();
       const content = events.flatMap(event => event.kind === "text" ? [event.text] : []).join("");
       const reasoning = events.flatMap(event => event.kind === "thought" ? [event.text] : []).join("");
       if (content.trim() || reasoning.trim()) {
-        appendChatMessage(this.record, {
-          role: "assistant", content,
-          reasoningContent: this.toolProtocol === "native" ? reasoning || undefined : undefined,
-          events, ts: Date.now()
-        });
+        // Retain received output in the transcript only. It is not completed model context.
+        this.record.contextMessages ??= this.record.messages.slice();
+        const message: ChatMessage = { role: "assistant", content,
+          reasoningContent: reasoning || undefined, events, ts: Date.now() };
+        this.record.messages.push(message);
+        const completed = events.slice(0, completedEventCount);
+        if (completed.length) this.record.contextMessages.push({ ...message,
+          content: completed.flatMap(event => event.kind === "text" ? [event.text] : []).join(""),
+          reasoningContent: completed.flatMap(event => event.kind === "thought" ? [event.text] : []).join("") || undefined,
+          events: completed });
       }
     }
+    this.planResponse = undefined;
     this.completeContextIngestion();
     this.acceptingSteering = false;
     await Promise.all(this.features.map(feature => feature.endTurn?.()));
@@ -1948,7 +2027,12 @@ export class ChatSession {
     recordEvent: (event: ParsedEvent) => void
   ): Promise<{ continue: boolean; abort?: boolean; toolLoop?: boolean }> {
     let toolLoop = false;
-    for (const e of events) {
+    for (let e of events) {
+      if (e.kind === "text" && this.planResponse) e = { ...e, text: this.planResponse.feed(e.text) };
+      if (e.kind === "toolCall" && this.stagedPlanCalls) {
+        this.stagedPlanCalls.push(e);
+        continue;
+      }
       if (toolLoop && this.pendingSteering.length) break;
       if (!toolLoop || (e.kind !== "text" && e.kind !== "thought")) recordEvent(e);
       if (e.kind === "text") {
@@ -1967,9 +2051,8 @@ export class ChatSession {
         }
         // Keep going so every tool call in this batch runs (don't drop the rest).
         toolLoop = true;
-      } else if (e.kind === "done") {
-        return { continue: false, toolLoop };
       }
+      // A parser boundary is not transport completion. Keep reading terminal evidence.
     }
     // If any tool ran, stop reading and re-prompt with the results.
     if (toolLoop) return { continue: false, toolLoop: true };
@@ -2030,7 +2113,7 @@ export class ChatSession {
     let reason: string | undefined;
     let writeArgs: PreparedWriteArgs | undefined;
     let proposedCreatesNewFile: boolean | undefined;
-    let proposedDiffPreview: string | undefined;
+    let proposedDiff: ReturnType<typeof buildLineDiff> | undefined;
     let questionArgs: { question: string; suggestions: string[] } | undefined;
     let args: Record<string, unknown> = {};
     let parsedArgs: unknown;
@@ -2100,13 +2183,17 @@ export class ChatSession {
       try {
         writeArgs = normalizeWriteToolArgs(e.name, args, e.argsJson);
         const absolute = await assertInsideWorkspace(this.workspaceRoot, writeArgs.path);
+        let preview: { previous: string; next: string } | undefined;
         if (writeArgs.kind === "write_file") {
+          let previous = "";
           try {
-            await fs.stat(absolute);
+            previous = await fs.readFile(absolute, "utf8");
             proposedCreatesNewFile = false;
-          } catch {
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
             proposedCreatesNewFile = true;
           }
+          preview = { previous, next: writeArgs.content };
         } else if (writeArgs.kind === "create_file") {
           try {
             await fs.stat(absolute);
@@ -2115,17 +2202,15 @@ export class ChatSession {
             if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
           }
           proposedCreatesNewFile = true;
-          proposedDiffPreview = renderLineDiff("", writeArgs.content);
+          preview = { previous: "", next: writeArgs.content };
         } else if (writeArgs.kind === "edit_file") {
-          const preview = await previewEditFile({ workspaceRoot: this.workspaceRoot }, writeArgs);
-          proposedDiffPreview = renderLineDiff(preview.previous, preview.next);
+          preview = await previewEditFile({ workspaceRoot: this.workspaceRoot }, writeArgs);
         } else if (writeArgs.kind === "insert_text" && !this.lineEditRanThisPass) {
-          const preview = await previewInsertText({ workspaceRoot: this.workspaceRoot }, writeArgs);
-          proposedDiffPreview = renderLineDiff(preview.previous, preview.next);
+          preview = await previewInsertText({ workspaceRoot: this.workspaceRoot }, writeArgs);
         } else if (writeArgs.kind === "replace_range" && !this.lineEditRanThisPass) {
-          const preview = await previewReplaceRange({ workspaceRoot: this.workspaceRoot }, writeArgs);
-          proposedDiffPreview = renderLineDiff(preview.previous, preview.next);
+          preview = await previewReplaceRange({ workspaceRoot: this.workspaceRoot }, writeArgs);
         }
+        if (preview) proposedDiff = buildLineDiff(preview.previous, preview.next);
       } catch (err) {
         reason = (err as Error).message;
       }
@@ -2154,7 +2239,7 @@ export class ChatSession {
       category,
       approvalRequired,
       reason,
-      diffPreview: proposedDiffPreview,
+      ...proposedDiff,
       createsNewFile: proposedCreatesNewFile,
       ...featureMetadata
     });
@@ -2429,12 +2514,12 @@ export class ChatSession {
         if (this.activeFileWrites) {
           rememberFileWrite(this.activeFileWrites, { key, path: displayPath, previous, next });
         }
-        const stats = lineDiffStats(previous, next);
+        const diff = buildLineDiff(previous, next);
         executedCreatesNewFile = createsNewFile;
-        added = stats.added;
-        removed = stats.removed;
+        added = diff.added;
+        removed = diff.removed;
         this.toolDiffSources.set(toolId, {
-          path: displayPath, previous, next, createsNewFile,
+          path: displayPath, previous, next, createsNewFile, diffPreview: diff.diffPreview,
           // Refuse lossy snapshots or a file that changed before the tool read it.
           undoAvailable: previous === originalText && (originalBytes === null || Buffer.from(previous, "utf8").equals(originalBytes))
         });
@@ -2515,15 +2600,13 @@ export class ChatSession {
       this.streamingTools.set(key, streamingTool);
     }
     const toolId = streamingTool.toolId;
-    // Snapshot the target's prior state once the path resolves (write_file only:
-    // edits always target an existing file). Used for the live +X/-Y and the
-    // Write/Edit label; retried on later frames if the path was still partial.
+    // Resolve the Write/Edit label once the path arrives. Diff counts require
+    // the complete proposal and never come from a partial streamed payload.
     if (!this.streamingFileState.has(toolId)) {
       const state = await this.readStreamingTarget(e.name, e.path);
       if (state) this.streamingFileState.set(toolId, state);
     }
-    // The card must appear on the first emitted frame; after that, rate-limit
-    // so the live stat isn't recomputed on every streamed token.
+    // The card appears on the first frame; throttle subsequent progress renders.
     const now = Date.now();
     const firstEmit = !this.lastProgressEmitAt.has(toolId);
     if (!firstEmit && now - (this.lastProgressEmitAt.get(toolId) ?? 0) < PROGRESS_THROTTLE_MS) {
@@ -2531,7 +2614,6 @@ export class ChatSession {
     }
     this.lastProgressEmitAt.set(toolId, now);
     const fileState = this.streamingFileState.get(toolId);
-    const stats = liveWriteStats(e, fileState);
     this.emit({
       kind: "toolCallProgress",
       toolId,
@@ -2539,10 +2621,7 @@ export class ChatSession {
       toolName: e.name,
       path: e.path,
       contentLines: e.contentLines,
-      added: stats.added,
-      removed: stats.removed,
       createsNewFile: e.name === "write_file" && fileState !== undefined && !fileState.exists,
-      replacedLines: e.name === "replace_range" ? replacedLineCount(e.startLine, e.endLine) : undefined,
       startLine: e.startLine,
       endLine: e.endLine,
       line: e.line
@@ -2550,27 +2629,26 @@ export class ChatSession {
   }
 
   /**
-   * The target's prior content/existence, for the live write stats and label.
-   * Only write_file needs the old content; edits always target an existing file,
-   * so they return a cheap placeholder. Returns undefined (retry next frame) if
+   * The target's existence, for the live Write/Edit label. Returns undefined if
    * the path hasn't streamed enough to resolve inside the workspace yet.
    */
   private async readStreamingTarget(
     name: string,
     pathArg?: string
-  ): Promise<{ exists: boolean; content: string } | undefined> {
+  ): Promise<{ exists: boolean } | undefined> {
     if (!pathArg) return undefined;
+    let absolute: string;
     try {
-      await assertInsideWorkspace(this.workspaceRoot, pathArg);
+      absolute = await assertInsideWorkspace(this.workspaceRoot, pathArg);
     } catch {
       return undefined;
     }
-    if (name !== "write_file") return { exists: true, content: "" };
+    if (name !== "write_file") return { exists: true };
     try {
-      const content = (await readFile({ workspaceRoot: this.workspaceRoot }, { path: pathArg })).content;
-      return { exists: true, content };
-    } catch {
-      return { exists: false, content: "" };
+      await fs.stat(absolute);
+      return { exists: true };
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === "ENOENT" ? { exists: false } : undefined;
     }
   }
 
@@ -2845,38 +2923,8 @@ function streamingToolKey(messageId: string, name: string, id: string | undefine
   return `${messageId}:${id ?? name}`;
 }
 
-// Rate-limit for the live +X/-Y stat updates streamed to the card heading.
+// Rate-limit for streamed edit card updates.
 const PROGRESS_THROTTLE_MS = 60;
-
-/**
- * The live +added/-removed shown in the card heading as a write streams:
- *  - insert_text / create_file / new write_file: every streamed line is an addition.
- *  - replace_range: removes the whole target range, adds the streamed lines.
- *  - edit_file: the first streamed newText is shown as provisional additions.
- *  - write_file over an existing file: diff the streamed body against the old
- *    file's prefix of the same length (Myers, via lineDiffStats) so a shift
- *    doesn't read as a wall of changes. All of these converge to the exact diff
- *    recomputed when the call resolves.
- */
-function liveWriteStats(
-  e: Extract<ParsedEvent, { kind: "toolCallProgress" }>,
-  fileState: { exists: boolean; content: string } | undefined
-): { added: number; removed: number } {
-  const added = e.contentLines;
-  if (e.name === "insert_text") return { added, removed: 0 };
-  if (e.name === "create_file" || e.name === "edit_file") return { added, removed: 0 };
-  if (e.name === "replace_range") return { added, removed: replacedLineCount(e.startLine, e.endLine) ?? 0 };
-  if (!fileState || !fileState.exists) return { added, removed: 0 };
-  const streamed = e.content ?? "";
-  const streamedLineCount = streamed === "" ? 0 : streamed.split(/\r\n|\r|\n/).length;
-  const oldPrefix = fileState.content.split(/\r\n|\r|\n/).slice(0, streamedLineCount).join("\n");
-  return lineDiffStats(oldPrefix, streamed);
-}
-
-function replacedLineCount(startLine?: number, endLine?: number): number | undefined {
-  if (startLine === undefined || endLine === undefined || endLine < startLine) return undefined;
-  return endLine - startLine + 1;
-}
 
 function emptyTurnNotice(
   ranAnyTool: boolean,
@@ -2891,7 +2939,7 @@ function emptyTurnNotice(
       : "The model ended its turn without producing a reply.";
   const diagnostic = finishReason ? ` The server reported finish_reason="${finishReason}".` : "";
   const retry = retried ? " A native continuation retry was already attempted." : "";
-  return `${lead}${diagnostic}${retry} It may have stopped early (a stop-token/template mismatch on the server). Resend your message to continue. If this keeps happening, check that the Tool calling compatibility profile matches the served model.`;
+  return `${lead}${diagnostic}${retry} It may have stopped early (a stop-token/template mismatch on the server). Use Continue to resume. If this keeps happening, check that the Tool calling compatibility profile matches the served model.`;
 }
 
 /**
