@@ -1,6 +1,7 @@
 /** Transport facts only: never infer a server crash from an incomplete response. */
 export interface CompletionDiagnostics {
   cause?: "unexpected_eof" | "transport" | "server_error" | "protocol_error" | "generation_limit" | "no_answer" | "plan_incomplete" | "user_cancel";
+  httpStatus?: number;
   finishReason?: string;
   completionEvidence?: "finish_reason" | "done" | "none";
   promptTokens?: number;

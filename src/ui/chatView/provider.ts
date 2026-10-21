@@ -742,8 +742,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       case "openMemory": await this.onOpenMemory?.(m.id, m.readonly ?? true); break;
       case "openMemoryChat": await this.openMemoryChat(m.id); break;
       case "regenerateMemory":
+      case "retryMemory":
         try {
-          await this.memory?.regenerate(m.id);
+          if (m.type === "retryMemory") await this.memory?.retry(m.id, m.attemptId);
+          else await this.memory?.regenerate(m.id);
           await this.pushChatMemories();
         } catch (error) { void vscode.window.showErrorMessage((error as Error).message); }
         break;

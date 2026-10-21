@@ -1,3 +1,4 @@
+import { completionDetailRows, renderActivityDetails } from "./activityDetails.js";
 import type MarkdownIt from "markdown-it";
 import { renderMemoryDate } from "../../memoryDate.js";
 import { memoryIcon } from "../../icons.js";
@@ -5,18 +6,28 @@ import type { MemoryCreation } from "../../../chat/memory.js";
 import { renderToolOutputSurface } from "./toolOutputSurface.js";
 
 export function renderMemoryCreation(creation: MemoryCreation, md: MarkdownIt, disclosureIcon: string): string {
-  const active = creation.status === "queued" || creation.status === "generating";
+  const active = creation.status === "generating";
   const updating = creation.operation === "update";
   const label = creation.status === "created" ? (updating ? "Updated memory" : "Created memory")
     : creation.status === "failed" ? (updating ? "Memory update failed" : "Memory creation failed")
+    : creation.status === "cancelled" ? "Memory generation cancelled"
+    : creation.status === "retry_wait" ? "Memory retry scheduled"
     : updating ? "Updating memory" : "Creating memory";
   const contents = creation.status === "created"
     ? renderMemoryContents(creation.text ?? "", creation.generatedAt ?? 0, md)
     : `<div class="${creation.status === "failed" ? "tool-error-result" : "assistant-markdown"}">${md.utils.escapeHtml(
-      creation.error ?? (creation.status === "queued" ? "Waiting for the model to be idle." : "Saving a summary for future chats.")
+      creation.error ?? (creation.status === "queued" ? "Waiting for the model to be idle." : creation.status === "cancelled" ? "This memory job was cancelled." : "Saving a summary for future chats.")
     )}</div>`;
+  const escape = md.utils.escapeHtml;
+  const diagnostic = creation.diagnostic;
+  const details = diagnostic ? renderActivityDetails([
+    ["Stage", diagnostic.stage], ["Cause", diagnostic.cause], ["Attempt", diagnostic.attempt],
+    ...completionDetailRows(diagnostic.completion).filter(([label]) => label !== "Cause")
+  ], true) : "";
+  const retry = creation.status === "failed" && creation.attemptId
+    ? `<button class="action-btn" type="button" data-retry-memory="${escape(creation.attemptId)}">Retry</button>` : "";
   return `<summary class="tool-head disclosure-trigger${active ? " active-tool-head" : ""}"><span class="tool-icon" aria-hidden="true">${memoryIcon()}</span><span class="tool-name">${label}</span>${disclosureIcon}</summary>
-    <div class="tool-expanded">${renderToolOutputSurface(contents, creation.status === "failed")}</div>`;
+    <div class="tool-expanded">${renderToolOutputSurface(contents + details + retry, creation.status === "failed")}</div>`;
 }
 
 export function renderMemoryContents(text: string, timestamp: number, md: MarkdownIt): string {

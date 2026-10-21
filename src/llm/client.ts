@@ -173,7 +173,7 @@ async function* streamChatRequest(
     if (visionUnsupported(res.status, text)) {
       throw new VisionUnsupportedError(text.slice(0, 500) || `HTTP ${res.status}`);
     }
-    throw new StreamFailure(`The model server returned HTTP ${res.status}. ${serverErrorMessage(text)}`, { cause: "server_error", completionEvidence: "none" });
+    throw new StreamFailure(`The model server returned HTTP ${res.status}. ${serverErrorMessage(text)}`, { cause: "server_error", httpStatus: res.status, completionEvidence: "none" });
   }
   req.onResponseAccepted?.();
   const reader = res.body.getReader();
@@ -358,8 +358,9 @@ const SERVER_CTX_TTL_MS = 60_000;
  */
 export async function fetchServerMetadata(
   endpoint: string,
-  options: { model?: string; force?: boolean } = {}
+  options: { model?: string; force?: boolean; signal?: AbortSignal } = {}
 ): Promise<ServerMetadata> {
+  options.signal?.throwIfAborted();
   const cacheKey = `${endpoint}\n${options.model ?? ""}`;
   const cached = serverMetadataCache.get(cacheKey);
   if (!options.force && cached && Date.now() - cached.at < SERVER_CTX_TTL_MS) return cached.value;
@@ -368,15 +369,16 @@ export async function fetchServerMetadata(
   const url = new URL("/props", endpoint);
   if (options.model) url.searchParams.set("model", options.model);
   const res = await safeFetch(endpoint, url.toString(), {
-    signal: AbortSignal.timeout(5_000)
+    signal: options.signal ? AbortSignal.any([options.signal, AbortSignal.timeout(5_000)]) : AbortSignal.timeout(5_000)
   });
-  if (!res.ok) throw new Error(`llama.cpp /props returned HTTP ${res.status}.`);
+  if (!res.ok) throw new StreamFailure(`llama.cpp /props returned HTTP ${res.status}.`, { cause: "server_error", httpStatus: res.status });
   const obj = (await res.json()) as {
     modalities?: { vision?: unknown };
     model_alias?: unknown;
     model_path?: unknown;
     default_generation_settings?: { n_ctx?: unknown; model?: unknown };
   };
+  if (!obj || typeof obj !== "object") throw new StreamFailure("The server returned invalid model metadata.", { cause: "protocol_error" });
   const n = obj.default_generation_settings?.n_ctx;
   if (typeof n !== "number" || !Number.isFinite(n) || n <= 0) {
     throw new Error("llama.cpp /props did not report a valid context length.");
@@ -392,10 +394,12 @@ export async function fetchServerMetadata(
   return value;
 }
 
-export async function fetchServerContextSize(endpoint: string, model?: string): Promise<number | undefined> {
+export async function fetchServerContextSize(endpoint: string, model?: string, options: { signal?: AbortSignal; strict?: boolean } = {}): Promise<number | undefined> {
   try {
-    return (await fetchServerMetadata(endpoint, { model })).contextSize;
-  } catch {
+    return (await fetchServerMetadata(endpoint, { model, signal: options.signal })).contextSize;
+  } catch (error) {
+    options.signal?.throwIfAborted();
+    if (options.strict) throw error;
     return undefined;
   }
 }
@@ -426,19 +430,27 @@ function modelNameFromPath(value: unknown): string {
 }
 
 /** Use llama.cpp's /tokenize for authoritative token counts. */
-export async function tokenize(endpoint: string, text: string, model?: string): Promise<number> {
+export async function tokenize(endpoint: string, text: string, model?: string, options: { signal?: AbortSignal; exact?: boolean; onEstimate?: () => void } = {}): Promise<number> {
+  options.signal?.throwIfAborted();
   const url = new URL("/tokenize", endpoint).toString();
   try {
     const res = await safeFetch(endpoint, url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ content: text, model }),
-      signal: AbortSignal.timeout(5000)
+      signal: options.signal ? AbortSignal.any([options.signal, AbortSignal.timeout(5000)]) : AbortSignal.timeout(5000)
     });
-    if (!res.ok) throw new Error(`tokenize ${res.status}`);
+    if (!res.ok) throw new StreamFailure(`tokenize ${res.status}`, { cause: "server_error", httpStatus: res.status });
     const obj = (await res.json()) as { tokens?: number[] };
-    return obj.tokens?.length ?? Math.ceil(text.length / 4);
-  } catch {
+    if (!obj || !Array.isArray(obj.tokens) || !obj.tokens.every(Number.isSafeInteger) || (text.trim() && !obj.tokens.length)) {
+      throw new StreamFailure("The tokenizer returned invalid data.", { cause: "protocol_error" });
+    }
+    options.signal?.throwIfAborted();
+    return obj.tokens.length;
+  } catch (error) {
+    options.signal?.throwIfAborted();
+    if (options.exact) throw error;
+    options.onEstimate?.();
     return Math.ceil(text.length / 4);
   }
 }

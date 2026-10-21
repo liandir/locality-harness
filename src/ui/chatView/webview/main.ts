@@ -3214,6 +3214,11 @@ function bindOnce(): void {
       submitMessageEdit();
       return;
     }
+    const retryMemory = target.closest<HTMLElement>("[data-retry-memory]");
+    if (retryMemory && activeChatId && retryMemory.dataset.retryMemory) {
+      send({ type: "retryMemory", id: activeChatId, attemptId: retryMemory.dataset.retryMemory });
+      return;
+    }
     const continueChat = target.closest("[data-continue-chat]") as HTMLElement | null;
     if (continueChat) {
       if (state.busy) return;
@@ -3998,6 +4003,7 @@ function handleHostMessage(msg: ExtToChat): void {
     case "initialMemoryCalls": setInitialMemoryCalls(msg.calls); render(); break;
     case "memoryCreations": state.memoryCreations = msg.creations; render(); break;
     case "chatLoaded": {
+      activeChatId = msg.record.id;
       state.initialMemoryParts = [];
       state.memoryCreations = msg.record.memoryCreations ?? [];
       closeImagePreview(false);

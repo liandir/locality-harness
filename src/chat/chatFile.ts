@@ -1,3 +1,4 @@
+import { validMemoryAttempt, type MemoryAttempt } from "./memoryJobTypes.js";
 import * as fs from "node:fs/promises";
 import type { Stats } from "node:fs";
 import { randomUUID } from "node:crypto";
@@ -15,6 +16,7 @@ export interface ChatHeader {
   messageCount: number;
   revision: string;
   memory?: ChatMemory;
+  memoryAttempt?: MemoryAttempt;
 }
 
 export interface FileFingerprint { size: number; mtimeMs: number; ctimeMs: number; ino: number }
@@ -38,7 +40,8 @@ export function makeChatHeader(rec: ChatRecord): ChatHeader {
     createdAt: validTime(rec.createdAt) ? rec.createdAt : 0,
     updatedAt: validTime(rec.updatedAt) ? rec.updatedAt : 0,
     messageCount: rec.messages.length, revision: transcriptRevision(rec),
-    memory: validMemory(rec.memory) ? rec.memory : undefined
+    memory: validMemory(rec.memory) ? rec.memory : undefined,
+    memoryAttempt: validMemoryAttempt(rec.memoryAttempt) ? rec.memoryAttempt : undefined
   };
 }
 
@@ -50,7 +53,8 @@ export function validChatHeader(value: unknown): value is ChatHeader {
     && typeof h.title === "string" && validTime(h.createdAt) && validTime(h.updatedAt)
     && Number.isSafeInteger(h.messageCount) && h.messageCount >= 0
     && typeof h.revision === "string" && /^[a-f0-9]{64}$/.test(h.revision)
-    && (h.memory === undefined || validMemory(h.memory));
+    && (h.memory === undefined || validMemory(h.memory))
+    && (h.memoryAttempt === undefined || validMemoryAttempt(h.memoryAttempt));
 }
 
 function validTime(value: number): boolean { return Number.isFinite(value) && value >= 0 && value <= 8640000000000000; }

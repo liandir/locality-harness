@@ -41,9 +41,9 @@ for (const theme of ["light", "dark"] as const) {
       await expect(error).toContainText("30751");
       await details.focus();
       await page.keyboard.press("Enter");
-      await expect(page.locator(".interruption-details")).not.toHaveAttribute("open");
+      await expect(page.locator(".activity-details")).not.toHaveAttribute("open");
       await page.keyboard.press("Space");
-      await expect(page.locator(".interruption-details")).toHaveAttribute("open", "");
+      await expect(page.locator(".activity-details")).toHaveAttribute("open", "");
       await page.getByRole("button", { name: "Continue", exact: true }).click();
       expect(await posted(page)).toContainEqual(expect.objectContaining({ type: "continueChat", messageTs: 4 }));
     });

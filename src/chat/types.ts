@@ -1,3 +1,4 @@
+import type { MemoryAttempt } from "./memoryJobTypes.js";
 import type { CompletionDiagnostics } from "../llm/completion.js";
 /** Shared chat data shapes; independent of storage and session implementations. */
 import type { ChatMemory, MemoryCreation, MemorySnapshot } from "./memory.js";
@@ -110,6 +111,7 @@ export interface ChatRecord {
   /** Model-only history after compaction, memory loading, or attachment expansion. */
   contextMessages?: ChatMessage[];
   memory?: ChatMemory;
+  memoryAttempt?: MemoryAttempt;
   memoryCreations?: MemoryCreation[];
   /** Source snapshots explicitly recalled by tools, retained with chat history. */
   recalledMemories?: MemorySnapshot[];

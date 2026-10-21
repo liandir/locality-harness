@@ -150,3 +150,8 @@ pre, textarea { scrollbar-gutter: stable; }
 }
 
 .tooltip[hidden] { display: none; }
+
+/* Shared expandable diagnostics, standalone or embedded in an activity card. */
+.activity-details { margin-top: 8px; }
+.activity-details > summary { display: flex; align-items: center; gap: 6px; width: fit-content; font-size: 0.86em; }
+.activity-details > .activity-detail-contents, .activity-details > .tool-output-surface { margin-top: 6px; padding: 8px 10px; }

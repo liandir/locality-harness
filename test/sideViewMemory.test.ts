@@ -28,7 +28,7 @@ const postMessage = vi.fn();
 const list = vi.fn();
 const setEnabled = vi.fn();
 const regenerate = vi.fn();
-const reset = vi.fn();
+const cancelAll = vi.fn();
 const memories = [{ sourceId: "source", title: "Parser", text: "Parser decision", status: "ready" }];
 
 beforeEach(() => {
@@ -38,7 +38,7 @@ beforeEach(() => {
   provider = new SideViewProvider(
     { subscriptions: [], extensionUri: "/extension", extension: { packageJSON: { version: "1.7.0" } } } as unknown as vscode.ExtensionContext,
     () => storage, vi.fn(), vi.fn(), () => [],
-    { list, setEnabled, regenerate, reset } as unknown as WorkspaceMemory
+    { list, setEnabled, regenerate, cancelAll } as unknown as WorkspaceMemory
   );
   provider.resolveWebviewView({
     webview: {
@@ -92,7 +92,7 @@ describe("Recent Chats memory management", () => {
     await receive({ type: "cancelMemoryGeneration" });
     expect(setEnabled).toHaveBeenCalledWith("source", false);
     expect(regenerate).toHaveBeenCalledWith("source");
-    expect(reset).toHaveBeenCalledOnce();
+    expect(cancelAll).toHaveBeenCalledOnce();
     expect(list).toHaveBeenCalledTimes(4);
   });
 });

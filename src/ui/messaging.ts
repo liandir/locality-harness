@@ -79,6 +79,7 @@ export type ChatToExt = (
   | { type: "openMemory"; id: string; readonly?: boolean }
   | { type: "openMemoryChat"; id: string }
   | { type: "regenerateMemory"; id: string }
+  | { type: "retryMemory"; id: string; attemptId: string }
   | { type: "deleteChat"; id: string }
   | { type: "ready" }
   | { type: "send"; text: string; mode: ChatMode; attachmentIds?: string[] }

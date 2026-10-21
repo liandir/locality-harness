@@ -756,7 +756,4 @@ body.image-preview-open .chat-body { overflow: hidden; }
 .chat-tab-close svg { width: 16px; height: 16px; display: block; }
 .chat-tab-label:focus-visible { background: var(--surface-fill-hover); color: var(--vscode-foreground); }
 
-.interruption-details { margin-top: 8px; }
-.interruption-details > summary { display: flex; align-items: center; gap: 6px; width: fit-content; font-size: 0.86em; }
-.interruption-details > .tool-output-surface { margin-top: 6px; padding: 8px 10px; }
 #incompletePlanning { align-self: flex-end; margin-bottom: 6px; }

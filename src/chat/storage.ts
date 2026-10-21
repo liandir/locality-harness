@@ -1,9 +1,11 @@
+import { validMemoryAttempt } from "./memoryJobTypes.js";
+import { pendingMemory, memorySourceMatches } from "./memoryJobs.js";
 import type { ChatAttachment, ChatMessage, ChatRecord } from "./types.js";
 export type { Role, StoredToolStatus, ChatAttachment, ChatMessage, ChatRecord } from "./types.js";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { validMemory, validMemoryCreation, validSnapshot, type ChatMemory, type MemoryCreation } from "./memory.js";
+import { validMemory, validMemoryCreation, validSnapshot, memoryCreation, type ChatMemory, type MemoryCreation } from "./memory.js";
 import { WorkspaceChatIndex } from "./chatIndex.js";
 import { makeChatHeader, parseChatRecord, readChatHeader, writeChatFile, type ChatHeader, type IndexedChat } from "./chatFile.js";
 import { isValidChatId, normalizeWorkspaceRoot } from "./storagePaths.js";
@@ -163,14 +165,15 @@ export class ChatStorage {
     return readChatHeader(file);
   }
 
-  async load(id: string): Promise<ChatRecord | undefined> {
+  async load(id: string, strict = false): Promise<ChatRecord | undefined> {
     if (!isValidChatId(id)) return undefined;
     try {
-      await this.ensureDir();
+      if (!strict) await this.ensureDir();
       const raw = await fs.readFile(path.join(this.dir(), id + ".json"), "utf-8");
       const rec = this.withWorkspace(parseChatRecord(raw), id);
       return this.belongsToWorkspace(rec) ? rec : undefined;
-    } catch {
+    } catch (error) {
+      if (strict && (error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       return undefined;
     }
   }
@@ -192,8 +195,16 @@ export class ChatStorage {
       // A session save must never overwrite a newer manual/background summary.
       if (existing) {
         rec.memory = existing.memory;
+        rec.memoryAttempt = existing.memoryAttempt;
+        if (pendingMemory(rec.memoryAttempt) && !memorySourceMatches(rec, rec.memoryAttempt)) {
+          rec.memoryAttempt = { ...rec.memoryAttempt, state: "cancelled", checkpoint: undefined, startedAt: undefined };
+        }
         rec.memoryCreations = existing.memoryCreations?.filter(item =>
           rec.messages.some(message => message.role === "assistant" && message.ts === item.messageTs));
+        if (rec.memoryAttempt?.state === "cancelled") {
+          rec.memoryCreations = rec.memoryCreations?.map(item => item.attemptId === rec.memoryAttempt!.id
+            ? { ...item, status: "cancelled" } : item);
+        }
       }
       rec.workspaceRoot = this.workspaceRoot;
       rec.updatedAt = Date.now();
@@ -210,11 +221,35 @@ export class ChatStorage {
       if (!memory) return false;
       const operation = rec.memory?.text.trim() ? "update" : "create";
       rec.memory = memory;
+      if (pendingMemory(rec.memoryAttempt) && (memory.manual || !memory.enabled)) {
+        rec.memoryAttempt = { ...rec.memoryAttempt, state: "cancelled", checkpoint: undefined, startedAt: undefined };
+        const creation = memoryCreation(rec.memoryAttempt);
+        if (creation) rec.memoryCreations = [...(rec.memoryCreations ?? []).filter(item => item.messageTs !== creation.messageTs), creation];
+      }
       if (messageTs !== undefined && rec.messages.some(message => message.role === "assistant" && message.ts === messageTs)) {
         const creation: MemoryCreation = memory.error
           ? { messageTs, operation, status: "failed", error: memory.error }
           : { messageTs, operation, status: "created", text: memory.text, generatedAt: memory.generatedAt };
         rec.memoryCreations = [...(rec.memoryCreations ?? []).filter(item => item.messageTs !== messageTs), creation];
+      }
+      await this.writeRecord(rec);
+      return true;
+    });
+  }
+
+  /** Serialize the job, history and successful summary in a single atomic record write. */
+  async maintainMemory(id: string, update: (rec: ChatRecord) => boolean): Promise<boolean> {
+    if (!isValidChatId(id)) return false;
+    return this.serialize(id, async () => {
+      const rec = await this.load(id, true);
+      if (!rec || !update(rec)) return false;
+      const attempt = rec.memoryAttempt;
+      const creation = attempt && memoryCreation(attempt);
+      if (creation && rec.messages.some(message => message.role === "assistant" && message.ts === creation.messageTs)) {
+        if (attempt!.state === "succeeded") {
+          creation.text = rec.memory?.text; creation.generatedAt = rec.memory?.generatedAt;
+        }
+        rec.memoryCreations = [...(rec.memoryCreations ?? []).filter(item => item.messageTs !== creation.messageTs), creation];
       }
       await this.writeRecord(rec);
       return true;
@@ -351,6 +386,7 @@ export class ChatStorage {
       reasoningEffort: normalizeReasoningEffort(rec.reasoningEffort),
       messages,
       memory: validMemory(rec.memory) ? rec.memory : undefined,
+      memoryAttempt: validMemoryAttempt(rec.memoryAttempt) ? rec.memoryAttempt : undefined,
       memoryCreations: Array.isArray(rec.memoryCreations) ? rec.memoryCreations.filter(validMemoryCreation) : undefined,
       recalledMemories: Array.isArray(rec.recalledMemories) ? rec.recalledMemories.filter(validSnapshot).slice(-MAX_MEMORY_COUNT) : undefined,
       initialMemories: Array.isArray(rec.initialMemories) ? rec.initialMemories.filter(validSnapshot).slice(-MAX_MEMORY_COUNT) : undefined,
