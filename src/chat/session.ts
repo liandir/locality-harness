@@ -70,7 +70,7 @@ import {
 import { normalizeTodos, renderTodosMarkdown, todoCounts } from "./todos.js";
 import { compact, compactAvailableForMessageCount, KEEP_TAIL, MIN_COMPACT_MESSAGES, type CompactConfig } from "./compactor.js";
 import { countTokens, promptTokens, recomputeTokens, truncateToTokenBudget } from "./contextTracker.js";
-import { lineDiffStats, renderLineDiff } from "./diffPreview.js";
+import { buildLineDiff, lineDiffStats, renderLineDiff } from "./diffPreview.js";
 import { fileUndoPlan, turnFileEdits, undoFiles, type FileUndoSnapshot } from "./fileUndo.js";
 import { rememberFileWrite, summarizeFileChanges, type FileChangeSummary, type TrackedFileWrite } from "./fileChanges.js";
 import { generateChatTitle } from "./chatTitle.js";
@@ -171,13 +171,10 @@ export class ChatSession {
   private workspaceRoot: string;
   private activeFileWrites?: Map<string, TrackedFileWrite>;
   private streamingTools = new Map<string, { toolId: string; name: string }>();
-  // Last time a live-stat progress frame was emitted per streaming card. The
-  // parser yields a frame per token; this rate-limits the live +X/-Y updates.
+  // The parser yields a frame per token; throttle renders after the first frame.
   private lastProgressEmitAt = new Map<string, number>();
-  // The target file's prior state, captured on the first frame of a streaming
-  // write_file, so the live +X/-Y can diff the streamed body against it and the
-  // card can label a brand-new file "Created file" vs an edit "Edited file".
-  private streamingFileState = new Map<string, { exists: boolean; content: string }>();
+  // File existence controls the Write/Edit label while write_file streams.
+  private streamingFileState = new Map<string, { exists: boolean }>();
   private toolDiffSources = new Map<string, TrackedFileWrite>();
   // Net line-count shift per file (abs path) from edits executed in the
   // CURRENT model response. The model emits a whole response blind — it sees
@@ -643,7 +640,7 @@ export class ChatSession {
     if (!change) return;
     const diffPreview = change.diffPreview ?? renderLineDiff(change.previous, change.next);
     change.diffPreview = diffPreview;
-    this.emit({ kind: "toolCallResolved", toolId, status: "executed", diffPreview });
+    this.emit({ kind: "toolCallResolved", toolId, status: "executed", diffPreview, ...lineDiffStats(change.previous, change.next) });
   }
 
   steerUserMessage(text: string, attachments: ChatAttachment[] = []): boolean {
@@ -2116,7 +2113,7 @@ export class ChatSession {
     let reason: string | undefined;
     let writeArgs: PreparedWriteArgs | undefined;
     let proposedCreatesNewFile: boolean | undefined;
-    let proposedDiffPreview: string | undefined;
+    let proposedDiff: ReturnType<typeof buildLineDiff> | undefined;
     let questionArgs: { question: string; suggestions: string[] } | undefined;
     let args: Record<string, unknown> = {};
     let parsedArgs: unknown;
@@ -2186,13 +2183,17 @@ export class ChatSession {
       try {
         writeArgs = normalizeWriteToolArgs(e.name, args, e.argsJson);
         const absolute = await assertInsideWorkspace(this.workspaceRoot, writeArgs.path);
+        let preview: { previous: string; next: string } | undefined;
         if (writeArgs.kind === "write_file") {
+          let previous = "";
           try {
-            await fs.stat(absolute);
+            previous = await fs.readFile(absolute, "utf8");
             proposedCreatesNewFile = false;
-          } catch {
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
             proposedCreatesNewFile = true;
           }
+          preview = { previous, next: writeArgs.content };
         } else if (writeArgs.kind === "create_file") {
           try {
             await fs.stat(absolute);
@@ -2201,17 +2202,15 @@ export class ChatSession {
             if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
           }
           proposedCreatesNewFile = true;
-          proposedDiffPreview = renderLineDiff("", writeArgs.content);
+          preview = { previous: "", next: writeArgs.content };
         } else if (writeArgs.kind === "edit_file") {
-          const preview = await previewEditFile({ workspaceRoot: this.workspaceRoot }, writeArgs);
-          proposedDiffPreview = renderLineDiff(preview.previous, preview.next);
+          preview = await previewEditFile({ workspaceRoot: this.workspaceRoot }, writeArgs);
         } else if (writeArgs.kind === "insert_text" && !this.lineEditRanThisPass) {
-          const preview = await previewInsertText({ workspaceRoot: this.workspaceRoot }, writeArgs);
-          proposedDiffPreview = renderLineDiff(preview.previous, preview.next);
+          preview = await previewInsertText({ workspaceRoot: this.workspaceRoot }, writeArgs);
         } else if (writeArgs.kind === "replace_range" && !this.lineEditRanThisPass) {
-          const preview = await previewReplaceRange({ workspaceRoot: this.workspaceRoot }, writeArgs);
-          proposedDiffPreview = renderLineDiff(preview.previous, preview.next);
+          preview = await previewReplaceRange({ workspaceRoot: this.workspaceRoot }, writeArgs);
         }
+        if (preview) proposedDiff = buildLineDiff(preview.previous, preview.next);
       } catch (err) {
         reason = (err as Error).message;
       }
@@ -2240,7 +2239,7 @@ export class ChatSession {
       category,
       approvalRequired,
       reason,
-      diffPreview: proposedDiffPreview,
+      ...proposedDiff,
       createsNewFile: proposedCreatesNewFile,
       ...featureMetadata
     });
@@ -2515,12 +2514,12 @@ export class ChatSession {
         if (this.activeFileWrites) {
           rememberFileWrite(this.activeFileWrites, { key, path: displayPath, previous, next });
         }
-        const stats = lineDiffStats(previous, next);
+        const diff = buildLineDiff(previous, next);
         executedCreatesNewFile = createsNewFile;
-        added = stats.added;
-        removed = stats.removed;
+        added = diff.added;
+        removed = diff.removed;
         this.toolDiffSources.set(toolId, {
-          path: displayPath, previous, next, createsNewFile,
+          path: displayPath, previous, next, createsNewFile, diffPreview: diff.diffPreview,
           // Refuse lossy snapshots or a file that changed before the tool read it.
           undoAvailable: previous === originalText && (originalBytes === null || Buffer.from(previous, "utf8").equals(originalBytes))
         });
@@ -2601,15 +2600,13 @@ export class ChatSession {
       this.streamingTools.set(key, streamingTool);
     }
     const toolId = streamingTool.toolId;
-    // Snapshot the target's prior state once the path resolves (write_file only:
-    // edits always target an existing file). Used for the live +X/-Y and the
-    // Write/Edit label; retried on later frames if the path was still partial.
+    // Resolve the Write/Edit label once the path arrives. Diff counts require
+    // the complete proposal and never come from a partial streamed payload.
     if (!this.streamingFileState.has(toolId)) {
       const state = await this.readStreamingTarget(e.name, e.path);
       if (state) this.streamingFileState.set(toolId, state);
     }
-    // The card must appear on the first emitted frame; after that, rate-limit
-    // so the live stat isn't recomputed on every streamed token.
+    // The card appears on the first frame; throttle subsequent progress renders.
     const now = Date.now();
     const firstEmit = !this.lastProgressEmitAt.has(toolId);
     if (!firstEmit && now - (this.lastProgressEmitAt.get(toolId) ?? 0) < PROGRESS_THROTTLE_MS) {
@@ -2617,7 +2614,6 @@ export class ChatSession {
     }
     this.lastProgressEmitAt.set(toolId, now);
     const fileState = this.streamingFileState.get(toolId);
-    const stats = liveWriteStats(e, fileState);
     this.emit({
       kind: "toolCallProgress",
       toolId,
@@ -2625,10 +2621,7 @@ export class ChatSession {
       toolName: e.name,
       path: e.path,
       contentLines: e.contentLines,
-      added: stats.added,
-      removed: stats.removed,
       createsNewFile: e.name === "write_file" && fileState !== undefined && !fileState.exists,
-      replacedLines: e.name === "replace_range" ? replacedLineCount(e.startLine, e.endLine) : undefined,
       startLine: e.startLine,
       endLine: e.endLine,
       line: e.line
@@ -2636,27 +2629,26 @@ export class ChatSession {
   }
 
   /**
-   * The target's prior content/existence, for the live write stats and label.
-   * Only write_file needs the old content; edits always target an existing file,
-   * so they return a cheap placeholder. Returns undefined (retry next frame) if
+   * The target's existence, for the live Write/Edit label. Returns undefined if
    * the path hasn't streamed enough to resolve inside the workspace yet.
    */
   private async readStreamingTarget(
     name: string,
     pathArg?: string
-  ): Promise<{ exists: boolean; content: string } | undefined> {
+  ): Promise<{ exists: boolean } | undefined> {
     if (!pathArg) return undefined;
+    let absolute: string;
     try {
-      await assertInsideWorkspace(this.workspaceRoot, pathArg);
+      absolute = await assertInsideWorkspace(this.workspaceRoot, pathArg);
     } catch {
       return undefined;
     }
-    if (name !== "write_file") return { exists: true, content: "" };
+    if (name !== "write_file") return { exists: true };
     try {
-      const content = (await readFile({ workspaceRoot: this.workspaceRoot }, { path: pathArg })).content;
-      return { exists: true, content };
-    } catch {
-      return { exists: false, content: "" };
+      await fs.stat(absolute);
+      return { exists: true };
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === "ENOENT" ? { exists: false } : undefined;
     }
   }
 
@@ -2931,38 +2923,8 @@ function streamingToolKey(messageId: string, name: string, id: string | undefine
   return `${messageId}:${id ?? name}`;
 }
 
-// Rate-limit for the live +X/-Y stat updates streamed to the card heading.
+// Rate-limit for streamed edit card updates.
 const PROGRESS_THROTTLE_MS = 60;
-
-/**
- * The live +added/-removed shown in the card heading as a write streams:
- *  - insert_text / create_file / new write_file: every streamed line is an addition.
- *  - replace_range: removes the whole target range, adds the streamed lines.
- *  - edit_file: the first streamed newText is shown as provisional additions.
- *  - write_file over an existing file: diff the streamed body against the old
- *    file's prefix of the same length (Myers, via lineDiffStats) so a shift
- *    doesn't read as a wall of changes. All of these converge to the exact diff
- *    recomputed when the call resolves.
- */
-function liveWriteStats(
-  e: Extract<ParsedEvent, { kind: "toolCallProgress" }>,
-  fileState: { exists: boolean; content: string } | undefined
-): { added: number; removed: number } {
-  const added = e.contentLines;
-  if (e.name === "insert_text") return { added, removed: 0 };
-  if (e.name === "create_file" || e.name === "edit_file") return { added, removed: 0 };
-  if (e.name === "replace_range") return { added, removed: replacedLineCount(e.startLine, e.endLine) ?? 0 };
-  if (!fileState || !fileState.exists) return { added, removed: 0 };
-  const streamed = e.content ?? "";
-  const streamedLineCount = streamed === "" ? 0 : streamed.split(/\r\n|\r|\n/).length;
-  const oldPrefix = fileState.content.split(/\r\n|\r|\n/).slice(0, streamedLineCount).join("\n");
-  return lineDiffStats(oldPrefix, streamed);
-}
-
-function replacedLineCount(startLine?: number, endLine?: number): number | undefined {
-  if (startLine === undefined || endLine === undefined || endLine < startLine) return undefined;
-  return endLine - startLine + 1;
-}
 
 function emptyTurnNotice(
   ranAnyTool: boolean,

@@ -161,9 +161,6 @@ interface ToolCard extends ChatToolProcess {
   // other settled write/edit (including a failed one) → "Edited file".
   createsNewFile?: boolean;
   processStopping?: boolean;
-  // replace_range only: the number of lines the edit replaces, for the live
-  // "Replacing Y with X lines" note and the -Y in the heading.
-  replacedLines?: number;
   progress?: {
     path?: string;
     contentLines: number;
@@ -1788,9 +1785,8 @@ function renderToolHead(card: HTMLElement, tc: ToolCard): void {
 }
 
 /**
- * Patch the head label in place. For write cards the ±stats change on every
- * progress frame. Keep the path and stat nodes mounted and update only their
- * text so changing counts remain visually stable.
+ * Keep path and count nodes mounted as an edit moves from streaming through
+ * approval and execution, so changes do not disturb the card's layout.
  */
 function renderToolHeadLabel(label: HTMLElement, tc: ToolCard): void {
   if (!isWriteToolCard(tc) || toolBodyOpen(tc)) {
@@ -2682,13 +2678,12 @@ function toolCardLabel(tc: ToolCard): string {
 }
 
 function writeStats(tc: ToolCard): { added: number; removed: number } | undefined {
-  // Streaming counts describe the proposed payload, not a disk mutation. Once
-  // an individual write fails or is rejected, do not present them as changes.
-  if (isErrorToolCard(tc)) return undefined;
+  // Only complete host-computed counts are meaningful. A partial payload or
+  // capped diff preview cannot supply them; failed/rejected edits never landed.
+  if (tc.status === "streaming" || isErrorToolCard(tc)) return undefined;
   if (typeof tc.added === "number" && typeof tc.removed === "number") {
     return { added: tc.added, removed: tc.removed };
   }
-  if (tc.diffPreview) return diffStats(tc.diffPreview);
   return undefined;
 }
 
@@ -2809,16 +2804,6 @@ function toolArgs(tc: ToolCard): Record<string, unknown> {
   } catch {
     return normalizeToolArgsForDisplay(tc.argsJson);
   }
-}
-
-function diffStats(diff: string): { added: number; removed: number } {
-  let added = 0;
-  let removed = 0;
-  for (const line of diff.split("\n")) {
-    if (line.startsWith("+ ") || line.startsWith("+\t")) added++;
-    else if (line.startsWith("- ") || line.startsWith("-\t")) removed++;
-  }
-  return { added, removed };
 }
 
 function summaryRepeatsVisibleText(m: Message, summary: string): boolean {
@@ -4171,10 +4156,7 @@ function handleHostMessage(msg: ExtToChat): void {
           argsJson: "{}",
           category: "write",
           status: "streaming",
-          added: msg.added,
-          removed: msg.removed,
           createsNewFile: msg.createsNewFile,
-          replacedLines: msg.replacedLines,
           progress: {
             path: msg.path,
             contentLines: msg.contentLines,
@@ -4191,10 +4173,9 @@ function handleHostMessage(msg: ExtToChat): void {
         card.status = "streaming";
         card.category = "write";
         card.toolName = msg.toolName;
-        if (typeof msg.added === "number") card.added = msg.added;
-        if (typeof msg.removed === "number") card.removed = msg.removed;
+        card.added = undefined;
+        card.removed = undefined;
         if (typeof msg.createsNewFile === "boolean") card.createsNewFile = msg.createsNewFile;
-        if (typeof msg.replacedLines === "number") card.replacedLines = msg.replacedLines;
         card.progress = {
           path: msg.path ?? card.progress?.path,
           contentLines: msg.contentLines,
@@ -4220,6 +4201,8 @@ function handleHostMessage(msg: ExtToChat): void {
           approvalRequired: msg.approvalRequired,
           reason: msg.reason,
           diffPreview: msg.diffPreview,
+          added: msg.added,
+          removed: msg.removed,
           diffRequested: false,
           status: msg.approvalRequired || msg.category === "question" ? "pending" : "approved",
           createsNewFile: msg.createsNewFile,
@@ -4240,6 +4223,8 @@ function handleHostMessage(msg: ExtToChat): void {
         card.approvalRequired = msg.approvalRequired;
         card.reason = msg.reason;
         card.diffPreview = msg.diffPreview;
+        card.added = msg.added;
+        card.removed = msg.removed;
         card.diffRequested = false;
         card.progress = undefined;
         card.status = msg.approvalRequired || msg.category === "question" ? "pending" : "approved";

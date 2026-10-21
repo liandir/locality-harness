@@ -1,6 +1,8 @@
 /**
  * Webview commands and presentation messages. Session events and chat data
  * live in shared chat contracts, independently of their host implementations.
+ * Tool proposals carry host-computed full-file diff counts; streaming progress
+ * carries no added/removed counts, and previews may be capped independently.
  */
 import type { MemoryListItem } from "../chat/memory.js";
 import type { UiEvent } from "../chat/events.js";

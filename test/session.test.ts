@@ -5,6 +5,7 @@ import * as path from "node:path";
 import type { ChatRecord } from "../src/chat/storage.js";
 import type { ChatSession, UiEvent } from "../src/chat/session.js";
 import type { WorkspaceMemory } from "../src/chat/workspaceMemory.js";
+import { editDiffCases } from "./fixtures/editDiff.js";
 
 const planText = (markdown: string) => `<proposed_plan>\n${markdown}\n</proposed_plan>`;
 
@@ -5459,4 +5460,80 @@ it("rejects an old approval after a plan revision in the same millisecond", asyn
     expect(session.resolvePlan(first, "act")).toBe(false);
     expect(session.resolvePlan(record.pendingPlanMessageTs!, "act")).toBe(true);
   } finally { now.mockRestore(); await session.shutdown(); }
+});
+
+describe("complete edit proposal counts", () => {
+  const cases = [
+    ...editDiffCases.map(scenario => ({ ...scenario, decision: "approve" })),
+    { ...editDiffCases[0], decision: "reject" },
+    { ...editDiffCases[0], decision: "changed" }
+  ];
+  it.each(cases)("$name / $decision", async scenario => {
+    const { ChatSession } = await import("../src/chat/session.js");
+    const { ChatStorage } = await import("../src/chat/storage.js");
+    const { readFile } = await import("../src/tools/fsTools.js");
+    const { writeProgressFromJsonToolBody } = await import("../src/llm/toolProgress.js");
+    const { restoredToolFileChanges } = await import("../src/ui/chatView/webview/toolHistory.js");
+    const ws = await fs.mkdtemp(path.join(os.tmpdir(), "locality-edit-counts-"));
+    const file = path.join(ws, "sample.txt");
+    const legacy = scenario.tool === "write_file";
+    mocks.settings.toolCallingMode = legacy ? "compat-qwen3" : "native";
+    mocks.settings.autoapproveWrites = false;
+    const storage = new ChatStorage(ws, path.join(ws, "chats"));
+    const record = storage.newRecord(legacy ? "compat-qwen3" : "native");
+    record.title = "Edit counts";
+    const events: UiEvent[] = [];
+    const session = new ChatSession({ storage, workspaceRoot: ws, record, emit: event => events.push(event) });
+    try {
+      if (scenario.previous !== undefined) await fs.writeFile(file, scenario.previous);
+      const args = { path: "sample.txt", ...scenario.args,
+        ...(scenario.tool === "edit_file" ? { baseRevision: (await readFile({ workspaceRoot: ws }, { path: "sample.txt" })).revision } : {}) };
+      const argsJson = JSON.stringify(args);
+      let pass = 0;
+      mocks.streamChat.mockImplementation(async function* (_endpoint, request) {
+        if (legacy && request.tools) throw new mocks.NativeToolsUnsupportedError("tools unsupported");
+        if (pass++ > 0) { yield { kind: "text", text: "Done." }; return; }
+        if (legacy) yield { kind: "text", text: `<tool_call>${JSON.stringify({ name: scenario.tool, arguments: args })}</tool_call>` };
+        else {
+          yield { kind: "toolCallProgress", ...writeProgressFromJsonToolBody(argsJson, scenario.tool), id: "edit" };
+          yield { kind: "toolCall", name: scenario.tool, argsJson, id: "edit" };
+        }
+      });
+      const turn = session.sendUserMessage("Edit the file");
+      await vi.waitFor(() => expect(events.some(event => event.kind === "toolCallProposed")).toBe(true));
+      const proposal = events.find((event): event is Extract<UiEvent, { kind: "toolCallProposed" }> => event.kind === "toolCallProposed")!;
+      expect(proposal).toMatchObject({ approvalRequired: true, added: scenario.added, removed: scenario.removed, diffPreview: expect.any(String) });
+      if (scenario.name === "capped preview") expect(proposal.diffPreview).toContain("large diff preview capped");
+      for (const progress of events.filter(event => event.kind === "toolCallProgress")) {
+        expect(progress).not.toHaveProperty("added");
+        expect(progress).not.toHaveProperty("removed");
+      }
+      if (scenario.previous === undefined) await expect(fs.stat(file)).rejects.toMatchObject({ code: "ENOENT" });
+      else await expect(fs.readFile(file, "utf8")).resolves.toBe(scenario.previous);
+      expect(events.some(event => event.kind === "toolCallResolved" && event.status === "executed")).toBe(false);
+      if (scenario.decision === "changed") await fs.writeFile(file, "Changed externally\n");
+      session.approve(proposal.toolId, scenario.decision !== "reject");
+      await turn;
+      if (scenario.decision === "approve") {
+        await expect(fs.readFile(file, "utf8")).resolves.toBe(scenario.next);
+        expect(events).toContainEqual(expect.objectContaining({
+          kind: "toolCallResolved", toolId: proposal.toolId, status: "executed",
+          added: proposal.added, removed: proposal.removed, diffPreview: proposal.diffPreview
+        }));
+        const restored = (await storage.load(record.id))!;
+        expect([...restoredToolFileChanges(restored).values()]).toEqual([
+          { path: "sample.txt", added: scenario.added, removed: scenario.removed, diffPreview: proposal.diffPreview }
+        ]);
+      } else {
+        await expect(fs.readFile(file, "utf8")).resolves.toBe(scenario.decision === "changed" ? "Changed externally\n" : scenario.previous);
+        expect(events).toContainEqual(expect.objectContaining({
+          kind: "toolCallResolved", toolId: proposal.toolId, status: scenario.decision === "reject" ? "rejected" : "failed"
+        }));
+        expect([...restoredToolFileChanges((await storage.load(record.id))!).values()]).toEqual([]);
+      }
+    } finally {
+      await session.shutdown();
+      await fs.rm(ws, { recursive: true, force: true });
+    }
+  });
 });
