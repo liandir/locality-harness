@@ -47,10 +47,7 @@ h3 { font-size: 0.82em; margin: 0 0 12px; color: var(--vscode-descriptionForegro
 .settings-panel .settings-section { padding: 4px 0; }
 .settings-section h3 { margin: 0; font: inherit; text-transform: none; letter-spacing: 0; }
 .settings-section-heading { display: flex; align-items: center; justify-content: flex-start; gap: 8px; width: 100%; min-height: 32px; padding: 5px 4px; text-align: left; background: transparent; color: var(--vscode-descriptionForeground); }
-.settings-section-heading:hover, .settings-section-heading:focus-visible { background: transparent; color: var(--vscode-foreground); }
-.settings-section-heading > .disclosure-icon { flex: 0 0 auto; opacity: 0; transform: rotate(0deg); transition: transform 0.16s ease, opacity 0.12s; }
-.settings-section-heading:is(:hover, :focus-visible, [aria-expanded=true]) > .disclosure-icon { opacity: 1; }
-.settings-section-heading[aria-expanded=true] > .disclosure-icon { transform: rotate(90deg); }
+.settings-section-heading { --disclosure-foreground: var(--vscode-descriptionForeground); }
 .settings-section-content { padding: 0 4px 12px; }
 .settings-section-content > .field-label:first-child { margin-top: 6px; }
 .intro-section { display: flex; flex-direction: column; gap: 10px; }

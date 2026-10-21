@@ -71,6 +71,12 @@ jobs:
       - name: Lint
         run: npm run lint
 
+      - name: Install browser for UI tests
+        run: npx playwright install --with-deps chromium
+
+      - name: Test webview interactions
+        run: npm run test:ui
+
       - name: Package VSIX
         run: npm run package:vsix
 

@@ -28,6 +28,7 @@ This file applies to the entire repository.
 - Preserve the guarded network boundary: use `src/network/safeFetch.ts`; do not call `fetch` or import another HTTP client directly.
 - Edit source files under `src/` and styles under `media/`. Do not hand-edit generated files in `dist/`.
 - Reuse existing icons, surface variables, rendering helpers, and storage methods before adding parallel implementations.
+- Treat every visually tool-like activity, including post-answer memory creation, as a consumer of the shared UI primitives regardless of its backend lifecycle. Disclosure headings must use `disclosure-trigger` and the rules in `media/chatControls.css`; expanded payloads must use `renderToolOutputSurface`. Components may supply layout, contents, and semantic color tokens (`--disclosure-foreground` / `--disclosure-highlight`), never their own hover/focus or chevron rules. Use `aria-expanded` for custom/button disclosures or native `details`/`summary` expansion. Highlight only on hover, `:focus-visible`, or a descendant's `:focus-visible`; do not use `:focus`/`:focus-within`, blur handlers, or open state to simulate hover. Preserve keyboard focus and activation. Extend the shared primitive when new behavior is needed instead of adding feature-specific fixes.
 - Keep unrelated user changes intact and avoid broad formatting rewrites.
 - Select optional capabilities through the build resolver in `scripts/build-profiles.mjs`. Shared code must not import another edition's executors, settings, prompt fragments, or UI handlers. Keep the fixed VS Code Git integration shared across editions.
 - Run all-profile packaging and its bundle/archive isolation audits after changing optional tools or build wiring. No commands must contain no subprocess implementation; Safe list must contain no unchecked shell runner; only Advanced includes search networking.
@@ -36,4 +37,5 @@ This file applies to the entire repository.
 
 - Run `npm run typecheck`, `npm run lint`, and `npm run build` after implementation changes.
 - Run the relevant targeted Vitest file for changed behavior; run `npm test` when the change crosses multiple subsystems.
+- For disclosure or activity-row interaction changes, run `npm run test:ui` (install Chromium once with `npx playwright install chromium`). Extend the browser regressions for new variants; cover pointer exit after a click, retained keyboard focus, Enter/Space activation, expanded/collapsed and active/failed states in both light and dark themes.
 - Run `git diff --check` before handoff.

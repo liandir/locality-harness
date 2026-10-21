@@ -337,12 +337,14 @@
     "watch": "node esbuild.config.mjs --watch",
     "lint": "eslint src test --ext .ts,.tsx",
     "test": "vitest run",
+    "test:ui": "npm run build && playwright test",
     "eval:memory": "node scripts/eval-memory.mjs",
     "typecheck": "tsc --noEmit",
     "package:vsix": "node scripts/package-vsix.mjs",
     "vscode:prepublish": "npm run build"
   },
   "devDependencies": {
+    "@playwright/test": "^1.64.1",
     "@types/markdown-it": "^14.1.2",
     "@types/node": "^20.11.0",
     "@types/vscode": "^1.90.0",
@@ -358,7 +360,7 @@
     "@vscode/markdown-it-katex": "^1.1.2",
     "htmlparser2": "^10.1.0",
     "katex": "^0.18.2",
-    "markdown-it": "^14.1.0",
+    "markdown-it": "^14.3.3",
     "shiki": "^4.1.0",
     "undici": "^6.29.0"
   },

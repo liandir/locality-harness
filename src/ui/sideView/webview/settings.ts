@@ -164,7 +164,7 @@ function switchControl(id: string, label: string, checked: boolean, disabled = f
 
 function settingsSection(id: SettingsSection, label: string, content: string, expanded: boolean): string {
   return `<section class="panel-section settings-section">
-    <h3><button type="button" class="settings-section-heading" data-settings-section="${id}" aria-expanded="${expanded}" aria-controls="settings-${id}"><span>${label}</span>${chevronIcon()}</button></h3>
+    <h3><button type="button" class="settings-section-heading disclosure-trigger" data-settings-section="${id}" aria-expanded="${expanded}" aria-controls="settings-${id}"><span>${label}</span>${chevronIcon()}</button></h3>
     <div class="settings-section-content" id="settings-${id}" ${expanded ? "" : "hidden"}>${content}</div>
   </section>`;
 }
