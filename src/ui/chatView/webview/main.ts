@@ -2729,7 +2729,7 @@ function renderToolApprovalLabel(tc: ToolCard): string {
     return stats ? `${renderToolPathLabel(tc)} ${diffStatHtml(stats)}` : renderToolPathLabel(tc);
   }
   if (tc.toolName === "view_image") return renderToolPathLabel(tc);
-  if (tc.toolName === "read_file") return renderToolPathLabel(tc) + readRangeHtml(tc);
+  if (tc.toolName === "read_file") return `${renderToolPathLabel(tc)} ${readRangeHtml(tc)}`;
   return escapeHtml(toolCardLabel(tc));
 }
 

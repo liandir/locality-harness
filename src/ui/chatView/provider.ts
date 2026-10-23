@@ -361,7 +361,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  openChat(rec: ChatRecord): void {
+  openChat(rec: ChatRecord, options: { preserveDraft?: boolean } = {}): void {
     if (this.isClearingWorkspace() || this.deleting.has(rec.id)) return;
     this.navigationGeneration++;
     const existing = this.runtimes.get(rec.id);
@@ -373,6 +373,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       return;
     }
     const runtime = newRuntime();
+    // Creating the first chat (for example, by changing mode) adopts the
+    // initial composer's draft before publishing its first snapshot.
+    // Existing chats keep their own drafts when another chat is opened.
+    if (options.preserveDraft && !this.session) runtime.draft = this.active.draft;
     runtime.storage = storage;
     const session = new ChatSession({
       storage, workspaceRoot: ws, record: rec, memory: this.memory, secrets: this.context.secrets,

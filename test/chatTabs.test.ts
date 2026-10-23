@@ -187,6 +187,78 @@ beforeEach(() => {
   mocks.metadata.mockReset().mockResolvedValue({ modelAlias: "model-a", contextSize: 32768, supportsVision: false });
 });
 
+describe("composer drafts", () => {
+  it.each(["review", "plan"] as const)("preserves the latest draft when selecting %s creates the first chat", async mode => {
+    const { provider, send, snapshot, createChat } = setup();
+    let finishCreation!: () => void;
+    createChat.mockImplementation(async () => {
+      await new Promise<void>(resolve => { finishCreation = resolve; });
+      const chat = record("new");
+      provider.openChat(chat, { preserveDraft: true });
+      return chat;
+    });
+    await send({ type: "saveDraft", text: "Check this code" });
+    const changeMode = send({ type: "setChatMode", mode });
+    const text = "Check this code\n  Keep these details too.  ";
+    await send({ type: "saveDraft", text });
+    finishCreation();
+    await changeMode;
+
+    expect(snapshot().draft).toBe(text);
+    expect(provider.getCurrentRecord()?.mode).toBe(mode);
+    expect(mocks.sessions.get("new")!.sent).toEqual([]);
+    await send({ type: "ready" });
+    expect(snapshot().draft).toBe(text);
+    expect(snapshot().events).toContainEqual({ kind: "chatModeChanged", mode });
+    await provider.closeAll();
+  });
+
+  it("preserves an existing chat's draft across every mode and tab switches", async () => {
+    const { provider, send, snapshot, createChat } = setup();
+    provider.openChat(record("a"));
+    await send({ type: "saveDraft", text: "Unsent request", chatId: "a" });
+    for (const mode of ["review", "plan", "act"] as const) {
+      await send({ type: "setChatMode", mode, chatId: "a" });
+      await send({ type: "ready" });
+      expect(snapshot().draft).toBe("Unsent request");
+      expect(provider.getCurrentRecord()?.mode).toBe(mode);
+    }
+    provider.openChat(record("b"), { preserveDraft: true });
+    expect(snapshot().draft).toBe("");
+    await provider.openChatById("a");
+    expect(snapshot().draft).toBe("Unsent request");
+    expect(createChat).not.toHaveBeenCalled();
+    await provider.closeAll();
+  });
+
+  it("keeps a submitted draft cleared when sending creates the first chat", async () => {
+    const { provider, send, snapshot, createChat } = setup();
+    createChat.mockImplementation(async () => {
+      const chat = record("new");
+      provider.openChat(chat, { preserveDraft: true });
+      return chat;
+    });
+    await send({ type: "saveDraft", text: "Send this request" });
+    const turn = send({ type: "send", text: "Send this request", mode: "act" });
+    await vi.waitFor(() => expect(mocks.sessions.get("new")!.sent).toEqual(["Send this request"]));
+    expect(snapshot().draft).toBe("");
+    mocks.sessions.get("new")!.finish();
+    await turn;
+    await send({ type: "ready" });
+    expect(snapshot().draft).toBe("");
+    await provider.closeAll();
+  });
+
+  it("does not transfer the initial composer draft when opening a saved chat", async () => {
+    const { provider, send, snapshot, storage } = setup();
+    await send({ type: "saveDraft", text: "For a new chat" });
+    storage.load.mockResolvedValue(record("saved"));
+    await provider.openChatById("saved");
+    expect(snapshot().draft).toBe("");
+    await provider.closeAll();
+  });
+});
+
 describe("reopened chat context window", () => {
   it("loads history immediately and publishes the server window without starting a turn", async () => {
     const { provider, posted, snapshot } = setup();

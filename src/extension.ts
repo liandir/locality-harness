@@ -146,7 +146,7 @@ async function newChat(context: vscode.ExtensionContext): Promise<ChatRecord | u
   if (targetStorage !== storage) return undefined;
   await sideProvider.pushChats();
   if (targetStorage !== storage) return undefined;
-  chatProvider.openChat(rec);
+  chatProvider.openChat(rec, { preserveDraft: true });
   return rec;
 }
 
