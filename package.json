@@ -372,9 +372,12 @@
     "katex": "^0.18.2",
     "markdown-it": "^14.3.3",
     "shiki": "^4.1.0",
-    "undici": "^6.29.0"
+    "undici": "^6.29.1"
   },
   "overrides": {
+    "@azure/identity": {
+      "@azure/msal-node": "^7.1.1"
+    },
     "katex": "$katex",
     "undici": "$undici"
   },

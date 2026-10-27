@@ -65,6 +65,15 @@ npm run build
 to rebuild it as you edit. Edit source files under `src/` and styles under
 `media/`; generated files in `dist/` should not be edited by hand.
 
+The dependency overrides keep KaTeX and undici aligned with the direct versions.
+The override inside `@azure/identity` selects MSAL Node 7.1.1 or newer in the 7.x
+line for the VSIX packaging tool, addressing
+[GHSA-xcx6-jx8p-x3h5](https://github.com/advisories/GHSA-xcx6-jx8p-x3h5).
+Remove that override once Azure Identity's own dependency range includes the fix.
+MSAL v7 changes interactive browser authentication; VSCE's credential chain does
+not use that flow. Verify packaging and any Azure-based publishing authentication
+when changing this override.
+
 To build a different edition, use one of `no-commands`, `safe-list`, `commands`,
 or `advanced`:
 
