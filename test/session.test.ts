@@ -41,6 +41,8 @@ const mocks = vi.hoisted(() => ({
   complete: vi.fn(),
   fetchServerContextSize: vi.fn(),
   supportsVision: true,
+  backend: "llama.cpp" as "llama.cpp" | "vllm",
+  countPrompt: vi.fn(),
   runCommand: vi.fn(),
   startCommand: vi.fn(),
   updateSetting: vi.fn(),
@@ -91,8 +93,12 @@ vi.mock("../src/llm/client.js", () => ({
   fetchServerMetadata: async () => {
     const contextSize = await mocks.fetchServerContextSize();
     if (contextSize === undefined) throw new Error("Unavailable context size");
-    return { modelAlias: "test-model", contextSize, supportsVision: mocks.supportsVision };
+    return { modelAlias: "test-model", contextSize, supportsVision: mocks.supportsVision, backend: mocks.backend };
   }
+}));
+
+vi.mock("../src/llm/server.js", async importOriginal => ({
+  ...await importOriginal<typeof import("../src/llm/server.js")>(), countServerPrompt: mocks.countPrompt
 }));
 
 vi.mock("../src/tools/terminalTool.js", () => ({
@@ -111,6 +117,8 @@ beforeEach(() => {
   mocks.complete.mockReset();
   mocks.fetchServerContextSize.mockReset();
   mocks.supportsVision = true;
+  mocks.backend = "llama.cpp";
+  mocks.countPrompt.mockReset().mockResolvedValue(100);
   mocks.runCommand.mockReset();
   mocks.startCommand.mockReset();
   mocks.tokenize.mockResolvedValue(1);
@@ -135,6 +143,65 @@ beforeEach(() => {
   mocks.settings.toolCallingMode = "compat-gemma4";
   mocks.settings.reasoningBudget = 16384;
   mocks.settings.reasoningEfforts = { Low: "low", Medium: "medium", High: "high" };
+});
+
+describe("vLLM session lifecycle", () => {
+  it.each([false, true])("keeps plan approval tied to completion (interrupted=%s)", async interrupted => {
+    mocks.backend = "vllm";
+    const { ChatSession } = await import("../src/chat/session.js");
+    const { StreamFailure } = await import("../src/llm/completion.js");
+    const record = newRecord();
+    const events: UiEvent[] = [];
+    const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record, emit: event => events.push(event) });
+    mocks.streamChat.mockImplementation(async function* () {
+      yield { kind: "thought", text: "Consider the tests." };
+      yield { kind: "text", text: planText("- Implement the change\n- Run the tests") };
+      expect(record.pendingPlanMessageTs).toBeUndefined();
+      if (interrupted) throw new StreamFailure("Connection lost", { cause: "unexpected_eof", completionEvidence: "none" });
+    });
+    try {
+      await session.sendUserMessage("Plan the change", [], "plan");
+      expect(mocks.countPrompt).toHaveBeenCalled();
+      expect(record.pendingPlanMessageTs !== undefined).toBe(!interrupted);
+      expect(events.some(event => event.kind === "planFinal")).toBe(!interrupted);
+      if (interrupted) expect(record.messages.at(-1)?.interruption?.diagnostics?.cause).toBe("unexpected_eof");
+    } finally { await session.shutdown(); }
+  });
+
+  it("uses exact full-prompt counts and holds multiple native calls for sequential approvals", async () => {
+    mocks.backend = "vllm";
+    mocks.settings.autoapproveReads = false;
+    const ws = await fs.mkdtemp(path.join(os.tmpdir(), "locality-vllm-"));
+    const { ChatSession } = await import("../src/chat/session.js");
+    const record = newRecord();
+    const events: UiEvent[] = [];
+    const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: ws, record, emit: event => events.push(event) });
+    let calls = 0;
+    mocks.streamChat.mockImplementation(async function* (_endpoint, request) {
+      if (++calls === 1) {
+        yield { kind: "toolCall", id: "a", name: "list_dir", argsJson: '{"path":"."}' };
+        yield { kind: "toolCall", id: "b", name: "list_dir", argsJson: '{"path":"."}' };
+      } else {
+        expect(request.messages.filter((message: { role: string }) => message.role === "tool").map((message: { tool_call_id: string }) => message.tool_call_id)).toEqual(["a", "b"]);
+        yield { kind: "text", text: "Both directories checked." };
+      }
+    });
+    const proposals = () => events.filter((event): event is Extract<UiEvent, { kind: "toolCallProposed" }> => event.kind === "toolCallProposed");
+    try {
+      const turn = session.sendUserMessage("Check the directory twice");
+      await vi.waitFor(() => expect(proposals()).toHaveLength(1));
+      expect(proposals()[0].approvalRequired).toBe(true);
+      session.approve(proposals()[0].toolId, true);
+      await vi.waitFor(() => expect(proposals()).toHaveLength(2));
+      session.approve(proposals()[1].toolId, true);
+      await turn;
+      expect(calls).toBe(2);
+      const counted = mocks.countPrompt.mock.calls[0][1];
+      expect(counted.tools.length).toBeGreaterThan(0);
+      expect(counted.messages.some((message: { content: unknown }) => typeof message.content === "string" && message.content.startsWith("<tools>"))).toBe(false);
+      expect(record.messages.at(-1)?.content).toBe("Both directories checked.");
+    } finally { session.cancel(); await session.shutdown(); await fs.rm(ws, { recursive: true, force: true }); }
+  });
 });
 
 function contextActivityIds(events: UiEvent[]): string[] {
@@ -3708,8 +3775,7 @@ describe("ChatSession", () => {
     expect(mocks.streamChat).not.toHaveBeenCalled();
     expect(events.some(event =>
       event.kind === "abort"
-      && event.reason.includes("server is unavailable")
-      && event.reason.includes("/props")
+      && event.reason.includes("Unavailable context size")
     )).toBe(true);
   });
 

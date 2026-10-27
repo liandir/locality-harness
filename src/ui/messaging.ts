@@ -1,3 +1,4 @@
+import type { ServerMetadata, ServerType } from "../llm/serverTypes.js";
 /**
  * Webview commands and presentation messages. Session events and chat data
  * live in shared chat contracts, independently of their host implementations.
@@ -46,7 +47,7 @@ export type SideToExt =
   | { type: "openGithub" }
   | { type: "saveSetting"; key: string; value: unknown }
   | { type: "setReasoningEffort"; effort: ReasoningEffort }
-  | { type: "validateEndpoint"; url: string; requestId?: number }
+  | { type: "validateEndpoint"; url: string; requestId?: number; serverType?: ServerType; apiKey?: string }
   | { type: "validateWebSearch"; endpoint: string; apiKey: string }
   | { type: "editUserSettingsJson" }
   | { type: "editWorkspacePrompts" }
@@ -69,9 +70,10 @@ export type ExtToSide =
   | { type: "webSearchSettings"; endpoint: string; apiKey: string; verified: boolean; error?: string; reset?: boolean }
   | { type: "webSearchValidation"; ok: boolean; error?: string; endpoint?: string }
   | { type: "appInfo"; version: string }
+  | { type: "serverCredential"; endpoint: string; configured: boolean }
   | { type: "chats"; chats: { id: string; title: string; updatedAt: number }[] }
   | { type: "focusTab"; tab: SideTab }
-  | { type: "endpointValidation"; requestId?: number; ok: boolean; error?: string; resolved?: string[]; metadata?: { modelAlias: string; contextSize: number; supportsVision: boolean }; models?: { id: string }[]; selectedModel?: string }
+  | { type: "endpointValidation"; requestId?: number; ok: boolean; error?: string; resolved?: string[]; metadata?: ServerMetadata; models?: { id: string }[]; selectedModel?: string }
   | { type: "settingSaved"; key: string; ok: boolean; error?: string }
   | { type: "openTabs"; tabs: ChatTab[] };
 

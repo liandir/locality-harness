@@ -1,3 +1,4 @@
+import { withServerConnection } from "../../llm/connection.js";
 import { unresolvedInterruption } from "../../chat/interruption.js";
 import { featureStyles } from "../../build/assets.js";
 import { fetchServerMetadata } from "../../llm/client.js";
@@ -199,8 +200,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   private async refreshServerCapabilities(): Promise<boolean> {
     const generation = ++this.serverMetadataGeneration;
-    const { endpoint, model } = readSettings();
-    const endpointKey = `${endpoint}\n${model}`;
+    const { endpoint, model, serverType } = readSettings();
+    const endpointKey = `${endpoint}\n${model}\n${serverType}`;
     if (this.serverMetadataKey !== endpointKey) {
       this.serverMetadataKey = endpointKey;
       this.post({ type: "serverContext" });
@@ -209,12 +210,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     let supported = false;
     let contextSize: number | undefined;
     try {
-      const metadata = await fetchServerMetadata(endpoint, { model });
+      const metadata = await withServerConnection({ endpoint, model, serverType }, () => fetchServerMetadata(endpoint, { model }), true);
       supported = metadata.supportsVision;
       contextSize = metadata.contextSize;
     } catch { /* Unknown capabilities keep image input unavailable. */ }
     const current = readSettings();
-    if (endpoint !== current.endpoint || model !== current.model) return false;
+    if (endpoint !== current.endpoint || model !== current.model || serverType !== current.serverType) return false;
     if (generation === this.serverMetadataGeneration) {
       this.post({ type: "serverContext", contextSize });
       this.post({ kind: "visionCapability", supported });
@@ -384,7 +385,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         if (runtime.removed) return;
         if (event.kind === "visionCapability") {
           const current = readSettings();
-          if (event.endpoint === current.endpoint && event.model === current.model) this.post(event);
+          if (event.endpoint === current.endpoint && event.model === current.model && event.serverType === current.serverType) this.post(event);
           return;
         }
         // A fresh baseline plus this turn's events preserves streamed text and

@@ -1,3 +1,5 @@
+import { configureServerConnections } from "./llm/connection.js";
+import { clearServerCaches, onServerCapabilitiesChange } from "./llm/server.js";
 import { WorkspaceMemory } from "./chat/workspaceMemory.js";
 import * as vscode from "vscode";
 import { SideViewProvider } from "./ui/sideView/provider.js";
@@ -19,6 +21,8 @@ let memory: WorkspaceMemory;
 let storageWatcher: { dispose(): void } | undefined;
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
+  configureServerConnections(() => readSettings(), context.secrets);
+  context.subscriptions.push(onSettingsChange(() => clearServerCaches()));
   let ws = currentWorkspaceRoot();
   if (ws) storage = new ChatStorage(ws);
   memory = new WorkspaceMemory(() => storage, 1000, { reportError: message => { void vscode.window.showErrorMessage(message); } });
@@ -56,6 +60,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   watchStorage();
   context.subscriptions.push(
     memory,
+    onServerCapabilitiesChange(connection => {
+      const current = readSettings();
+      if (connection.endpoint === current.endpoint && connection.model === current.model && connection.serverType === current.serverType) {
+        sideProvider.refreshServerMetadata(); chatProvider.pushSettings();
+      }
+    }),
     { dispose: () => storageWatcher?.dispose() },
     { dispose: () => { void chatProvider.closeAll(); } },
     onSettingsChange(() => memory.settingsChanged()),

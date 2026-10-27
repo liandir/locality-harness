@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 const mocks = vi.hoisted(() => ({
-  settings: { memoryEnabled: true, endpoint: "http://127.0.0.1:8080", model: "test" },
+  settings: { memoryEnabled: true, endpoint: "http://127.0.0.1:8080", model: "test", serverType: "llama.cpp" as "llama.cpp" | "vllm" },
   complete: vi.fn(), tokenize: vi.fn(), context: vi.fn()
 }));
 vi.mock("../src/config/settings.js", () => ({ readSettings: () => mocks.settings }));
@@ -27,6 +27,7 @@ beforeEach(async () => {
   releases = [];
   mocks.settings.memoryEnabled = true;
   mocks.settings.model = "test";
+  mocks.settings.serverType = "llama.cpp";
   mocks.complete.mockReset().mockResolvedValue("Parser uses exact revisions. Verified by tests.");
   mocks.tokenize.mockReset().mockImplementation(async (_endpoint, text: string) => Math.ceil(text.length / 4));
   mocks.context.mockReset().mockResolvedValue(8192);
@@ -821,6 +822,45 @@ describe("durable memory attempts", () => {
 });
 
 describe("memory recovery invalidation", () => {
+  it("preserves retry allowances and the previous summary when a backend switch invalidates a checkpoint", async () => {
+    const { memorySignature, newMemoryAttempt } = await import("../src/chat/memoryJobs.js");
+    const rec = await chat();
+    await memory.dispose();
+    const attempt = newMemoryAttempt(rec, memorySignature(mocks.settings.endpoint, mocks.settings.model, "llama.cpp"), true)!;
+    attempt.retries = 2;
+    attempt.requests = 3;
+    attempt.checkpoint = { summary: "Incompatible checkpoint", offset: 4 };
+    await storage.maintainMemory(rec.id, current => {
+      current.memoryAttempt = attempt;
+      current.memory = { text: "Last successful memory", generatedAt: 1, sourceRevision: transcriptRevision(rec), enabled: true, manual: false };
+      return true;
+    });
+    mocks.settings.serverType = "vllm";
+    mocks.complete.mockRejectedValueOnce(new Error("Model unavailable"));
+    memory = new WorkspaceMemory(() => storage, 1);
+    await vi.waitFor(async () => expect((await memory.list())[0].status).toBe("failed"));
+    const saved = (await storage.load(rec.id))!;
+    expect(saved.memory?.text).toBe("Last successful memory");
+    expect(saved.memoryAttempt).toMatchObject({ retries: 2, requests: 4, signature: memorySignature(mocks.settings.endpoint, mocks.settings.model, "vllm") });
+    expect(saved.memoryAttempt?.checkpoint).toBeUndefined();
+    expect(JSON.parse(mocks.complete.mock.calls[0][1].messages[1].content).priorDraft).toBe("");
+  });
+
+  it("retains a compatible completed legacy llama.cpp checkpoint after reload", async () => {
+    const { legacyMemorySignature, newMemoryAttempt } = await import("../src/chat/memoryJobs.js");
+    const { memoryInput } = await import("../src/chat/memoryGeneration.js");
+    const rec = await chat();
+    await memory.dispose();
+    const attempt = newMemoryAttempt(rec, legacyMemorySignature(mocks.settings.endpoint, mocks.settings.model), true)!;
+    attempt.checkpoint = { summary: "Parser legacy checkpoint", offset: memoryInput(rec).length, complete: true };
+    attempt.retries = 1;
+    await storage.maintainMemory(rec.id, current => { current.memoryAttempt = attempt; return true; });
+    memory = new WorkspaceMemory(() => storage, 1);
+    await generated(rec.id);
+    expect(mocks.complete).not.toHaveBeenCalled();
+    expect((await storage.load(rec.id))?.memoryAttempt?.retries).toBe(1);
+  });
+
   it("discards checkpoints when the model changes", async () => {
     const rec = await chat("Parser source for model invalidation. ".repeat(2000));
     mocks.complete.mockResolvedValueOnce("Parser first checkpoint").mockRejectedValueOnce(new Error("bad response"));

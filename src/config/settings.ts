@@ -1,3 +1,4 @@
+import { normalizeServerType, type ServerType } from "../llm/serverTypes.js";
 import { readFeatureSettings, featureSettingKeys } from "../build/settings.js";
 import * as vscode from "vscode";
 import { DEFAULT_MEMORY_MAX_COUNT, MAX_MEMORY_COUNT } from "../chat/memoryLimits.js";
@@ -14,6 +15,7 @@ export const DEFAULT_COMMIT_MESSAGE_PROMPT =
 
 export interface HarnessSettings {
   endpoint: string;
+  serverType?: ServerType;
   model: string;
   toolCallingMode: ToolCallingProfile;
   temperature: number;
@@ -56,6 +58,7 @@ export function readSettings(): HarnessSettings {
   const cfg = vscode.workspace.getConfiguration(NS);
   const reasoningBudget = cfg.get<unknown>("reasoningBudget");
   return {
+    serverType: normalizeServerType(cfg.get<unknown>("serverType")),
     endpoint: cfg.get<string>("endpoint") ?? "http://localhost:8080/v1",
     model: cfg.get<string>("model")?.trim() || "local",
     toolCallingMode: normalizeToolCallingProfile(cfg.get<unknown>("toolCallingMode")),
@@ -101,6 +104,7 @@ export async function writeSetting<K extends keyof HarnessSettings>(
   scope: "global" | "effective" = "global"
 ): Promise<void> {
   if (!SETTING_KEYS.includes(key)) throw new Error("Setting is unavailable in this edition.");
+  if (key === "serverType" && !["auto", "llama.cpp", "vllm"].includes(String(value))) throw new Error("Choose Auto, llama.cpp, or vLLM.");
   if (key === "reasoningBudget" && !isReasoningBudget(value)) {
     throw new Error("Enter a positive whole number or leave the reasoning budget empty for unlimited reasoning.");
   }
@@ -118,6 +122,7 @@ export async function writeSetting<K extends keyof HarnessSettings>(
 /** Every harness setting key; maps 1:1 to the package.json configuration properties. */
 export const SETTING_KEYS: (keyof HarnessSettings)[] = [
   "endpoint",
+  "serverType",
   "model",
   "toolCallingMode",
   "temperature",

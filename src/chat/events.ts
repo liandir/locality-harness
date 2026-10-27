@@ -1,4 +1,5 @@
 import type { CompletionDiagnostics } from "../llm/completion.js";
+import type { ServerType } from "../llm/serverTypes.js";
 /** Session events shared by the host, feature facades, and webviews. */
 import type { ChatAttachment, ChatMessage, ChatRecord, ChatToolProcess } from "./types.js";
 import type { ChatMode } from "./mode.js";
@@ -89,7 +90,7 @@ export interface ChatResponseDiscarded {
 /** Events the session emits to the chat webview. */
 export type UiEvent =
   | ChatUserMessage
-  | { kind: "visionCapability"; supported: boolean; endpoint?: string; model?: string }
+  | { kind: "visionCapability"; supported: boolean; endpoint?: string; model?: string; serverType?: ServerType }
   | ChatTurnPreparation
   | ChatContextActivity
   | ChatMemoryCreations

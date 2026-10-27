@@ -1,3 +1,4 @@
+import { normalizeServerType } from "../../../llm/serverTypes.js";
 import { renderSettings, renderToolAutoApprovals, clampPercent } from "./settings.js";
 import type { SideViewState } from "./types.js";
 import { escapeHtml as esc } from "../../html.js";
@@ -217,11 +218,13 @@ function bind(): void {
   const endpointInput = root.querySelector<HTMLInputElement>("#endpoint");
   endpointInput?.addEventListener("input", () => {
     state.endpointDraft = endpointInput.value;
+    state.hasServerApiKey = false;
     state.endpointMsg = undefined;
     const notice = root.querySelector(".validation");
     if (notice) { notice.textContent = ""; notice.className = "validation"; }
   });
-  endpointInput?.addEventListener("keydown", event => {
+  const keyInput = root.querySelector<HTMLInputElement>("#serverApiKey");
+  for (const input of [endpointInput, keyInput]) input?.addEventListener("keydown", event => {
     if (event.key === "Enter") { event.preventDefault(); root.querySelector<HTMLButtonElement>("#saveEndpoint")?.click(); }
   });
   root.querySelector("#saveEndpoint")?.addEventListener("click", () => {
@@ -234,9 +237,16 @@ function bind(): void {
     state.endpointMsg = { text: "Reading server metadata…" };
     state.endpointMetadata = undefined;
     state.serverModels = [];
+    const apiKey = state.serverApiKeyDraft?.trim() || undefined;
+    state.serverApiKeyDraft = undefined;
+    if (keyInput) keyInput.value = "";
     render();
-    send({ type: "validateEndpoint", url, requestId: state.endpointRequestId });
+    send({ type: "validateEndpoint", url, requestId: state.endpointRequestId, serverType: normalizeServerType(state.settings.serverType), apiKey });
   });
+  keyInput?.addEventListener("input", event => {
+    state.serverApiKeyDraft = (event.target as HTMLInputElement).value;
+  });
+  bindSetting("serverType", "change", v => v);
   bindSetting("model", "change", v => v);
   bindSetting("toolCallingMode", "change", v => v);
   bindSetting("temperature", "change", v => Number(v));
@@ -392,6 +402,9 @@ window.addEventListener("message", ev => {
     case "reasoningEffort": state.reasoningEffort = msg.effort; state.reasoningEffortError = undefined; render(); break;
     case "chats": state.chats = msg.chats; render(); break;
     case "focusTab": state.tab = msg.tab; render(); break;
+    case "serverCredential":
+      if (msg.endpoint === (state.endpointDraft ?? state.settings.endpoint)) { state.hasServerApiKey = msg.configured; render(); }
+      break;
     case "endpointValidation":
       if (msg.requestId !== state.endpointRequestId && (state.endpointTesting || msg.requestId !== undefined)) break;
       state.endpointTesting = false;

@@ -20,11 +20,11 @@ This guide covers model setup, everyday use, settings, and saved chats.
 Click the Locality icon in the Activity Bar, then switch to the **Settings**
 tab in the side panel. Configure the server and tool calling before chatting:
 
-- **Server URL** — the address of your `llama.cpp` server, e.g.
+- **Server URL** — the address of your llama.cpp or vLLM server, e.g.
   `http://127.0.0.1:8080/v1` or `http://192.168.1.50:8080/v1`. It must be
   `localhost` or a private IP literal; DNS hostnames such as `nas.local` are
   refused. Click **Set** to validate the endpoint, list `/v1/models`, and read
-  `/props` metadata. Choose the model below the URL; its reported alias and
+  backend-specific metadata. Choose the model below the URL; its reported alias and
   context length are shown alongside it.
 - **Tool calling** — defaults to **Native server only**, which requires
   OpenAI-compatible structured calls from the server. The Gemma 4, Qwen 3, Muse
@@ -40,7 +40,62 @@ commands) have sensible defaults and can be revisited later.
 For edition-specific features, see [Safe-list configuration](tools.md#safe-list-configuration)
 and [Advanced web search](tools.md#advanced-web-search).
 
-### Muse Glimmer server requirements
+### vLLM setup (v2.2.0)
+
+Set **Server type** to **Automatic**, enter a local/LAN vLLM URL such as
+`http://127.0.0.1:8000/v1`, then click **Set**. Explicit **llama.cpp** and **vLLM**
+overrides are available when a proxy obscures server identification. Root URLs,
+`/v1` URLs, and proxy prefixes are supported. Choose the advertised model ID;
+served aliases and LoRA entries are supported.
+
+For a reasoning and tool-capable Qwen3 server, the vLLM 0.32.0 setup is:
+
+```bash
+vllm serve Qwen/Qwen3-4B --host 127.0.0.1 --port 8000 \
+  --max-model-len 32768 --enable-auto-tool-choice \
+  --tool-call-parser hermes --reasoning-parser qwen3
+```
+
+Choose **Native server only** in Locality. Other models need their corresponding
+[tool parser](https://docs.vllm.ai/en/v0.32.0/features/tool_calling/) and
+[reasoning configuration](https://docs.vllm.ai/en/v0.32.0/features/reasoning_outputs/).
+Reasoning effort values must be supported by the served model. Finite reasoning
+budgets use `thinking_token_budget` and require a configured reasoning parser or
+reasoning boundaries; leave the budget empty for unlimited reasoning. Models
+whose templates cannot disable thinking may still reason when the switch is off.
+
+If the server uses `--api-key`, enter its key in the masked **API key** field and
+click **Set** beside it. A successful connection saves the new or replacement key
+in VS Code SecretStorage. An empty field keeps the saved key. Keys are scoped to
+the server URL and proxy prefix and are not stored in settings or chat history.
+
+vLLM image capability initially reads **Checked on first image**. Locality permits
+image attachments and preprocesses the actual prompt before generating. A
+successful image check confirms support; a text-only model produces a useful
+error. Invalid files and server outages do not permanently disable images.
+The complete vLLM prompt, tools and image tokens are counted on the server for
+the context guard, reserving up to 4,096 tokens (at most a quarter of the context)
+for the answer. Auxiliary requests reserve their explicit output limits.
+vLLM uses the normal waiting indicator without llama.cpp's
+prompt-progress percentage.
+
+Chat, planning, tools, compaction, memory, titles, and commit messages use the
+same configured connection in every edition. Changing the connection applies
+to subsequent turns; background memory work suspends and resumes with compatible
+checkpoints. The [developer guide](developer-guide.md#live-server-validation)
+records the compatibility baseline and how to run live acceptance tests.
+
+Connection troubleshooting:
+
+- **401/403:** set or replace the API key for this server.
+- **Could not identify:** select an explicit backend; a missing `/props` alone
+  does not identify a server as vLLM.
+- **Native tools rejected:** enable automatic tool choice and the model's parser.
+- **Reasoning budget rejected:** configure reasoning boundaries/parser or clear
+  the budget. Locality does not silently discard an explicit finite budget.
+- **Context exceeded:** compact the chat or increase the server's `--max-model-len`.
+
+### Muse Glimmer with llama.cpp
 
 Muse Glimmer requires llama.cpp build `b10353` or newer and `--jinja`. Its
 template emits `to=self` reasoning, `to=user` answers, and ATEM tool calls;
@@ -89,7 +144,7 @@ stops running chats.
 The brain button selects reasoning behavior per chat. **None** sends
 `chat_template_kwargs.enable_thinking: false`; **Default** sends no
 `reasoning_effort` or thinking override. Additional choices come from the
-`reasoningEfforts` setting and send its configured value as llama.cpp
+`reasoningEfforts` setting and send its configured value as the server's
 `reasoning_effort`. This is independent of the numeric reasoning budget.
 
 For example, the default `settings.json` mapping is:
@@ -206,7 +261,7 @@ from the staged diff.
 
 - If staged changes exist, hover text reads **Generate commit message with
   Locality**. Click the button to send the staged diff to your configured
-  local `llama.cpp` endpoint and write the generated message into Git's commit
+  local model endpoint and write the generated message into Git's commit
   input box.
 - If nothing is staged, hover text reads **Please stage changes before
   generating a commit message.** Clicking the button briefly wiggles the icon.
@@ -315,8 +370,9 @@ Only settings supported by the installed edition are available.
 
 | Setting | Default | What it does |
 | --- | --- | --- |
-| `endpoint` | `http://localhost:8080/v1` | URL of your llama.cpp server. Use `localhost` or a private IP literal such as `http://127.0.0.1:8080/v1` or `http://192.168.1.50:8080/v1`. |
-| `model` | `local` | Model id sent with requests. The Settings view replaces this fallback with a selection from llama.cpp's `/v1/models` response. |
+| `serverType` | `auto` | Automatically identify the server, or select `llama.cpp` or `vllm` explicitly. |
+| `endpoint` | `http://localhost:8080/v1` | URL of your llama.cpp or vLLM server. Use `localhost` or a private IP literal such as `http://127.0.0.1:8080/v1` or `http://192.168.1.50:8080/v1`. |
+| `model` | `local` | Model id sent with requests. Choose a served model or alias from `/v1/models`. |
 | `toolCallingMode` | `native` | Select `native`, `compat-gemma4`, `compat-qwen3`, `compat-muse-glimmer`, or `compat-gpt-oss`. Compatibility profiles are native-first and add only the selected family's recovery behavior. |
 | `temperature` | `0.8` | Sampling temperature for chat requests. Lower is more deterministic, higher more varied. |
 | `topK` | `40` | Top-k sampling: keep only the K most likely tokens at each step (`0` disables). |
@@ -357,8 +413,8 @@ defaults** button that returns every setting above — including the server URL 
 to its default. It asks for confirmation first.
 
 The sampling settings (`temperature`, `topK`, `topP`) are sent with every chat
-request, so they override whatever `--temp`, `--top-k`, or `--top-p` flags the
-`llama.cpp` server was started with. Commit-message generation also uses the
+request, so they override the server's sampling defaults for either backend.
+Commit-message generation also uses the
 configured temperature. Titles, memories, and context compaction keep their own
 fixed low-temperature settings.
 

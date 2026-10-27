@@ -123,4 +123,5 @@ export interface ChatRecord {
   totalTokens: number;
   /** Model whose tokenizer produced the cached per-message token counts. */
   tokenizerModel?: string;
+  tokenizerIdentity?: string;
 }

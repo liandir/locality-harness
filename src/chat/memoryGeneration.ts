@@ -77,7 +77,7 @@ export async function generateMemory(
       let text: string;
       try {
         text = await step("generation", () => complete(endpoint, {
-          model, background: true, temperature: 0.1, max_tokens: outputTokens, thinking_budget_tokens: 0,
+          model, purpose: "auxiliary", background: true, temperature: 0.1, max_tokens: outputTokens, thinking_budget_tokens: 0,
           chat_template_kwargs: { enable_thinking: false },
           messages: [{ role: "system", content: instructions[attempt] },
             { role: "user", content: JSON.stringify({ priorDraft: running, conversation }) }]

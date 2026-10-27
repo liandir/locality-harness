@@ -1,3 +1,5 @@
+import type { ServerType } from "../llm/serverTypes.js";
+import { serverRoot } from "../llm/connection.js";
 import { createHash, randomUUID } from "node:crypto";
 import { StreamFailure, type CompletionDiagnostics } from "../llm/completion.js";
 import { NetworkPolicyError } from "../network/safeFetch.js";
@@ -11,9 +13,12 @@ export const MEMORY_MAX_RETRIES = 2;
 export type { MemoryAttempt, MemoryCheckpoint, MemoryDiagnostic, MemoryStage } from "./memoryJobTypes.js";
 import type { MemoryAttempt, MemoryDiagnostic, MemoryStage } from "./memoryJobTypes.js";
 
-export function memorySignature(endpoint: string, model: string): string {
+export function legacyMemorySignature(endpoint: string, model: string): string {
   // No endpoint credentials are persisted. Bump the version when the input/prompt changes.
   return createHash("sha256").update(JSON.stringify(["memory-v2", endpoint, model])).digest("hex");
+}
+export function memorySignature(endpoint: string, model: string, serverType: ServerType = "llama.cpp"): string {
+  return createHash("sha256").update(JSON.stringify(["memory-v3", serverRoot(endpoint), model, serverType])).digest("hex");
 }
 export function pendingMemory(attempt?: MemoryAttempt): attempt is MemoryAttempt {
   return !!attempt && ["queued", "generating", "retry_wait"].includes(attempt.state);

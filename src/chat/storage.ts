@@ -308,12 +308,14 @@ export class ChatStorage {
       forked.contextMessages = structuredClone(rec.contextMessages);
       forked.initialMemories = rec.initialMemories && structuredClone(rec.initialMemories);
       forked.tokenizerModel = rec.tokenizerModel;
+      forked.tokenizerIdentity = rec.tokenizerIdentity;
     } else if (rec.contextMessages) {
       // Transcript token caches can predate the model used by the compacted
       // context. Historical forks must count their rebuilt context afresh.
       for (const message of forked.messages) delete message.tokens;
     } else {
       forked.tokenizerModel = rec.tokenizerModel;
+      forked.tokenizerIdentity = rec.tokenizerIdentity;
     }
     forked.totalTokens = modelMessages(forked).reduce(
       (total, message) => total + (message.tokens ?? 0),

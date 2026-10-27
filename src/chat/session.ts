@@ -1,3 +1,7 @@
+import { capturedConnectionSettings, connectionIdentity, withServerConnection } from "../llm/connection.js";
+import { countServerPrompt, outputTokenReserve } from "../llm/server.js";
+import type { ChatCompletionRequest } from "../llm/client.js";
+import type { ServerBackend } from "../llm/serverTypes.js";
 import { pendingPlanTimestamp } from "./planning.js";
 import { StreamFailure, type CompletionDiagnostics } from "../llm/completion.js";
 import { unresolvedInterruption } from "./interruption.js";
@@ -192,7 +196,9 @@ export class ChatSession {
   // effective limit is min(configured, server). Refreshed before each request.
   private serverContextSize?: number;
   private supportsVision = false;
-  private systemPromptTokenCache?: { text: string; tokens: number };
+  private serverBackend: ServerBackend = "llama.cpp";
+  private serverMetadataError = "";
+  private systemPromptTokenCache?: { text: string; identity: string; tokens: number };
   // Last AGENTS.md content loaded for this session. Refreshed (mtime-cached) at
   // the start of every prompt build so the sync buildPromptMessages can read it.
   private agentsMdCache?: string;
@@ -357,8 +363,12 @@ export class ChatSession {
       ? `\n<tools>${JSON.stringify(asOpenAiTools(toolsForMode(this.turnMode(), "native", readSettings().memoryEnabled, this.supportsVision, readSettings())))}</tools>`
       : "";
     const countedText = text + catalog;
-    if (this.systemPromptTokenCache?.text !== countedText) {
-      this.systemPromptTokenCache = { text: countedText, tokens: await tokenize(s.endpoint, `<|system|>${countedText}`, s.model) };
+    const identity = connectionIdentity(s.endpoint, s.model);
+    if (this.systemPromptTokenCache?.text !== countedText || this.systemPromptTokenCache.identity !== identity) {
+      let estimated = false;
+      const tokens = await tokenize(s.endpoint, `<|system|>${countedText}`, s.model, { onEstimate: () => { estimated = true; } });
+      this.systemPromptTokenCache = estimated ? undefined : { text: countedText, identity, tokens };
+      return tokens;
     }
     return this.systemPromptTokenCache.tokens;
   }
@@ -396,12 +406,15 @@ export class ChatSession {
     try {
       const metadata = await fetchServerMetadata(s.endpoint, { model: s.model, force: this.serverContextSize === undefined });
       this.serverContextSize = metadata.contextSize;
+      this.serverBackend = metadata.backend ?? "llama.cpp";
+      this.serverMetadataError = "";
       this.supportsVision = metadata.supportsVision;
-      this.emit({ kind: "visionCapability", supported: this.supportsVision, endpoint: s.endpoint, model: s.model });
+      this.emit({ kind: "visionCapability", supported: this.supportsVision, endpoint: s.endpoint, model: s.model, serverType: s.serverType });
       return true;
-    } catch {
+    } catch (error) {
+      this.serverMetadataError = error instanceof Error ? error.message : "The model server is unavailable.";
       this.supportsVision = false;
-      this.emit({ kind: "visionCapability", supported: false, endpoint: s.endpoint, model: s.model });
+      this.emit({ kind: "visionCapability", supported: false, endpoint: s.endpoint, model: s.model, serverType: s.serverType });
       return false;
     }
   }
@@ -479,7 +492,7 @@ export class ChatSession {
   private async runCompact(source: "manual" | "auto", options: { reload: boolean }): Promise<boolean> {
     if (this.disposed) return false;
     const end = beginForeground();
-    const task = this.runCompactForeground(source, options);
+    const task = withServerConnection(readSettings(), () => this.runCompactForeground(source, options));
     this.compactTasks.add(task);
     try { return await task; } finally { this.compactTasks.delete(task); end(); }
   }
@@ -493,9 +506,9 @@ export class ChatSession {
       this.emitCompactStatus();
       return false;
     }
-    const s = readSettings();
+    const s = capturedConnectionSettings(readSettings());
     if (!(await this.refreshServerContextSize(s))) {
-      this.emit({ kind: "notice", text: "Could not read the server context length from llama.cpp /props. Save a valid endpoint in Settings and try again." });
+      this.emit({ kind: "notice", text: this.serverMetadataError || "Could not read the server context length. Verify the endpoint in Settings." });
       return false;
     }
     await recomputeTokens(s.endpoint, this.record, s.model);
@@ -807,7 +820,7 @@ export class ChatSession {
       this.emit({ kind: "turnWorkStarted", messageId, startedAt: Date.now(), continued: true });
       await this.saveRecord();
       await ready();
-      const s = readSettings();
+      const s = capturedConnectionSettings(readSettings());
       if (await this.prepareContextForModelRequest(s, { reload: false })) await this.runTurn(s, messageId);
     });
     this.activeTurn = turn;
@@ -839,11 +852,11 @@ export class ChatSession {
       error => ({ ok: false as const, error })
     );
     try {
-      await run(async () => {
+      await withServerConnection(readSettings(), () => run(async () => {
         const result = await acquired;
         signal.throwIfAborted();
         if (!result.ok) throw result.error;
-      }, waitingForMemory);
+      }, waitingForMemory), true);
     } catch (error) {
       this.emit({ kind: "abort", reason: signal.aborted ? "Stopped by user." : (error instanceof Error ? error.message : String(error)) || "The request stopped unexpectedly.", diagnostics: signal.aborted ? { cause: "user_cancel" } : error instanceof StreamFailure ? error.diagnostics : undefined });
     } finally {
@@ -878,7 +891,7 @@ export class ChatSession {
   ): Promise<void> {
     const messageId = `m_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     this.emit({ kind: "turnPreparing", reason: waitingForMemory ? "memory" : "server" });
-    const s = readSettings();
+    const s = capturedConnectionSettings(readSettings());
     const isFirstMessage = this.record.messages.length === 0;
     if (isFirstMessage) {
       this.record.toolCallingMode = s.toolCallingMode;
@@ -942,7 +955,7 @@ export class ChatSession {
     this.refreshMemoryVisibility();
     this.emit({ kind: "turnWorkStarted", messageId: responseMessageId, startedAt: workStartedAt });
 
-    const s = readSettings();
+    const s = capturedConnectionSettings(readSettings());
     if (index === 0) {
       await this.loadInitialMemories(text);
       this.queueTitleGeneration(text || `Attachment: ${edited.attachments?.[0]?.fileName ?? "file"}`, s, text);
@@ -1116,11 +1129,11 @@ export class ChatSession {
       return false;
     }
     if (!(await this.refreshServerContextSize(s))) {
-      this.emit({ kind: "abort", reason: "The LLM server is unavailable or its /props response is invalid. Check that llama.cpp is running, then verify the endpoint in Settings and try again." });
+      this.emit({ kind: "abort", reason: this.serverMetadataError || "The model server is unavailable. Verify the endpoint in Settings." });
       return false;
     }
     if (!this.supportsVision && modelMessages(this.record).some(message => message.attachments?.some(isImageAttachment))) {
-      this.emit({ kind: "abort", reason: "The selected server model has not reported vision support. Load its matching --mmproj or remove image inputs before retrying." });
+      this.emit({ kind: "abort", reason: "The selected server model has not reported vision support. Choose a vision-capable server model or remove image inputs before retrying." });
       return false;
     }
     await recomputeTokens(s.endpoint, this.record, s.model);
@@ -1129,11 +1142,11 @@ export class ChatSession {
     this.emit({ kind: "tokens", total: this.record.totalTokens + sysTokens, limit });
     this.emitCompactStatus();
 
-    if (s.autoCompact && this.record.totalTokens + sysTokens >= autoCompactTriggerTokens(limit, s.autoCompactThresholdPercent)) {
+    if (this.serverBackend !== "vllm" && s.autoCompact && this.record.totalTokens + sysTokens >= autoCompactTriggerTokens(limit, s.autoCompactThresholdPercent)) {
       await this.runCompact("auto", options);
     }
 
-    if (this.record.totalTokens + sysTokens >= limit) {
+    if (this.serverBackend !== "vllm" && this.record.totalTokens + sysTokens >= limit) {
       this.emit({ kind: "abort", reason: contextWindowOverflowMessage(this.record.totalTokens + sysTokens, limit) });
       return false;
     }
@@ -1151,7 +1164,7 @@ export class ChatSession {
     if (this.toolProtocol === "legacy" && modelMessages(this.record).some(message => message.attachments?.some(isImageAttachment))) {
       this.emit({
         kind: "abort",
-        reason: "Image attachments require native llama.cpp multimodal messages. This chat has switched to a legacy tool adapter; restart llama-server with --jinja, the matching --mmproj, and native tool support, then retry in a new chat."
+        reason: "Image attachments require native multimodal messages. This chat uses a legacy tool adapter. Configure native tool and vision support on the server, then retry in a new chat."
       });
       return undefined;
     }
@@ -1161,23 +1174,41 @@ export class ChatSession {
     // re-rendered tool calls + wrapped results), not the sum of stored
     // messages, using llama.cpp's tokenizer. This is the number the server
     // sees, so the guard no longer passes while the server overflows.
-    let promptTok = await promptTokens(s.endpoint, this.messagesForTokenCount(messages), s.templateOverheadTokensPerMessage, s.model);
-    if (s.autoCompact && promptTok >= autoCompactTriggerTokens(limit, s.autoCompactThresholdPercent)) {
+    let promptTok = await this.countRequestPrompt(s, messages);
+    const promptLimit = limit - (this.serverBackend === "vllm" ? outputTokenReserve(limit) : 0);
+    if (s.autoCompact && promptTok >= Math.min(promptLimit, autoCompactTriggerTokens(limit, s.autoCompactThresholdPercent))) {
       const compacted = await this.runCompact("auto", options);
       if (compacted) {
         messages = await this.buildPromptMessages();
         if (options.repairNote) messages = withPromptRepair(messages, options.repairNote);
-        promptTok = await promptTokens(s.endpoint, this.messagesForTokenCount(messages), s.templateOverheadTokensPerMessage, s.model);
+        promptTok = await this.countRequestPrompt(s, messages);
       }
     }
 
     this.emit({ kind: "tokens", total: promptTok, limit });
-    if (promptTok >= limit) {
-      this.emit({ kind: "abort", reason: promptOverflowMessage(promptTok, limit) });
+    if (promptTok >= promptLimit) {
+      this.emit({ kind: "abort", reason: promptOverflowMessage(promptTok, promptLimit) });
       return undefined;
     }
 
     return { messages, tokens: promptTok };
+  }
+
+  private generationRequest(s: HarnessSettings, messages: PromptMessage[]): ChatCompletionRequest {
+    return {
+      model: s.model, messages, temperature: s.temperature, top_k: s.topK, top_p: s.topP,
+      thinking_budget_tokens: this.turnReasoningEffort() === REASONING_NONE ? 0 : s.reasoningBudget ?? -1,
+      ...reasoningRequestOverrides(this.turnReasoningEffort(), s.reasoningEfforts),
+      tools: this.toolProtocol === "native" ? asOpenAiTools(toolsForMode(this.turnMode(), "native", readSettings().memoryEnabled, this.supportsVision, readSettings())) : undefined,
+      tool_choice: "auto", parallel_tool_calls: false, return_progress: true
+    };
+  }
+
+  private async countRequestPrompt(s: HarnessSettings, messages: PromptMessage[]): Promise<number> {
+    if (this.serverBackend === "vllm") {
+      return (await countServerPrompt(s.endpoint, this.generationRequest(s, messages), this.abort?.signal, false))!;
+    }
+    return await promptTokens(s.endpoint, this.messagesForTokenCount(messages), s.templateOverheadTokensPerMessage, s.model);
   }
 
   private messagesForTokenCount(messages: PromptMessage[]): PromptMessage[] {
@@ -1523,21 +1554,10 @@ export class ChatSession {
       const responseAbort = new AbortController();
       this.responseAbort = responseAbort;
       try {
-        const reasoningOverrides = reasoningRequestOverrides(this.turnReasoningEffort(), s.reasoningEfforts);
         for await (const chunk of streamChat(
           s.endpoint,
           {
-            model: s.model,
-            messages,
-            temperature: s.temperature,
-            top_k: s.topK,
-            top_p: s.topP,
-            thinking_budget_tokens: this.turnReasoningEffort() === REASONING_NONE ? 0 : s.reasoningBudget ?? -1,
-            ...reasoningOverrides,
-            tools: this.toolProtocol === "native" ? asOpenAiTools(toolsForMode(this.turnMode(), "native", readSettings().memoryEnabled, this.supportsVision, readSettings())) : undefined,
-            tool_choice: "auto",
-            parallel_tool_calls: false,
-            return_progress: true,
+            ...this.generationRequest(s, messages),
             onResponseAccepted: () => {
               // HTTP headers can arrive while this request is still queued.
               // Keep a title wait until prompt progress or model output proves
@@ -1598,7 +1618,7 @@ export class ChatSession {
             ) {
               this.emit({
                 kind: "abort",
-                reason: "The server leaked model-native tool or channel tokens while Native server only is selected. Update the server and start llama-server with --jinja, or choose the matching compatibility profile."
+                reason: "The server leaked model-native tool or channel tokens while Native server only is selected. Configure native server tool parsing (llama.cpp --jinja; vLLM --enable-auto-tool-choice and --tool-call-parser), or choose the matching compatibility profile."
               });
               aborted = true;
               break;
@@ -1608,7 +1628,7 @@ export class ChatSession {
               this.emit({
                 kind: "notice",
                 text: "The model emitted reasoning even though Activate Reasoning is off. " +
-                  "If llama-server was started with a positive --reasoning-budget, that fixed server value overrides per-request budgets; " +
+                  (this.serverBackend === "llama.cpp" ? "If llama-server was started with a positive --reasoning-budget, that fixed server value overrides per-request budgets; " : "Server reasoning configuration may override this request; ") +
                   "otherwise this model's chat template may not support disabling reasoning."
               });
             }
@@ -1675,7 +1695,7 @@ export class ChatSession {
           ) {
             this.emit({
               kind: "abort",
-              reason: "The server leaked model-native tool or channel tokens while Native server only is selected. Update the server and start llama-server with --jinja, or choose the matching compatibility profile."
+              reason: "The server leaked model-native tool or channel tokens while Native server only is selected. Configure native server tool parsing (llama.cpp --jinja; vLLM --enable-auto-tool-choice and --tool-call-parser), or choose the matching compatibility profile."
             });
             aborted = true;
             break;
@@ -1760,12 +1780,12 @@ export class ChatSession {
           }
         }
         if (e instanceof VisionUnsupportedError) {
-          const muse = compatibilityFamily(this.record.toolCallingMode) === "muse-glimmer";
+          const muse = this.serverBackend === "llama.cpp" && compatibilityFamily(this.record.toolCallingMode) === "muse-glimmer";
           this.emit({
             kind: "abort",
             reason: muse
               ? "Muse Glimmer image input requires llama.cpp b10353 or newer, --jinja, and --mmproj mmproj-Muse-Glimmer-30B-Q4_K_M.gguf. Verify that the projector matches the loaded model."
-              : "The llama.cpp server rejected image input. Load a vision-capable model with its matching --mmproj projector and retry."
+              : "The server rejected image input. Choose a vision-capable model and verify its server configuration."
           });
           aborted = true;
           break;
@@ -1779,7 +1799,7 @@ export class ChatSession {
             this.toolProtocol = "legacy";
             this.emit({
               kind: "notice",
-              text: `This server rejected native tool calling. Using the ${compatibilityFamilyLabel(fallbackFamily)} legacy adapter for this chat; start llama-server with --jinja and a tool-aware template to restore structured calls.`
+              text: `This server rejected native tool calling. Using the ${compatibilityFamilyLabel(fallbackFamily)} legacy adapter for this chat; ${this.serverBackend === "vllm" ? "configure --enable-auto-tool-choice and --tool-call-parser" : "start llama-server with --jinja and a tool-aware template"} to restore structured calls.`
             });
             continue;
           }
@@ -1787,8 +1807,8 @@ export class ChatSession {
           this.emit({
             kind: "abort",
             reason: muse
-              ? "Muse Glimmer requires native server tool support. Use llama.cpp build b10353 or newer, start llama-server with --jinja, and do not configure <|eom|> as a stop token."
-              : "The server rejected structured tool calling required by Native server only. Start llama-server with --jinja and a tool-aware chat template, or select a compatibility profile."
+              ? (this.serverBackend === "llama.cpp" ? "Muse Glimmer requires native server tool support. Use llama.cpp build b10353 or newer, start llama-server with --jinja, and do not configure <|eom|> as a stop token." : "Muse Glimmer requires native server tool support. Configure the vLLM tool parser and preserve end-of-message tokens.")
+              : `The server rejected structured tool calling required by Native server only. ${this.serverBackend === "vllm" ? "Configure --enable-auto-tool-choice and --tool-call-parser" : "Start llama-server with --jinja and a tool-aware chat template"}, or select a compatibility profile.`
           });
           aborted = true;
           break;
@@ -2891,7 +2911,7 @@ function contextWindowOverflowMessage(tokens: number, limit: number): string {
   return [
     `Context window guard: context is ${tokens} / ${limit} tokens.`,
     `The request was not sent to the model because it would exceed the context window.`,
-    `Compact context, reduce recent tool output, or restart llama.cpp with a larger --ctx-size before continuing.`
+    `Compact context, reduce recent tool output, or increase the server context (--ctx-size for llama.cpp; --max-model-len for vLLM) before continuing.`
   ].join("\n");
 }
 
@@ -2909,8 +2929,8 @@ function looksLikeLeakedNativeProtocol(text: string): boolean {
 function promptOverflowMessage(tokens: number, limit: number): string {
   return [
     `Context window guard: the rendered prompt is ${tokens} / ${limit} tokens.`,
-    `The request was not sent to the model because llama.cpp would reject it.`,
-    `Compact context, reduce recent tool output, or restart llama.cpp with a larger --ctx-size before continuing.`
+    `The request was not sent to the model because it exceeds the model server context.`,
+    `Compact context, reduce recent tool output, or increase the server context (--ctx-size for llama.cpp; --max-model-len for vLLM) before continuing.`
   ].join("\n");
 }
 

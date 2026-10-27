@@ -1,3 +1,7 @@
+import { withServerConnection } from "../llm/connection.js";
+import { resolvedConnection } from "../llm/server.js";
+import { legacyMemorySignature } from "./memoryJobs.js";
+import type { ServerType } from "../llm/serverTypes.js";
 import { generateMemory, memoryInput, MemoryYield } from "./memoryGeneration.js";
 export { generateMemory } from "./memoryGeneration.js";
 import { randomUUID } from "node:crypto";
@@ -24,7 +28,7 @@ class SupersededMemory extends Error {}
 
 export class WorkspaceMemory {
   private queue = new Map<string, MemoryAttempt>();
-  private active?: { id: string; controller: AbortController; endpoint: string; model: string };
+  private active?: { id: string; controller: AbortController; endpoint: string; model: string; serverType?: ServerType };
   private timer?: ReturnType<typeof setTimeout>;
   private epoch = 0;
   private disposed = false;
@@ -115,7 +119,7 @@ export class WorkspaceMemory {
         if (expectedAttemptId && previous && memorySourceMatches(rec, previous)) {
           attempt = { ...previous, id: randomUUID(), state: "queued", retries: 0, activeMs: 0, startedAt: undefined,
             retryAt: undefined, diagnostic: undefined, updatedAt: Date.now() };
-        } else attempt = newMemoryAttempt(rec, memorySignature(settings.endpoint, settings.model), regenerate, messageTs);
+        } else attempt = newMemoryAttempt(rec, memorySignature(settings.endpoint, settings.model, settings.serverType), regenerate, messageTs);
         if (!attempt) return false;
         // Coalesce duplicate automatic admissions without resetting a durable retry budget.
         if (!regenerate && pendingMemory(rec.memoryAttempt) && rec.memoryAttempt.sourceRevision === attempt.sourceRevision) return false;
@@ -199,7 +203,7 @@ export class WorkspaceMemory {
     })());
   }
   settingsChanged(): void {
-    if (this.active && !settingsStillMatch(this.active.endpoint, this.active.model)) this.active.controller.abort();
+    if (this.active && !settingsStillMatch(this.active.endpoint, this.active.model, this.active.serverType)) this.active.controller.abort();
     this.schedule(); this.changed();
   }
   /** Stop new work immediately, then finish admissions, restoration and in-flight storage writes. */
@@ -215,6 +219,10 @@ export class WorkspaceMemory {
     this.timer = setTimeout(() => { this.timer = undefined; this.runTask = this.run(); }, Math.max(this.idleDelayMs, earliest - Date.now()));
   }
   private async run(): Promise<void> {
+    const settings = readSettings();
+    return withServerConnection(settings, () => this.runConnected(settings), true);
+  }
+  private async runConnected(settings: ReturnType<typeof readSettings>): Promise<void> {
     if (this.disposed || this.active || foregroundBusy() || this.waitingTurns) return;
     const storage = this.getStorage();
     const next = [...this.queue.entries()].find(([, a]) => !a.retryAt || a.retryAt <= Date.now());
@@ -223,8 +231,7 @@ export class WorkspaceMemory {
     this.queue.delete(id);
     const controller = new AbortController();
     const epoch = this.epoch;
-    const settings = readSettings();
-    const active = { id, controller, endpoint: settings.endpoint, model: settings.model };
+    const active = { id, controller, endpoint: settings.endpoint, model: settings.model, serverType: settings.serverType };
     this.active = active;
     let attempt = structuredClone(queued);
     let stage: "generation" | "storage" = "storage";
@@ -256,9 +263,13 @@ export class WorkspaceMemory {
         });
         return;
       }
-      const signature = memorySignature(settings.endpoint, settings.model);
+      const connection = await resolvedConnection(settings.endpoint, settings.model, controller.signal).catch(error => {
+        throw new MemoryFailure(memoryFailure(error, "metadata", attempt.requests));
+      });
+      const signature = memorySignature(settings.endpoint, settings.model, connection.backend);
+      if (connection.backend === "llama.cpp" && attempt.signature === legacyMemorySignature(settings.endpoint, settings.model)) attempt.signature = signature;
       if (signature !== attempt.signature) {
-        attempt = { ...attempt, signature, checkpoint: undefined, shorterAttempt: 0, retries: 0, requests: 0, activeMs: 0 };
+        attempt = { ...attempt, signature, checkpoint: undefined, shorterAttempt: 0 };
       }
       const source = { ...rec, messages: rec.messages.slice(0, attempt.sourceLength) };
       if (attempt.checkpoint?.complete && attempt.checkpoint.offset !== memoryInput(source).length) {
@@ -354,7 +365,7 @@ export class WorkspaceMemory {
     const settings = readSettings();
     if (typeof text !== "string" || text.length > 20000) throw new Error("Memory text is too long.");
     text = redactMemorySecrets(text.trim());
-    if (!text || await countTokens(settings.endpoint, text, settings.model, { exact: true }) > MEMORY_SUMMARY_TOKENS) {
+    if (!text || await withServerConnection(settings, () => countTokens(settings.endpoint, text, settings.model, { exact: true }), true) > MEMORY_SUMMARY_TOKENS) {
       throw new Error(`Enter a non-empty memory of at most ${MEMORY_SUMMARY_TOKENS} tokens.`);
     }
     const saved = await storage.updateMemory(id, rec => {
@@ -384,8 +395,8 @@ export class WorkspaceMemory {
 function emptyMemory(rec: ChatRecord): ChatMemory {
   return { text: "", sourceRevision: transcriptRevision(rec), generatedAt: 0, enabled: true, manual: false };
 }
-function settingsStillMatch(endpoint: string, model: string): boolean {
-  const settings = readSettings(); return settings.endpoint === endpoint && settings.model === model;
+function settingsStillMatch(endpoint: string, model: string, serverType?: ServerType): boolean {
+  const settings = readSettings(); return settings.endpoint === endpoint && settings.model === model && settings.serverType === serverType;
 }
 
 export async function activeSnapshots(storage: ChatStorage, snapshots: MemorySnapshot[]): Promise<MemorySnapshot[]> {

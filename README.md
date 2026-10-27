@@ -17,14 +17,14 @@
   <a href="docs/user-guide.md">User guide</a>
 </p>
 
-Locality connects VS Code to a **llama.cpp server on your computer or local
+Locality connects VS Code to a **llama.cpp or vLLM server on your computer or local
 network**. Chat about your code, plan changes, review diffs, and let the assistant
 edit workspace files with your approval. Choose from four editions to control
 whether it can also run commands or search the web.
 
 ## Features
 
-- **[Local model connection](docs/user-guide.md#first-time-setup)** — Use a llama.cpp server on your computer or local network, with model-specific tool-calling profiles.
+- **[Local model connection](docs/user-guide.md#first-time-setup)** — Use a llama.cpp or vLLM server on your computer or local network, with model-specific tool-calling profiles.
 - **[Act, Plan, and Review modes](docs/user-guide.md#chat-modes)** — Make changes, prepare an implementation plan, or inspect your code.
 - **[Saved chats and parallel conversations](docs/user-guide.md#starting-a-chat)** — Switch between chat tabs while work continues and reopen conversations later.
 - **[File and image attachments](docs/user-guide.md#file-attachments)** — Add code, pasted text, or images to your messages; image input requires a vision model.
@@ -39,7 +39,7 @@ Command execution and web research are available in selected editions; see the
 
 ## Install
 
-You need **VS Code 1.90 or newer** and a running **llama.cpp server** with a
+You need **VS Code 1.90 or newer** and a running **llama.cpp or vLLM server** with a
 model that supports tool calling. The server can run on the same computer or
 another machine on your local network. Installing the extension does not install
 a model or server, and does not require Node.js.

@@ -937,7 +937,7 @@ describe("independent chat tabs", () => {
     expect(posted).toContainEqual(expect.objectContaining({ type: "attachmentPasteFailed", error: expect.stringContaining("1 MiB") }));
     await send({ type: "pasteAttachments", files: [{ fileName: "file.txt", dataUrl: "data:text/plain;base64,%%%=" }] });
     expect(storage.importAttachmentBytes).not.toHaveBeenCalled();
-    expect(posted.at(-1)).toEqual({ type: "attachmentImportState", pending: false });
+    expect(posted.filter(message => "type" in message && message.type === "attachmentImportState").at(-1)).toEqual({ type: "attachmentImportState", pending: false });
   });
 
   it("keeps an attachment picker tied to its source chat after switching tabs", async () => {

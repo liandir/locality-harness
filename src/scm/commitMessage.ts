@@ -1,3 +1,4 @@
+import { withServerConnection } from "../llm/connection.js";
 import * as path from "node:path";
 import * as vscode from "vscode";
 import { readSettings } from "../config/settings.js";
@@ -144,10 +145,10 @@ export class CommitMessageController implements vscode.Disposable {
 
 async function generateCommitMessage(diff: string): Promise<string> {
   const settings = readSettings();
-  const text = await complete(
+  const text = await withServerConnection(settings, () => complete(
     settings.endpoint,
     {
-      model: settings.model,
+      model: settings.model, purpose: "auxiliary", max_tokens: 512,
       temperature: settings.temperature,
       top_k: settings.topK,
       top_p: settings.topP,
@@ -166,7 +167,7 @@ async function generateCommitMessage(diff: string): Promise<string> {
     },
     new AbortController().signal,
     { acceptPartialOnLength: true }
-  );
+  ), true);
   const message = normalizeCommitMessage(text);
   if (!message) throw new Error("the model returned an empty commit message.");
   return message;

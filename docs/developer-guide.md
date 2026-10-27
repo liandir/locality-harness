@@ -1,5 +1,49 @@
 # Developer guide
 
+## Model server integration
+
+The shared connection service snapshots endpoint, backend selection, model, and
+credentials for each foreground turn or background attempt. Background jobs
+start a fresh asynchronous connection scope; nested compaction and title work
+inherit the current turn. Backend adapters own discovery, tokenization, request
+translation and errors. The streaming parser and terminal-evidence handling stay
+shared. All HTTP calls continue through `safeFetch` in every edition.
+
+The `serverType` setting defaults to `auto`. vLLM metadata comes from
+`/v1/models` and `/tokenize`; llama.cpp uses `/props`. Image support is tri-state;
+unknown vLLM capability allows preprocessing of the first actual image. Credentials
+use SecretStorage and are never sent back to either webview. Model changes invalidate
+cached counts; memory signatures also include the resolved backend, preserving
+retry counters and the last successful memory.
+
+## Live-server validation
+
+The v2.2.0 API contract baseline is **vLLM 0.32.0**. Automated fixtures cover its
+discovery, preprocessing, generation, reasoning and native-tool response formats.
+Live model acceptance is separate: no live results should be claimed from fixtures.
+
+**Live validation status: pending.** No external test servers were available during
+implementation. The three vLLM model cases and the llama.cpp smoke test below
+must pass, with their configurations recorded, before publishing v2.2.0.
+
+`test/serverLive.test.ts` is skipped unless endpoints are supplied. Provision the
+servers externally, then set the following variables in the invoking shell:
+
+| Endpoint variable | Default model | Coverage |
+| --- | --- | --- |
+| `LOCALITY_LIVE_QWEN_ENDPOINT` | `Qwen/Qwen3-4B` | reasoning budget, tools and continuation |
+| `LOCALITY_LIVE_GPTOSS_ENDPOINT` | `openai/gpt-oss-20b` | reasoning effort |
+| `LOCALITY_LIVE_VISION_ENDPOINT` | `Qwen/Qwen2.5-VL-3B-Instruct` | image preprocessing and generation |
+| `LOCALITY_LIVE_LLAMA_ENDPOINT` | `local` | llama.cpp regression smoke test |
+
+Each prefix accepts `_MODEL` and `_API_KEY` overrides, for example
+`LOCALITY_LIVE_QWEN_MODEL`. All endpoints must satisfy the normal local/LAN policy.
+Run `node node_modules/vitest/vitest.mjs run test/serverLive.test.ts`. The vLLM
+cases verify the reported server version; run the normal browser and unit suites
+as well. Before publishing v2.2.0, record the server version, exact model/revision,
+parser flags and result for each live case in the release notes. Live tests do
+not launch servers or download models.
+
 [Back to Locality](../README.md) · [Build editions](build-editions.md) · [Contributor conventions](../AGENTS.md)
 
 This guide covers working on Locality from source. To install a released

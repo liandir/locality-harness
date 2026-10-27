@@ -1,8 +1,8 @@
 {
   "name": "locality",
   "displayName": "Locality",
-  "description": "Drive a LAN-hosted llama.cpp LLM from VS Code with hard network isolation, workspace-scoped tools, and an approval-gated terminal.",
-  "version": "2.1.7",
+  "description": "Drive a LAN-hosted llama.cpp or vLLM server from VS Code with hard network isolation, workspace-scoped tools, and an approval-gated terminal.",
+  "version": "2.2.0",
   "repository": {
     "type": "git",
     "url": "https://github.com/liandir/locality.git"
@@ -152,12 +152,12 @@
         "locality.endpoint": {
           "type": "string",
           "default": "http://localhost:8080/v1",
-          "description": "URL of the llama.cpp server. Use localhost or a private IP literal such as http://127.0.0.1:8080/v1 or http://192.168.1.50:8080/v1; DNS hostnames are refused."
+          "description": "URL of the llama.cpp or vLLM server. Use localhost or a private IP literal such as http://127.0.0.1:8080/v1 or http://192.168.1.50:8080/v1; DNS hostnames are refused."
         },
         "locality.model": {
           "type": "string",
           "default": "local",
-          "description": "Model id sent to llama.cpp. The Settings view populates this from the server's /v1/models endpoint."
+          "description": "Model id sent to the server. The Settings view populates this from the server's /v1/models endpoint."
         },
         "locality.toolCallingMode": {
           "type": "string",
@@ -206,7 +206,7 @@
           "default": null,
           "minimum": 1,
           "maximum": 9007199254740991,
-          "description": "Per-request llama.cpp reasoning budget: a positive integer sets the token threshold; null (empty in Locality settings) means unlimited."
+          "description": "Per-request reasoning token budget. Empty means unlimited. vLLM requires a reasoning parser/configuration for finite budgets."
         },
         "locality.reasoningEfforts": {
           "type": "object",
@@ -218,7 +218,7 @@
           "additionalProperties": {
             "type": "string"
           },
-          "description": "Additional reasoning-effort choices shown in settings. Each key is the display label and its value is sent as llama.cpp reasoning_effort. Default is built in; use Activate Reasoning to turn reasoning on or off."
+          "description": "Additional reasoning-effort choices shown in settings. Each key is the display label and its value is sent as reasoning_effort. vLLM accepts none, minimal, low, medium, high, xhigh, and max; model support varies. Default is built in; use Activate Reasoning to turn reasoning on or off."
         },
         "locality.titlePrompt": {
           "type": "string",
@@ -297,7 +297,7 @@
           "default": 4,
           "minimum": 0,
           "maximum": 64,
-          "description": "Approximate chat-template/special tokens llama.cpp adds per message. Added to the exact /tokenize counts so the context guard does not under-count the rendered prompt."
+          "description": "Estimated chat-template overhead per message for llama.cpp. vLLM counts the complete server-rendered prompt instead."
         },
         "locality.autoapproveReads": {
           "type": "boolean",
@@ -328,6 +328,16 @@
           "type": "boolean",
           "default": false,
           "description": "Auto-approve all command tool calls in Act mode. Off by default."
+        },
+        "locality.serverType": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "llama.cpp",
+            "vllm"
+          ],
+          "default": "auto",
+          "description": "Model server backend. Auto detects llama.cpp or vLLM; choose an explicit type for servers behind a proxy."
         }
       }
     }
