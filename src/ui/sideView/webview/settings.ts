@@ -41,7 +41,7 @@ export function renderSettings(state: SideViewState, expandedSettings: ReadonlyS
           <input id="endpoint" type="text" value="${esc(endpoint)}" ${state.endpointTesting ? "readonly" : ""} />
           <button id="saveEndpoint" class="action-btn" ${state.endpointTesting ? "disabled" : ""}>${state.endpointTesting ? "Connecting…" : "Set"}</button>
         </div>
-        <label class="field-label" for="serverApiKey">API key (optional)</label>
+        <label class="field-label" for="serverApiKey">API-key (optional)</label>
         <input id="serverApiKey" type="password" autocomplete="off" value="${esc(state.serverApiKeyDraft ?? "")}" placeholder="${state.hasServerApiKey ? "Key saved — enter a replacement" : "No key"}" />
         <div class="validation ${validationCls}" role="${state.endpointMsg?.ok === false ? "alert" : "status"}">${esc(state.endpointMsg?.text ?? "")}</div>
         ${state.serverModels.length > 0 ? `
