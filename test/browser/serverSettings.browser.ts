@@ -12,8 +12,9 @@ for (const theme of ["light", "dark"] as const) {
     await expect(heading).toHaveAttribute("aria-expanded", "true");
     await expect(heading).toBeFocused();
     await expect(page.getByRole("button", { name: "Clear key" })).toHaveCount(0);
-    const keyRow = page.locator(".setting-action-row").filter({ has: page.locator("#serverApiKey") });
-    await expect(keyRow.locator("#saveEndpoint")).toBeVisible();
+    const endpointRow = page.locator(".setting-action-row").filter({ has: page.locator("#endpoint") });
+    await expect(endpointRow.locator("#saveEndpoint")).toBeVisible();
+    await expect(page.getByText("Set verifies the connection and saves a new key securely. Leave empty to keep the saved key.")).toHaveCount(0);
     await page.locator("#serverType").selectOption("vllm");
     await page.locator("#serverApiKey").fill("test-secret");
     await expect(page.locator("#serverApiKey")).toHaveAttribute("type", "password");

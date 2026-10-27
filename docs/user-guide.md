@@ -65,7 +65,7 @@ reasoning boundaries; leave the budget empty for unlimited reasoning. Models
 whose templates cannot disable thinking may still reason when the switch is off.
 
 If the server uses `--api-key`, enter its key in the masked **API key** field and
-click **Set** beside it. A successful connection saves the new or replacement key
+click **Set** beside **Server URL**. A successful connection saves the new or replacement key
 in VS Code SecretStorage. An empty field keeps the saved key. Keys are scoped to
 the server URL and proxy prefix and are not stored in settings or chat history.
 
