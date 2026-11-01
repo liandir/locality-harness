@@ -472,96 +472,56 @@ trash icon. Deleting cannot be undone.
 
 ## Workspace memory
 
-Memory has three independent workspace switches, all off by default. User-level
-activation is ignored; existing `locality.memoryEnabled` settings continue to
-control tool access.
+Memories are independent workspace notes stored as versioned JSON files in
+`.locality/memories/<uuid>.json`. Each record has a name, Markdown contents,
+creation/update dates, and an enabled flag. Notes belong to the workspace;
+deleting or clearing chats does not delete them. Git ignore rules are unchanged.
+Old chat summaries remain readable in historical chats and are not imported.
 
-- **Chat → Load memories at chat start** (`locality.memoryLoadOnStart`) loads
-  relevant active summaries using the first user message as a local keyword query.
-  It reads summaries from the workspace index without opening other transcripts.
-  Loaded memories enter model context, count toward the context limit, and can be
-  compacted. They survive reopening; later messages do not trigger another automatic
-  search. Editing the first message replaces that initial context using the new
-  query and current switch. Turning the switch off does not erase already loaded context.
-- **Tools → Activate memories** (`locality.memoryEnabled`) exposes `search_memories`
-  and `recall_memory`. It works independently of **Activate reads** and initial loading.
-- **Automation → Auto-generate memories** (`locality.autoGenerateMemories`) queues a
-  summary after a final **Act** or **Review** response, even when loading and memory
-  tools are off. The setting at turn completion decides whether to queue work;
-  skipped turns are not generated retroactively, and already queued summaries finish.
+Two independent workspace switches are off by default:
 
-Summaries use the configured local model. **Plan** responses and plan revisions do
-not generate memories automatically. After accepting a plan, generation waits for
-the Act implementation response. New generated memories are active automatically;
-individual exclusions and manually edited summaries are preserved. Manual generation
-and editing remain available regardless of the three switches.
+- **Tools > Activate memories** (`locality.memoryEnabled`) exposes
+  `create_memory`, `search_memories`, and `recall_memory`, independently of
+  file tools. Saving notes is automatic in Act, Plan, and Review, without an edit
+  approval prompt. Search and recall retain the read-approval setting.
+- **Chat > Auto-load memories** (`locality.memoryAutoLoad`) ranks enabled notes
+  for every new user query, including queued messages and steering. The old
+  chat-start preference is preserved under this setting. Selected notes go into
+  one reference-data section of the system prompt; each new query replaces the
+  previous selection. Tool continuations keep the current selection.
 
-A **Creating memory** card appears after the answer and becomes **Created memory**
-when finished. If the chat already has a memory, the card shows **Updating memory**
-and then **Updated memory**. Expand it to see the same full contents and date shown by recall.
-Completed cards remain available when reopening the chat. A new message sent
-during generation appears immediately beneath the active memory card;
-the model request proceeds once that summary finishes. Compaction and commit-message
-inference can interrupt generation; interrupted work resumes when idle.
-In **Recent Chats** (the Chats tab), **Re-generate all memories** sits below
-**Start new chat** and processes existing chats on request.
-Use **Cancel generation** to clear queued work and cancel the current summary.
+**Maximum memories / search results** (`locality.memoryMaxCount`) caps both
+automatic loading and search results: default 10, range 1-100. Local keyword
+ranking recognizes paths and camelCase/snake_case symbols, with name and phrase
+boosts. Unrelated notes are omitted. Loading uses no model or embedding service.
+Notes count toward the prompt budget; the lowest-ranked whole notes are removed
+if needed before normal compaction. A disclosure beside each user message shows
+the notes actually loaded. Historical snapshots remain readable after edits or deletion.
 
-Select the **cloud icon** beside a chat’s delete button to inspect, edit, include/exclude, and
-regenerate its summary. Saving an edit makes the summary manually maintained, so background
-updates cannot overwrite it. **Regenerate** replaces it with an automatically
-maintained summary. Failed generation can be retried without affecting the chat.
-Summaries are limited to 1,024 tokens, with a smaller budget on small model contexts.
-Oversized summaries are retried with a shorter target instead of cutting out text
-or inserting truncation notices. Raw tool messages, hidden reasoning, and
-imported memories are excluded from summarization input; common credential
-formats are redacted, and the model is instructed to omit secrets.
+Ask the agent to remember a specific durable fact or preference. The agent uses
+`create_memory({ name, contents, id? })`: omit the ID to create an enabled note,
+or recall the current note first and supply its ID to update it. Names alone
+never overwrite notes. Exact duplicate creations reuse the existing record.
+Updates preserve the stable ID, creation date, and enabled flag. A stale update
+fails with instructions to recall again. Names have a 200-character limit and
+contents a 20,000-character limit. Common credential patterns are redacted;
+avoid putting secrets in notes. Saving makes no additional model request.
 
-In addition to optional loading at chat start, the agent can retrieve memories
-through tools. When **Activate memories** is enabled, the system prompt suggests
-considering retrieval at the beginning of a request:
+`search_memories({ query })` returns enabled matches with stable UUIDs, names,
+and full UTC dates. `recall_memory({ name, id })` reads a live note and its
+Markdown contents. Search-result links open notes, rather than chats. Memories
+are historical reference data: current user instructions, project instructions,
+and inspected workspace evidence take precedence.
 
-- **`search_memories`** takes a `query` and returns matching `name`, `id`, and
-  `date` fields, plus the total match count and whether results were truncated.
-  Local BM25 keyword ranking includes title and phrase boosts, recognizes paths
-  and camelCase/snake_case symbols, and breaks ties by date and source ID.
-  It uses no embeddings, network requests, or retrieval model. Search covers all
-  active, usable memories in the current workspace, excluding the current chat.
-- **`recall_memory`** takes the exact `name` and `id` from search and returns
-  those fields, the full UTC `date`, and `contents`. IDs are 16 hexadecimal
-  characters from SHA-256 of the source chat ID, name, and contents. Identical
-  names are disambiguated; renaming or editing a memory changes its ID. Recall
-  checks the current source again, so stale IDs and inactive or deleted sources
-  fail with a request to search again.
+The **Memories** sidebar tab provides search, Markdown preview/editing, rename,
+enable/disable, and individual deletion with confirmation. Markdown edits use
+normal Save; if another window or external editor changed the note, reopen it
+and apply your changes to the current version. Disabling/deleting a note affects
+future automatic retrieval and search. Existing tool results and historical
+loaded-note disclosures remain in the chat.
 
-Both tools return full UTC dates with minute precision, such as
-`2026-09-11T14:05Z`. **Maximum memories / search results** caps both initial
-loading and per-search results from 1 to 100, defaulting to 10
-(`locality.memoryMaxCount`). The agent chooses
-which matches to recall. The tools work in Act, Plan, and Review modes and follow
-the read-approval setting. When **Activate memories** is off, both tools and their
-system-prompt guidance are omitted, and attempted calls cannot retrieve content.
+There is no background memory generation, generation queue, or retry setting.
+Malformed memory files are excluded individually with a warning; repair or remove
+the named file to resolve it. They are never overwritten automatically.
 
-**Recalled memories** shows sources loaded at chat start or read through tools, with links to
-their editors in Recent Chats. Recalled contents are ordinary tool results in
-chat history and are subject to normal context limits and compaction. Turning
-memories off prevents new retrieval; it does not erase existing tool results.
-Summary generation excludes
-raw tool results and asks the model to omit facts merely copied from memories.
-Current instructions and inspected code take precedence over historical memory.
-
-Chat-card timestamps adapt to when you view them: time only today, day and short
-month on other days in the same year, and the year for dates in another year.
-They use local time without seconds; hover retains the full local date and time.
-The latest saved user-message timestamp remains in system context only to place
-the request relative to memory dates. Assistant timestamps are display-only.
-
-For a reproducible, synthetic memory-on/off probe against a running local server:
-
-```bash
-npm run eval:memory -- http://localhost:8080 your-model-id /tmp/memory-eval.json
-```
-
-This records summary size, retrieval selections, recall/override checks, server
-prompt/completion tokens, and elapsed response time. It is a small functional
-probe, not a coding benchmark or a statistically reliable speed comparison.
+Run the offline keyword-retrieval evaluation with `npm run eval:memory`.

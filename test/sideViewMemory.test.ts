@@ -13,7 +13,7 @@ vi.mock("../src/ui/memoryDocuments.js", () => ({
 }));
 vi.mock("vscode", () => ({
   Uri: { joinPath: (...parts: string[]) => parts.join("/") }, commands: { executeCommand: vi.fn() },
-  workspace: { registerFileSystemProvider: editor.register }, window: { showErrorMessage: editor.error }
+  workspace: { registerFileSystemProvider: editor.register }, window: { showErrorMessage: editor.error, showInputBox: vi.fn(async () => "Renamed"), showWarningMessage: vi.fn(async () => "Delete") }
 }));
 vi.mock("../src/config/settings.js", () => ({
   onSettingsChange: () => ({ dispose() {} }),
@@ -27,18 +27,22 @@ let storage: ChatStorage | undefined;
 const postMessage = vi.fn();
 const list = vi.fn();
 const setEnabled = vi.fn();
-const regenerate = vi.fn();
-const cancelAll = vi.fn();
-const memories = [{ sourceId: "source", title: "Parser", text: "Parser decision", status: "ready" }];
+const remove = vi.fn();
+const save = vi.fn();
+const get = vi.fn();
+const changed = vi.fn();
+const store = { setEnabled, delete: remove, save, get };
+const memories = [{ version: 1 as const, id: "12345678-1234-1234-1234-123456789abc", name: "Parser", contents: "Decision", createdAt: 1, updatedAt: 1, enabled: true }];
 
 beforeEach(() => {
   vi.clearAllMocks();
   storage = undefined;
-  list.mockResolvedValue(memories);
+  list.mockResolvedValue({ memories, warnings: [] });
+  get.mockResolvedValue(memories[0]);
   provider = new SideViewProvider(
     { subscriptions: [], extensionUri: "/extension", extension: { packageJSON: { version: "1.7.0" } } } as unknown as vscode.ExtensionContext,
     () => storage, vi.fn(), vi.fn(), () => [],
-    { list, setEnabled, regenerate, cancelAll } as unknown as WorkspaceMemory
+    { list, current: () => store, changed } as unknown as WorkspaceMemory
   );
   provider.resolveWebviewView({
     webview: {
@@ -78,21 +82,21 @@ describe("Recent Chats memory management", () => {
   it("loads memories when entering Chats, including after returning from Settings", async () => {
     await receive({ type: "openTab", tab: "settings" });
     expect(list).not.toHaveBeenCalled();
-    await receive({ type: "openTab", tab: "chats" });
-    expect(postMessage).toHaveBeenCalledWith({ type: "memories", memories });
+    await receive({ type: "openTab", tab: "memories" });
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "memories", memories: [expect.objectContaining(memories[0])] }));
     await receive({ type: "openTab", tab: "settings" });
-    provider.focusTab("chats");
+    provider.focusTab("memories");
     await vi.waitFor(() => expect(list).toHaveBeenCalledTimes(2));
   });
 
   it("routes all management actions and refreshes the chat memory controls", async () => {
-    await receive({ type: "openTab", tab: "chats" });
-    await receive({ type: "setMemoryEnabled", id: "source", enabled: false });
-    await receive({ type: "regenerateMemory", id: "source" });
-    await receive({ type: "cancelMemoryGeneration" });
-    expect(setEnabled).toHaveBeenCalledWith("source", false);
-    expect(regenerate).toHaveBeenCalledWith("source");
-    expect(cancelAll).toHaveBeenCalledOnce();
+    await receive({ type: "openTab", tab: "memories" });
+    await receive({ type: "setMemoryEnabled", id: "source", enabled: false, revision: "revision" });
+    await receive({ type: "renameMemory", id: "source", revision: "revision" });
+    await receive({ type: "deleteMemory", id: "source", revision: "revision" });
+    expect(setEnabled).toHaveBeenCalledWith("source", false, "revision");
+    expect(save).toHaveBeenCalledWith(expect.objectContaining({ name: "Renamed" }), "revision");
+    expect(remove).toHaveBeenCalledWith(memories[0].id, "revision");
     expect(list).toHaveBeenCalledTimes(4);
   });
 });

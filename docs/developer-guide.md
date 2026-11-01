@@ -19,8 +19,7 @@ modality error resolves the probe. Other failures remain connection errors.
 Concurrent checks share a probe, results are cached per connection, and **Set**
 forces a new check. Credentials
 use SecretStorage and are never sent back to either webview. Model changes invalidate
-cached counts; memory signatures also include the resolved backend, preserving
-retry counters and the last successful memory.
+cached counts. Workspace note saves are local filesystem operations and are independent of the backend.
 
 ## Live-server validation
 
@@ -205,3 +204,25 @@ Edition and tool coverage includes:
   bounded responses, and changed destinations.
 - Shared Git checks for staged diffs, repository selection, and unavailable
   integration.
+
+## Workspace notes
+
+`memoryStore.ts` owns versioned JSON records under `.locality/memories`, guarded
+paths, atomic writes and cross-window locking. `workspaceMemory.ts` owns the active
+store and filesystem notifications. `workspaceNotes.ts` supplies shared types and
+local ranking. No chat IDs, model signatures, generation state or token caches
+are stored in notes. Legacy chat-summary types exist only for history compatibility;
+old jobs never resume and are not imported.
+
+All editions declare create/search/recall together. Creation updates require the
+host's revision from a successful live recall; Markdown editors retain the opened
+revision. Saving and deletion check the live record under the same lock. Invalid
+files produce individual warnings and remain untouched. Switching workspaces
+invalidates editor access and stale sidebar responses.
+
+Automatic selection occurs for each user message, stays stable through tools,
+and enters the shared system-prompt builder and normal backend token counting.
+Drop lowest-ranked whole notes before overflow/compaction. Persist only retrieval
+snapshots for per-message disclosures, never synthetic recall calls or ownership.
+The memory tool is the explicit write exception in Plan and Review; file tools
+retain their mode and approval rules. Native calls still require terminal evidence.

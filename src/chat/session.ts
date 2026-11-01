@@ -20,8 +20,8 @@ import type { UiEvent, ToolCategory } from "./events.js";
 export type { UiEvent, ToolCategory } from "./events.js";
 import type { Disposable, SecretStorage } from "vscode";
 import { beginForeground } from "../llm/activity.js";
-import { rankMemories, searchMemories, recallMemory, memoryMetadata, memoryRecallResult } from "./memory.js";
-import { MAX_MEMORY_COUNT } from "./memoryLimits.js";
+import { rankWorkspaceNotes, searchWorkspaceNotes, noteResult, type WorkspaceNote } from "./workspaceNotes.js";
+import { MemoryStore, noteRevision } from "./memoryStore.js";
 import type { WorkspaceMemory } from "./workspaceMemory.js";
 import { initialMemoryContext } from "./initialMemoryContext.js";
 import * as path from "node:path";
@@ -151,6 +151,8 @@ interface ToolCompletion extends ChatToolProcess, ChatToolResultDisplay {
 export class ChatSession {
   private record: ChatRecord;
   private memory?: WorkspaceMemory;
+  private recalledNoteVersions = new Map<string, string>();
+  private noteStore: MemoryStore;
   private pending = new Map<string, PendingApproval>();
   private settingsSubscription: Disposable;
   // ask_user_question parks the turn until the user answers, skips, or cancels.
@@ -217,7 +219,8 @@ export class ChatSession {
   // the new record values take effect when the next user turn starts.
   private activeTurnModes?: { mode: ChatMode; reasoningEffort: ReasoningEffort };
   private pendingInterruption?: ChatMessage;
-  private stagedPlanCalls?: Extract<ParsedEvent, { kind: "toolCall" }>[];
+  private stagedToolCalls?: Extract<ParsedEvent, { kind: "toolCall" }>[];
+  private pendingMemoryFitTs?: number;
   private planResponse?: PlanResponse;
   private lastInterruptionTs = 0;
   private pendingSteering: ChatMessage[] = [];
@@ -275,6 +278,7 @@ export class ChatSession {
       }
     });
     this.memory = args.memory;
+    this.noteStore = new MemoryStore(args.workspaceRoot, () => !this.disposed && !this.abort?.signal.aborted);
     this.loadedChatContextPending = args.record.messages.length > 0;
     this.settingsSubscription = onSettingsChange(() => this.refreshPendingApprovals());
   }
@@ -356,6 +360,7 @@ export class ChatSession {
       agentsMd: await this.currentAgentsMd(),
       userMessageTs: this.latestUserMessageTs(),
       memoryEnabled: readSettings().memoryEnabled,
+      memories: this.selectedNotes(),
       supportsVision: this.supportsVision,
       nativeTools
     });
@@ -397,7 +402,7 @@ export class ChatSession {
     // Use the full transcript so compaction and tool continuations retain the
     // original request time instead of taking the time of a later tool result.
     for (let i = this.record.messages.length - 1; i >= 0; i--) {
-      if (this.record.messages[i].role === "user" && !this.record.messages[i].steering) return this.record.messages[i].ts;
+      if (this.record.messages[i].role === "user") return this.record.messages[i].ts;
     }
     return undefined;
   }
@@ -675,6 +680,7 @@ export class ChatSession {
     for (const message of messages) appendChatMessage(this.record, message);
     await this.saveRecord();
     for (const message of messages) {
+      await this.loadQueryMemories(message.content, message.ts);
       this.emit({
         kind: "userMessage", messageId: `u_${message.ts}`, messageTs: message.ts,
         text: message.content, mode: this.turnMode(), steering: true, attachments: message.attachments
@@ -701,8 +707,8 @@ export class ChatSession {
       this.record.planning = true;
       this.emitPlanningState();
     }
-    const turn = this.runForegroundTurn((ready, waitingForMemory) =>
-      this.sendUserMessageLocked(text, attachments.slice(0, MAX_ATTACHMENTS_PER_MESSAGE), ready, waitingForMemory));
+    const turn = this.runForegroundTurn((ready) =>
+      this.sendUserMessageLocked(text, attachments.slice(0, MAX_ATTACHMENTS_PER_MESSAGE), ready));
     this.activeTurn = turn;
     try {
       await turn;
@@ -727,8 +733,7 @@ export class ChatSession {
       mode,
       reasoningEffort: this.record.reasoningEffort
     };
-    const turn = this.runForegroundTurn(async (ready, waitingForMemory) => {
-      if (waitingForMemory) this.emit({ kind: "turnPreparing", reason: "memory" });
+    const turn = this.runForegroundTurn(async (ready) => {
       await ready();
       await this.editUserMessageLocked(messageTs, text, removeAttachmentIds);
     });
@@ -813,9 +818,9 @@ export class ChatSession {
     this.record.totalTokens = this.record.contextMessages.reduce((total, message) => total + (message.tokens ?? 0), 0);
     this.loadedChatContextPending = true;
     this.contextActivities.clear();
-    const turn = this.runForegroundTurn(async (ready, waitingForMemory) => {
+    const turn = this.runForegroundTurn(async (ready) => {
       this.emitLoaded();
-      this.emit({ kind: "turnPreparing", reason: waitingForMemory ? "memory" : "context" });
+      this.emit({ kind: "turnPreparing", reason: "context" });
       const messageId = `m_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
       this.emit({ kind: "turnWorkStarted", messageId, startedAt: Date.now(), continued: true });
       await this.saveRecord();
@@ -836,36 +841,19 @@ export class ChatSession {
     }
   }
 
-  private async runForegroundTurn(run: (ready: () => Promise<void>, waitingForMemory: boolean) => Promise<void>): Promise<void> {
+  private async runForegroundTurn(run: (ready: () => Promise<void>) => Promise<void>): Promise<void> {
     this.abort = new AbortController();
     this.acceptingSteering = true;
     const signal = this.abort.signal;
-    let endForeground: (() => void) | undefined;
-    let waitingForMemory = false;
-    // Reserve the server immediately, but let the incoming message be saved and
-    // displayed while the previous turn's memory finishes.
-    const foreground = this.memory
-      ? this.memory.beginChatTurn(signal, () => { waitingForMemory = true; })
-      : Promise.resolve(beginForeground());
-    const acquired = foreground.then(
-      release => { endForeground = release; return { ok: true as const }; },
-      error => ({ ok: false as const, error })
-    );
+    const endForeground = beginForeground();
     try {
-      await withServerConnection(readSettings(), () => run(async () => {
-        const result = await acquired;
-        signal.throwIfAborted();
-        if (!result.ok) throw result.error;
-      }, waitingForMemory), true);
+      await withServerConnection(readSettings(), () => run(async () => { signal.throwIfAborted(); }), true);
     } catch (error) {
       this.emit({ kind: "abort", reason: signal.aborted ? "Stopped by user." : (error instanceof Error ? error.message : String(error)) || "The request stopped unexpectedly.", diagnostics: signal.aborted ? { cause: "user_cancel" } : error instanceof StreamFailure ? error.diagnostics : undefined });
     } finally {
       this.acceptingSteering = false;
       this.responseAbort = undefined;
-      // A failed save can exit before the reservation has resolved.
-      if (!endForeground) this.abort.abort();
-      await acquired;
-      endForeground?.();
+      endForeground();
       // Keep accepted guidance in history even when Stop or a tool failure wins.
       await this.flushSteeringMessages();
       const interrupted = this.pendingInterruption;
@@ -887,10 +875,10 @@ export class ChatSession {
   }
 
   private async sendUserMessageLocked(
-    text: string, attachments: ChatAttachment[], ready: () => Promise<void>, waitingForMemory: boolean
+    text: string, attachments: ChatAttachment[], ready: () => Promise<void>
   ): Promise<void> {
     const messageId = `m_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-    this.emit({ kind: "turnPreparing", reason: waitingForMemory ? "memory" : "server" });
+    this.emit({ kind: "turnPreparing", reason: "server" });
     const s = capturedConnectionSettings(readSettings());
     const isFirstMessage = this.record.messages.length === 0;
     if (isFirstMessage) {
@@ -904,13 +892,12 @@ export class ChatSession {
     await this.saveRecord();
     this.emit({ kind: "userMessage", messageId: `u_${ts}`, messageTs: ts, text, mode, attachments: attachments.length ? attachments : undefined });
     await ready();
-    if (waitingForMemory) this.emit({ kind: "turnPreparing", reason: "server" });
     this.emit({ kind: "turnWorkStarted", messageId, startedAt: Date.now() });
     this.emitCompactStatus();
     this.resumeContextActivities();
 
+    await this.loadQueryMemories(text, ts);
     if (isFirstMessage) {
-      await this.loadInitialMemories(text);
       this.queueTitleGeneration(text || `Attachment: ${attachments[0]?.fileName ?? "file"}`, s, text);
     }
 
@@ -956,8 +943,8 @@ export class ChatSession {
     this.emit({ kind: "turnWorkStarted", messageId: responseMessageId, startedAt: workStartedAt });
 
     const s = capturedConnectionSettings(readSettings());
+    await this.loadQueryMemories(text, messageTs);
     if (index === 0) {
-      await this.loadInitialMemories(text);
       this.queueTitleGeneration(text || `Attachment: ${edited.attachments?.[0]?.fileName ?? "file"}`, s, text);
     }
     // Compaction preserves the transcript; keep the live response and its tool timeline.
@@ -982,6 +969,8 @@ export class ChatSession {
       // transcript is safe to replay; recount it before any compaction check.
       delete this.record.contextMessages;
     }
+    this.record.memorySelections = this.record.memorySelections?.filter(selection => this.record.messages.some(message => message.role === "user" && message.ts === selection.messageTs));
+    this.recalledNoteVersions.clear();
     delete this.record.recalledMemories;
     if (index === 0 || !this.record.contextMessages) delete this.record.initialMemories;
     this.record.memoryCreations = this.record.memoryCreations?.filter(creation =>
@@ -1068,27 +1057,42 @@ export class ChatSession {
     this.emit({ kind: "tokens", total, limit: this.contextLimit() });
   }
 
-  private async loadInitialMemories(query: string): Promise<void> {
-    if (!readSettings().memoryLoadOnStart) return;
+  private selectedNotes(): WorkspaceNote[] {
+    const latest = [...this.record.messages].reverse().find(message => message.role === "user");
+    return this.record.memorySelections?.find(selection => selection.messageTs === latest?.ts)?.memories ?? [];
+  }
+
+  private async loadQueryMemories(query: string, messageTs: number): Promise<void> {
+    let memories: WorkspaceNote[] = [];
     try {
-      const sources = await this.storage.metadata(true);
       const settings = readSettings();
-      if (!settings.memoryLoadOnStart || this.disposed || this.abort?.signal.aborted) return;
-      const memories = rankMemories(query, sources, this.record.id).slice(0, settings.memoryMaxCount)
-        .map(memory => recallMemory(memory.title, memoryMetadata(memory).id, sources, this.record.id));
-      if (!memories.length) return;
-      this.record.initialMemories = memories;
-      // Keep imported summaries out of the visible transcript and future memory
-      // generation, while including them in normal token counting and compaction.
-      this.record.contextMessages = [...modelMessages(this.record), ...initialMemoryContext(memories, this.record.messages[0].ts)];
-      this.refreshMemoryVisibility();
-      await this.saveRecord();
-    } catch {
-      this.emit({ kind: "notice", text: "Could not load workspace memories for this chat." });
+      if (settings.memoryAutoLoad) {
+        const listing = await this.noteStore.list();
+        for (const text of listing.warnings) this.emit({ kind: "notice", text });
+        if (readSettings().memoryAutoLoad && !this.disposed) memories = rankWorkspaceNotes(query, listing.memories).slice(0, settings.memoryMaxCount);
+      }
+    } catch { this.emit({ kind: "notice", text: "Could not load workspace memories for this query." }); }
+    this.record.memorySelections = [...(this.record.memorySelections ?? []).filter(selection => selection.messageTs !== messageTs), { messageTs, memories }];
+    this.pendingMemoryFitTs = messageTs;
+    this.refreshMemoryVisibility();
+    await this.saveRecord();
+  }
+
+  private async fitQueryMemories(s: HarnessSettings): Promise<void> {
+    if (this.pendingMemoryFitTs === undefined || this.pendingMemoryFitTs !== this.latestUserMessageTs()) return;
+    const selected = this.selectedNotes();
+    if (!selected.length) { this.pendingMemoryFitTs = undefined; return; }
+    const limit = this.contextLimit() - outputTokenReserve(this.contextLimit());
+    let changed = false;
+    while (selected.length && await this.countRequestPrompt(s, await this.buildPromptMessages()) >= limit) {
+      selected.pop(); changed = true;
     }
+    if (changed) { this.refreshMemoryVisibility(); await this.saveRecord(); }
+    this.pendingMemoryFitTs = undefined;
   }
 
   refreshMemoryVisibility(): void {
+    this.emit({ kind: "memorySelections", selections: this.record.memorySelections ?? [] });
     // Disclose exactly what was loaded, in order. Source edits/deactivation affect
     // future retrieval; they do not remove snapshots already in this chat's context.
     this.emit({ kind: "initialMemoryCalls", calls: initialMemoryContext(this.record.initialMemories ?? [], this.record.messages[0]?.ts ?? 0) });
@@ -1137,6 +1141,7 @@ export class ChatSession {
       return false;
     }
     await recomputeTokens(s.endpoint, this.record, s.model);
+    await this.fitQueryMemories(s);
     const sysTokens = await this.systemPromptTokens(s);
     const limit = this.contextLimit();
     this.emit({ kind: "tokens", total: this.record.totalTokens + sysTokens, limit });
@@ -1483,7 +1488,8 @@ export class ChatSession {
       finishReason = undefined;
       completion = undefined;
       const planResponse = this.planResponse = this.turnMode() === "plan" ? new PlanResponse() : undefined;
-      this.stagedPlanCalls = this.turnMode() === "plan" ? [] : undefined;
+      // Memory writes (including compatibility calls) wait for terminal evidence.
+      this.stagedToolCalls = this.turnMode() === "plan" || readSettings().memoryEnabled ? [] : undefined;
       const family = compatibilityFamily(this.record.toolCallingMode);
       const parser = makeParser(family ?? "gemma4");
       const nativeTextRecovery = this.toolProtocol === "native" && family
@@ -1859,10 +1865,14 @@ export class ChatSession {
         continue;
       }
 
-      const planningCalls = this.stagedPlanCalls;
-      this.stagedPlanCalls = undefined;
-      if (planningCalls?.length && !aborted && !this.abort.signal.aborted) {
-        const result = await this.handleEvents(planningCalls, messageId, s, recordEvent);
+      const stagedCalls = this.stagedToolCalls;
+      this.stagedToolCalls = undefined;
+      if (stagedCalls?.length && !aborted && (!completion?.completionEvidence || completion.completionEvidence === "none")) {
+        aborted = true;
+        this.emit({ kind: "abort", reason: "The response ended before confirming tool completion.", diagnostics: { cause: "unexpected_eof", completionEvidence: "none" } });
+      }
+      if (stagedCalls?.length && !aborted && !this.abort.signal.aborted) {
+        const result = await this.handleEvents(stagedCalls, messageId, s, recordEvent, true);
         aborted = result.abort ?? false;
         toolLoop = result.toolLoop ?? false;
       }
@@ -2044,13 +2054,14 @@ export class ChatSession {
     events: ParsedEvent[],
     messageId: string,
     s: HarnessSettings,
-    recordEvent: (event: ParsedEvent) => void
+    recordEvent: (event: ParsedEvent) => void,
+    confirmedCompletion = false
   ): Promise<{ continue: boolean; abort?: boolean; toolLoop?: boolean }> {
     let toolLoop = false;
     for (let e of events) {
       if (e.kind === "text" && this.planResponse) e = { ...e, text: this.planResponse.feed(e.text) };
-      if (e.kind === "toolCall" && this.stagedPlanCalls) {
-        this.stagedPlanCalls.push(e);
+      if (!confirmedCompletion && e.kind === "toolCall" && (this.stagedToolCalls || e.name === "create_memory")) {
+        (this.stagedToolCalls ??= []).push(e);
         continue;
       }
       if (toolLoop && this.pendingSteering.length) break;
@@ -2246,7 +2257,7 @@ export class ChatSession {
       try { featureMetadata = await feature.prepare(e.name, args, readSettings()); }
       catch (error) { validationError = (error as Error).message; }
     }
-    const needsApproval = (settings: HarnessSettings): boolean => feature && (category === "command" || category === "search")
+    const needsApproval = (settings: HarnessSettings): boolean => e.name === "create_memory" ? false : feature && (category === "command" || category === "search")
       ? feature.needsApproval(settings) : toolNeedsApproval(category, settings);
     const approvalRequired = !validationError && needsApproval(readSettings());
     const processCommand = featureMetadata.processCommand;
@@ -2390,23 +2401,20 @@ export class ChatSession {
         throw new Error("Approval settings changed. Request the action again for approval.");
       }
       if (isMemoryToolName(e.name)) {
-        if (!readSettings().memoryEnabled) throw new Error("Workspace memories are disabled.");
-        const records = await this.storage.metadata(true);
-        // The workspace switch can change while storage or approval is pending.
-        if (!readSettings().memoryEnabled) throw new Error("Workspace memories are disabled.");
-        if (e.name === "search_memories") {
-          const search = searchMemories(args.query as string, records, this.record.id, readSettings().memoryMaxCount);
-          for (const match of search.memories) {
-            const memory = recallMemory(match.name, match.id, records, this.record.id);
-            (this.record.memorySources ??= {})[match.id] = memory.sourceId;
-          }
-          result = JSON.stringify(search);
+        if (e.name === "create_memory") {
+          const saved = await this.noteStore.save({ name: args.name as string, contents: args.contents as string, id: args.id as string | undefined },
+            typeof args.id === "string" ? this.recalledNoteVersions.get(args.id) : undefined);
+          this.recalledNoteVersions.delete(saved.note.id);
+          this.memory?.changed();
+          result = JSON.stringify({ ...noteResult(saved.note), operation: saved.operation });
+        } else if (e.name === "search_memories") {
+          const listing = await this.noteStore.list();
+          result = JSON.stringify({ ...searchWorkspaceNotes(args.query as string, listing.memories, readSettings().memoryMaxCount), warnings: listing.warnings });
         } else {
-          const memory = recallMemory(args.name as string, args.id as string, records, this.record.id);
-          result = memoryRecallResult(memory);
-          (this.record.memorySources ??= {})[memoryMetadata(memory).id] = memory.sourceId;
-          this.record.recalledMemories = [...(this.record.recalledMemories ?? []).filter(m => m.sourceId !== memory.sourceId), memory].slice(-MAX_MEMORY_COUNT);
-          await this.refreshMemoryVisibility();
+          const note = await this.noteStore.get(args.id as string);
+          if (note.name !== args.name) throw new Error("The memory name changed. Search memories again and recall its current name and ID.");
+          this.recalledNoteVersions.set(note.id, noteRevision(note));
+          result = JSON.stringify(noteResult(note));
         }
       } else if (e.name === "view_image") {
         const absolute = await assertInsideWorkspace(this.workspaceRoot, args.path as string);
@@ -2716,6 +2724,7 @@ export class ChatSession {
       agentsMd: this.cachedAgentsMd(),
       userMessageTs: this.latestUserMessageTs(),
       memoryEnabled: readSettings().memoryEnabled,
+      memories: this.selectedNotes(),
       supportsVision: this.supportsVision,
       nativeTools: this.toolProtocol === "native"
     });

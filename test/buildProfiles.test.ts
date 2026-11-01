@@ -70,9 +70,9 @@ describe("edition composition", () => {
       const prompt = api.buildSystemPrompt({ family: "gemma4", mode, nativeTools: transport === "native", memoryEnabled: false, supportsVision: true, workspaceRoot: "/tmp", featureSettings: settings });
       expect(prompt).not.toMatch(/run_command|wait_process|stop_process|web_search|read_webpage|search_memories|recall_memory|view_image is available|declaration:read_file|declaration:write_file/);
       expect(api.toolsForMode(mode, transport, true, true, settings).map(tool => tool.name))
-        .toEqual(["search_memories", "recall_memory", ...names]);
+        .toEqual(["create_memory", "search_memories", "recall_memory", ...names]);
       const memoryPrompt = api.buildSystemPrompt({ family: "gemma4", mode, nativeTools: transport === "native", memoryEnabled: true, workspaceRoot: "/tmp", featureSettings: settings });
-      expect(memoryPrompt).toContain("Workspace memories are available through search_memories and recall_memory");
+      expect(memoryPrompt).toContain("Workspace notes are available through create_memory, search_memories, and recall_memory");
     }
     const disabled: string[] = [];
     api.sideFeature.render(settings as unknown as Record<string, unknown>, (key, _label, _checked, inactive) => { if (inactive) disabled.push(key); return ""; }, value => value);

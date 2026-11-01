@@ -514,7 +514,7 @@ describe("conditional memory tools", () => {
         const parser = makeParser(family);
         const examples = enabled.slice(enabled.lastIndexOf("Examples:\n") + "Examples:\n".length);
         const calls = [...parser.feed(examples), ...parser.end()].filter(event => event.kind === "toolCall");
-        for (const name of ["search_memories", "recall_memory"]) {
+        for (const name of ["create_memory", "search_memories", "recall_memory"]) {
           const call = calls.find(call => call.name === name)!;
           expect(call).toBeDefined();
           expect(validateToolArguments(name, JSON.parse(call.argsJson))).toBeUndefined();

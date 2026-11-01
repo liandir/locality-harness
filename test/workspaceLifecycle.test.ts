@@ -24,6 +24,7 @@ vi.mock("vscode", () => ({
   commands: { registerCommand: (name: string, handler: () => Promise<void>) => { mocks.commands.set(name, handler); } }
 }));
 vi.mock("../src/config/settings.js", () => ({
+  migrateMemorySettings: vi.fn(),
   onSettingsChange: vi.fn(() => ({ dispose() {} })),
   readSettings: () => ({ endpoint: "http://127.0.0.1:8080", model: "local", serverType: "auto" })
 }));

@@ -1,3 +1,4 @@
+import type { MemorySelection } from "./workspaceNotes.js";
 import type { MemoryAttempt } from "./memoryJobTypes.js";
 import type { CompletionDiagnostics } from "../llm/completion.js";
 /** Shared chat data shapes; independent of storage and session implementations. */
@@ -110,6 +111,9 @@ export interface ChatRecord {
   messages: ChatMessage[];
   /** Model-only history after compaction, memory loading, or attachment expansion. */
   contextMessages?: ChatMessage[];
+  /** Per-query retrieval snapshots for historical inspection, never note ownership. */
+  memorySelections?: MemorySelection[];
+  /** Legacy chat summary fields: read-only compatibility. */
   memory?: ChatMemory;
   memoryAttempt?: MemoryAttempt;
   memoryCreations?: MemoryCreation[];

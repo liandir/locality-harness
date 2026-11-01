@@ -1,3 +1,4 @@
+import { noteRevision } from "../../chat/memoryStore.js";
 import { hasServerApiKey, saveServerApiKey, withConnectionDraft } from "../../llm/connection.js";
 import { clearServerCaches } from "../../llm/server.js";
 import { createSideHost } from "../../build/sideHost.js";
@@ -93,12 +94,12 @@ export class SideViewProvider implements vscode.WebviewViewProvider {
   }
 
   async pushMemories(): Promise<void> {
-    if (!this.view || this.activeTab !== "chats") return;
+    if (!this.view || this.activeTab !== "memories") return;
     const generation = ++this.memoryListGeneration;
     const storage = this.getStorage();
     try {
-      const memories = await this.memory?.list() ?? [];
-      if (generation === this.memoryListGeneration && storage === this.getStorage()) this.post({ type: "memories", memories });
+      const listing = await this.memory?.list() ?? { memories: [], warnings: [] };
+      if (generation === this.memoryListGeneration && storage === this.getStorage()) this.post({ type: "memories", memories: listing.memories.map(note => ({ ...note, revision: noteRevision(note) })), warnings: listing.warnings });
     } catch {
       if (generation === this.memoryListGeneration) this.post({ type: "memoryError", error: "Could not load workspace memories." });
     }
@@ -115,7 +116,7 @@ export class SideViewProvider implements vscode.WebviewViewProvider {
   focusTab(tab: SideTab): void {
     this.activeTab = tab;
     this.post({ type: "focusTab", tab });
-    if (tab === "chats") void this.pushMemories();
+    if (tab === "memories") void this.pushMemories();
   }
 
   async revealMemory(id: string, readonly = true): Promise<void> {
@@ -126,7 +127,7 @@ export class SideViewProvider implements vscode.WebviewViewProvider {
     if (!this.memory) return;
     try {
       if (!this.memoryDocuments) {
-        this.memoryDocuments = new MemoryDocuments(this.getStorage, this.memory);
+        this.memoryDocuments = new MemoryDocuments(this.memory);
         this.context.subscriptions.push(this.memoryDocuments, vscode.workspace.registerFileSystemProvider(
           MemoryDocuments.scheme, this.memoryDocuments, { isCaseSensitive: true }
         ));
@@ -155,15 +156,31 @@ export class SideViewProvider implements vscode.WebviewViewProvider {
       case "listMemories": await this.pushMemories(); break;
       case "openMemory": await this.openMemory(m.id, m.readonly); break;
       case "setMemoryEnabled":
-      case "regenerateMemory":
-      case "cancelMemoryGeneration":
+      case "renameMemory":
+      case "deleteMemory": {
+        const store = this.memory?.current();
+        if (!store) break;
         try {
-          if (m.type === "setMemoryEnabled") await this.memory?.setEnabled(m.id, m.enabled);
-          else if (m.type === "regenerateMemory") await this.memory?.regenerate(m.id);
-          else await this.memory?.cancelAll();
+          const note = await store.get(m.id);
+          if (m.type === "setMemoryEnabled") {
+            if (store !== this.memory?.current()) break;
+            await store.setEnabled(m.id, m.enabled, m.revision);
+          } else if (m.type === "renameMemory") {
+            const name = await vscode.window.showInputBox({ title: "Rename memory", value: note.name,
+              validateInput: value => !value.trim() || value.length > 200 ? "Enter 1-200 characters." : undefined });
+            if (name === undefined || store !== this.memory?.current()) break;
+            await store.save({ id: note.id, name, contents: note.contents }, m.revision);
+          } else {
+            const choice = await vscode.window.showWarningMessage(
+              'Delete memory "' + note.name + '"? This cannot be undone.', { modal: true }, "Delete");
+            if (choice !== "Delete" || store !== this.memory?.current()) break;
+            await store.delete(note.id, m.revision);
+          }
+          this.memory?.changed();
           await this.pushMemories();
         } catch (error) { this.post({ type: "memoryError", error: (error as Error).message }); }
         break;
+      }
       case "openGithub":
         await vscode.env.openExternal(vscode.Uri.parse("https://github.com/liandir/locality"));
         break;

@@ -32,8 +32,6 @@ export function serverPendingLabel(
     case "server": return "Server pending";
     case "title": return "Generating title";
     case "context": return "Loading chat context";
-    // The previous answer's live creation card already explains this wait.
-    case "memory": return undefined;
     default: return undefined;
   }
 }

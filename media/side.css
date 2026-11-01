@@ -30,15 +30,6 @@ h3 { font-size: 0.82em; margin: 0 0 12px; color: var(--vscode-descriptionForegro
 .chat-entry { min-width: 0; }
 .chat-list li > .chat-row time { color: var(--vscode-descriptionForeground); font-size: 0.85em; }
 
-.memory-toggle:is(.memory-usable, .memory-generating) { --button-foreground: var(--vscode-textLink-foreground); --button-hover-fill: color-mix(in srgb, var(--vscode-textLink-foreground) 8%, transparent); }
-.memory-generating > svg { animation: memory-generation-shimmer 2s ease-in-out infinite; }
-@keyframes memory-generation-shimmer {
-  0%, 100% { color: color-mix(in srgb, var(--vscode-textLink-foreground) 40%, var(--vscode-sideBar-background, var(--vscode-editor-background))); }
-  50% { color: var(--vscode-textLink-foreground); }
-}
-@media (prefers-reduced-motion: reduce) {
-  .memory-generating > svg { animation: none; }
-}
 .clear-chats { margin-top: 12px; }
 .panel { display: flex; flex-direction: column; gap: 2px; padding-bottom: 8px; }
 .panel-section { padding: 14px 0 16px; border-top: 1px solid var(--surface-stroke); }
@@ -137,3 +128,11 @@ h3 { font-size: 0.82em; margin: 0 0 12px; color: var(--vscode-descriptionForegro
 .chats-panel .search-box { min-height: 26px; padding: 0 8px; }
 .chats-panel .search-box input { padding: 3px 0; }
 .chats-panel .clear-chats { margin-top: 6px; }
+
+/* Workspace memory management uses shared controls; these rules only lay out rows. */
+.workspace-memory-list { list-style: none; padding: 0; margin: 12px 0; }
+.workspace-memory-row { padding: 12px 0; }
+.workspace-memory-row + .workspace-memory-row { border-top: 1px solid var(--vscode-widget-border, var(--surface-fill)); }
+.workspace-memory-title { text-align: left; overflow-wrap: anywhere; }
+.workspace-memory-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.workspace-memory-actions .switch-row { gap: 8px; margin: 0; }

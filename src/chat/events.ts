@@ -1,3 +1,4 @@
+import type { MemorySelection } from "./workspaceNotes.js";
 import type { CompletionDiagnostics } from "../llm/completion.js";
 import type { ServerType } from "../llm/serverTypes.js";
 /** Session events shared by the host, feature facades, and webviews. */
@@ -37,8 +38,7 @@ export interface ChatPlanningState {
 
 export interface ChatTurnPreparation {
   kind: "turnPreparing";
-  /** Memory preparation is silent; its creation card remains visible above the new message. */
-  reason: "server" | "title" | "context" | "memory";
+  reason: "server" | "title" | "context";
 }
 
 export interface ChatTurnWorkStarted {
@@ -93,6 +93,7 @@ export type UiEvent =
   | { kind: "visionCapability"; supported: boolean; endpoint?: string; model?: string; serverType?: ServerType }
   | ChatTurnPreparation
   | ChatContextActivity
+  | { kind: "memorySelections"; selections: MemorySelection[] }
   | ChatMemoryCreations
   | ChatTurnWorkStarted
   | { kind: "titleGenerationFinished" }

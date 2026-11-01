@@ -3,10 +3,7 @@ import type { SecretStorage } from "vscode";
 import { complete, streamChat, type ChatCompletionRequest, type LlmStreamChunk } from "../src/llm/client.js";
 import { configureServerConnections, hasServerApiKey, saveServerApiKey, serverUrl, withConnectionDraft, withServerConnection } from "../src/llm/connection.js";
 import { clearServerCaches, countServerPrompt, fetchServerMetadata, fetchServerModels, onServerCapabilitiesChange, tokenize } from "../src/llm/server.js";
-import { memorySignature } from "../src/chat/memoryJobs.js";
 import { generateChatTitle } from "../src/chat/chatTitle.js";
-import { generateMemory } from "../src/chat/memoryGeneration.js";
-import type { ChatRecord } from "../src/chat/types.js";
 
 const settings = { endpoint: "http://127.0.0.1:8000/proxy/v1", model: "test-model", serverType: "vllm" as const };
 const messages = [{ role: "user" as const, content: "hello" }];
@@ -113,13 +110,6 @@ describe("vLLM 0.32 connection contract", () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 
-  it("separates memory checkpoints by backend, model and normalized endpoint", () => {
-    const signature = memorySignature(settings.endpoint, settings.model, "vllm");
-    expect(memorySignature(settings.endpoint.replace(/\/v1$/, "/"), settings.model, "vllm")).toBe(signature);
-    expect(memorySignature(settings.endpoint, settings.model, "llama.cpp")).not.toBe(signature);
-    expect(memorySignature(settings.endpoint, "adapter", "vllm")).not.toBe(signature);
-    expect(memorySignature("http://localhost:9000/v1", settings.model, "vllm")).not.toBe(signature);
-  });
 });
 
 describe("vLLM generation", () => {
@@ -205,13 +195,11 @@ describe("vLLM generation", () => {
     subscription.dispose();
   });
 
-  it("uses exact raw tokenization and supports auxiliary titles and memory", async () => {
+  it("uses exact raw tokenization and supports auxiliary titles", async () => {
     await withServerConnection(settings, async () => {
       expect(await tokenize(settings.endpoint, "text", settings.model, { exact: true })).toBe(5);
       expect(calls[0].body).toEqual({ model: settings.model, prompt: "text", add_special_tokens: false });
       expect(await generateChatTitle("hello", { ...settings, topK: 40, topP: 0.95, titlePrompt: "Name this" })).toBe("A useful response");
-      const record = { messages: [{ role: "user", content: "We use strict TypeScript", ts: 1 }] } as ChatRecord;
-      expect(await generateMemory(record, settings.endpoint, settings.model, new AbortController().signal)).toBe("A useful response");
     });
     expect(calls.filter(c => c.url.endsWith("completions")).every(c => c.body.reasoning_effort === "none")).toBe(true);
   });

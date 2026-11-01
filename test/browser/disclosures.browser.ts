@@ -93,18 +93,14 @@ for (const theme of ["light", "dark"] as const) {
       });
     }
 
-    test("active memory restores shimmer after pointer exit and keeps expansion on updates", async ({ page }) => {
+    test("legacy pending memory is static and retains disclosure interaction", async ({ page }) => {
       const head = await chatRow(page, theme, "memory-generating");
-      const name = head.locator(".tool-name");
-      await expect(name).toHaveCSS("color", "rgba(0, 0, 0, 0)");
-      await head.click();
-      await expect(name).not.toHaveCSS("color", "rgba(0, 0, 0, 0)");
-      await page.mouse.move(990, 5);
-      await expect(name).toHaveCSS("color", "rgba(0, 0, 0, 0)");
-      await hostMessage(page, { kind: "memoryCreations", creations: [{ messageTs: 3, status: "failed", operation: "update", error: "Generation failed." }] });
+      await expect(head).toContainText("Legacy memory generation stopped");
+      await expect(head).not.toHaveClass(/active-tool-head/);
+      await head.click(); await page.mouse.move(990, 5);
+      await expect(head).toBeFocused();
       await expect(page.locator("details[data-memory-creation]")).toHaveAttribute("open", "");
-      await expect(head).toContainText("Memory update failed");
-      await expect(head.locator(".tool-name")).not.toHaveCSS("color", "rgba(0, 0, 0, 0)");
+      await expect(page.getByRole("button", { name: "Retry", exact: true })).toHaveCount(0);
     });
 
     test("active disclosure remains readable with reduced motion", async ({ page }) => {
