@@ -16,7 +16,7 @@ vi.mock("../src/llm/client.js", () => ({
 }));
 import { SideViewProvider } from "../src/ui/sideView/provider.js";
 
-const metadata = { backend: "vllm", modelAlias: "qwen", contextSize: 8192, supportsVision: true, imageSupport: "unknown" };
+const metadata = { backend: "vllm", modelAlias: "qwen", contextSize: 8192, supportsVision: true, imageSupport: "supported" };
 beforeEach(() => {
   mocks.settings = { endpoint: "http://127.0.0.1:8000/v1", model: "qwen", serverType: "auto" };
   mocks.metadata.mockReset().mockResolvedValue(metadata);
@@ -39,9 +39,9 @@ describe("host-owned connection state", () => {
     let finish!: (value: typeof metadata) => void;
     mocks.metadata.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
     const view = mount();
-    const first = view.receive({ type: "validateEndpoint", url: "http://127.0.0.1:8001/v1", serverType: "vllm", apiKey: "stale-secret", requestId: 1 });
+    const first = view.receive({ type: "validateEndpoint", url: "http://127.0.0.1:8001/v1", apiKey: "stale-secret", requestId: 1 });
     await vi.waitFor(() => expect(finish).toBeTypeOf("function"));
-    await view.receive({ type: "validateEndpoint", url: "http://127.0.0.1:8002/v1", serverType: "vllm", requestId: 2 });
+    await view.receive({ type: "validateEndpoint", url: "http://127.0.0.1:8002/v1", requestId: 2 });
     finish(metadata); await first;
     expect(mocks.settings.endpoint).toBe("http://127.0.0.1:8002/v1");
     expect(view.entries.size).toBe(0);
@@ -51,26 +51,37 @@ describe("host-owned connection state", () => {
   it("persists masked credential status across reloads and replaces it by server", async () => {
     const view = mount();
     const url = "http://127.0.0.1:8000/v1";
-    await view.receive({ type: "validateEndpoint", url, serverType: "vllm", apiKey: "private-key", requestId: 1 });
+    await view.receive({ type: "validateEndpoint", url, apiKey: "private-key", requestId: 1 });
+    expect(mocks.metadata).toHaveBeenCalledWith(url, { model: "qwen", force: true, probeImages: true });
+    expect(mocks.write).not.toHaveBeenCalledWith("serverType", expect.anything());
     expect(view.entries.size).toBe(1);
     expect(JSON.stringify(view.postMessage.mock.calls)).not.toContain("private-key");
     const restored = mount(view.entries);
     restored.provider.pushSettings();
     await vi.waitFor(() => expect(restored.postMessage).toHaveBeenCalledWith({ type: "serverCredential", endpoint: url, configured: true }));
-    await restored.receive({ type: "validateEndpoint", url, serverType: "vllm", apiKey: "replacement-key", requestId: 2 });
+    await restored.receive({ type: "validateEndpoint", url, apiKey: "replacement-key", requestId: 2 });
     expect([...view.entries.values()]).toEqual(["replacement-key"]);
     expect(JSON.stringify(restored.postMessage.mock.calls)).not.toContain("replacement-key");
   });
 
-  it("discards validation when the backend is changed during discovery", async () => {
+  it("discards validation when the model is changed during the image check", async () => {
     let finish!: (value: typeof metadata) => void;
     mocks.metadata.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
     const view = mount();
-    const pending = view.receive({ type: "validateEndpoint", url: "http://127.0.0.1:8000/v1", serverType: "vllm", requestId: 3 });
+    const pending = view.receive({ type: "validateEndpoint", url: "http://127.0.0.1:8000/v1", requestId: 3 });
     await vi.waitFor(() => expect(finish).toBeTypeOf("function"));
-    await view.receive({ type: "saveSetting", key: "serverType", value: "llama.cpp" });
+    await view.receive({ type: "saveSetting", key: "model", value: "replacement-model" });
     finish(metadata); await pending;
-    expect(mocks.settings.serverType).toBe("llama.cpp");
+    expect(mocks.settings.model).toBe("replacement-model");
     expect(view.postMessage.mock.calls.some(([message]) => message.requestId === 3)).toBe(false);
+  });
+
+  it("does not save the connection or key when image probing fails", async () => {
+    mocks.metadata.mockRejectedValueOnce(new Error("Image support check returned HTTP 401."));
+    const view = mount();
+    await view.receive({ type: "validateEndpoint", url: "http://127.0.0.1:8001", apiKey: "wrong", requestId: 4 });
+    expect(mocks.write).not.toHaveBeenCalled();
+    expect(view.entries.size).toBe(0);
+    expect(view.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "endpointValidation", requestId: 4, ok: false, error: expect.stringContaining("HTTP 401") }));
   });
 });

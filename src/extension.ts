@@ -22,7 +22,12 @@ let storageWatcher: { dispose(): void } | undefined;
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   configureServerConnections(() => readSettings(), context.secrets);
-  context.subscriptions.push(onSettingsChange(() => clearServerCaches()));
+  let connectionSettings = readSettings();
+  context.subscriptions.push(onSettingsChange(() => {
+    const current = readSettings();
+    if (current.endpoint !== connectionSettings.endpoint || current.model !== connectionSettings.model) clearServerCaches();
+    connectionSettings = current;
+  }));
   let ws = currentWorkspaceRoot();
   if (ws) storage = new ChatStorage(ws);
   memory = new WorkspaceMemory(() => storage, 1000, { reportError: message => { void vscode.window.showErrorMessage(message); } });

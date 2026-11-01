@@ -3,11 +3,14 @@ import { StreamFailure, serverErrorMessage } from "./completion.js";
 import { connectionFor, connectionCacheKey, connectionHeaders, redactServerError, serverUrl, type ServerConnection } from "./connection.js";
 import type { ServerMetadata, ServerModel, ImageSupport } from "./serverTypes.js";
 import type { ChatCompletionRequest } from "./client.js";
+import { imageProbeDataUrl } from "./imageProbe.js";
 
 export type { ServerMetadata, ServerModel } from "./serverTypes.js";
 const metadataCache = new Map<string, { at: number; value: ServerMetadata }>();
 const modelsCache = new Map<string, { at: number; value: ServerModel[] }>();
 const imageCapabilities = new Map<string, ImageSupport>();
+const imageProbes = new Map<string, Promise<ImageSupport>>();
+let cacheGeneration = 0;
 const TTL = 60_000;
 const capabilityListeners = new Set<(connection: ServerConnection) => void>();
 export function onServerCapabilitiesChange(listener: (connection: ServerConnection) => void): { dispose(): void } {
@@ -27,7 +30,10 @@ function remember<T>(map: Map<string, { at: number; value: T }>, key: string, va
   map.set(key, { at: Date.now(), value });
   return value;
 }
-export function clearServerCaches(): void { metadataCache.clear(); modelsCache.clear(); imageCapabilities.clear(); }
+export function clearServerCaches(): void {
+  cacheGeneration++;
+  metadataCache.clear(); modelsCache.clear(); imageCapabilities.clear(); imageProbes.clear();
+}
 
 async function request(c: ServerConnection, route: string, signal?: AbortSignal, body?: unknown): Promise<Response> {
   return safeFetch(c.endpoint, serverUrl(c.endpoint, route), {
@@ -70,7 +76,18 @@ export async function fetchServerModels(endpoint: string, force = false, signal?
   return remember(modelsCache, key, models);
 }
 
-export async function fetchServerMetadata(endpoint: string, options: { model?: string; force?: boolean; signal?: AbortSignal } = {}): Promise<ServerMetadata> {
+interface MetadataOptions { model?: string; force?: boolean; signal?: AbortSignal; probeImages?: boolean }
+
+export async function fetchServerMetadata(endpoint: string, options: MetadataOptions = {}): Promise<ServerMetadata> {
+  const metadata = await discoverServerMetadata(endpoint, options);
+  if (!options.probeImages) return metadata;
+  const c = await connectionFor(endpoint, options.model);
+  c.backend = metadata.backend;
+  const imageSupport = await probeImageSupport(c, metadata.modelAlias, options);
+  return { ...metadata, imageSupport, supportsVision: imageSupport !== "unsupported" };
+}
+
+async function discoverServerMetadata(endpoint: string, options: MetadataOptions): Promise<ServerMetadata> {
   options.signal?.throwIfAborted();
   const c = await connectionFor(endpoint, options.model);
   const key = connectionCacheKey(c);
@@ -86,7 +103,8 @@ export async function fetchServerMetadata(endpoint: string, options: { model?: s
       if (!positive(size)) throw new Error("llama.cpp /props did not report a valid context length.");
       if (typeof alias !== "string" || !alias.trim()) throw new Error("llama.cpp /props did not report a model alias or model path.");
       c.backend = "llama.cpp";
-      return remember(metadataCache, key, { modelAlias: alias.trim(), contextSize: size, supportsVision: obj.modalities?.vision === true, backend: "llama.cpp", imageSupport: obj.modalities?.vision === true ? "supported" : "unsupported" });
+      const imageSupport = imageCapabilities.get(key) ?? (obj.modalities?.vision === true ? "supported" : "unsupported");
+      return remember(metadataCache, key, { modelAlias: alias.trim(), contextSize: size, supportsVision: imageSupport !== "unsupported", backend: "llama.cpp", imageSupport });
     }
     if (c.serverType === "llama.cpp" || (res.status !== 404 && res.status !== 405)) throw await serverFailure(res, c, "llama.cpp /props");
   }
@@ -95,7 +113,7 @@ export async function fetchServerMetadata(endpoint: string, options: { model?: s
   if (!model) throw new Error("The selected model is no longer available. Choose a model in Settings.");
   const tokenized = await vllmTokenize(c, { model: model.id, prompt: "", add_special_tokens: false }, options.signal);
   if (c.serverType === "auto" && model.owner !== "vllm") {
-    throw new Error("Could not identify the model server. Select llama.cpp or vLLM in Settings.");
+    throw new Error("Could not identify the model server as llama.cpp or vLLM. Check the URL and ensure any proxy exposes the server's discovery and tokenizer endpoints.");
   }
   c.backend = "vllm";
   const imageSupport = imageCapabilities.get(key) ?? "unknown";
@@ -120,7 +138,54 @@ export async function fetchServerContextSize(endpoint: string, model?: string, o
 
 export function isUnsupportedImage(status: number, text: string): boolean {
   return status >= 400 && status < 500 && status !== 401 && status !== 403 &&
-    /image input is not supported|does not support (?:image|multi.?modal)|not a multimodal model|only supports text|image.*mmproj/i.test(text);
+    /image input is not supported|does not support (?:image|multi.?modal)|not a multimodal model|only supports text/i.test(text);
+}
+
+/** Connection checks share one probe; no image or generated response is written to disk. */
+async function probeImageSupport(c: ServerConnection, model: string, options: MetadataOptions): Promise<ImageSupport> {
+  options.signal?.throwIfAborted();
+  const key = connectionCacheKey(c);
+  const known = imageCapabilities.get(key);
+  if (!options.force && known && known !== "unknown") return known;
+  const pending = imageProbes.get(key);
+  if (pending) return pending;
+  const generation = cacheGeneration;
+  const probe = (async (): Promise<ImageSupport> => {
+    const messages = [{ role: "user", content: [
+      { type: "image_url", image_url: { url: imageProbeDataUrl() } },
+      { type: "text", text: "Hi" }
+    ] }];
+    const vllm = c.backend === "vllm";
+    const res = await request(c, vllm ? "tokenize" : "v1/chat/completions", options.signal, {
+      model: c.model ?? model, messages,
+      ...(vllm ? { add_generation_prompt: true, add_special_tokens: false }
+        : { stream: false, max_tokens: 1, temperature: 0, chat_template_kwargs: { enable_thinking: false } })
+    });
+    let support: ImageSupport;
+    if (!res.ok) {
+      const failure = await serverFailure(res, c, "Image support check");
+      if (!isUnsupportedImage(res.status, failure.message)) throw failure;
+      support = "unsupported";
+    } else {
+      if (vllm) {
+        const result = await readVllmTokens(res);
+        if (!result.count) throw new StreamFailure("The image support check returned an empty prompt.", { cause: "protocol_error" });
+      } else {
+        const result = await readJson<{ choices?: { message?: { role?: unknown }; finish_reason?: unknown }[] }>(res);
+        const choice = Array.isArray(result?.choices) && result.choices.length === 1 ? result.choices[0] : undefined;
+        if (choice?.message?.role !== "assistant" || !["stop", "length"].includes(String(choice.finish_reason))) {
+          throw new StreamFailure("The image support check returned an incomplete or invalid response.", { cause: "protocol_error" });
+        }
+      }
+      support = "supported";
+    }
+    options.signal?.throwIfAborted();
+    if (generation === cacheGeneration) setImageSupport(c, support);
+    return support;
+  })();
+  imageProbes.set(key, probe);
+  try { return await probe; }
+  finally { if (imageProbes.get(key) === probe) imageProbes.delete(key); }
 }
 
 export class VisionUnsupportedError extends Error {
@@ -148,12 +213,17 @@ async function vllmTokenize(c: ServerConnection, body: unknown, signal?: AbortSi
     }
     throw failure;
   }
+  const result = await readVllmTokens(res);
+  if (images) setImageSupport(c, "supported");
+  return result;
+}
+
+async function readVllmTokens(res: Response): Promise<{ count: number; max_model_len: number }> {
   const data = await readJson<{ count?: unknown; max_model_len?: unknown; tokens?: unknown }>(res);
   if (!Number.isSafeInteger(data?.count) || (data.count as number) < 0 || !positive(data.max_model_len)
     || !Array.isArray(data.tokens) || data.tokens.length !== data.count || !data.tokens.every(Number.isSafeInteger)) {
     throw new StreamFailure("vLLM returned invalid tokenizer data.", { cause: "protocol_error" });
   }
-  if (images) setImageSupport(c, "supported");
   return { count: data.count as number, max_model_len: data.max_model_len };
 }
 

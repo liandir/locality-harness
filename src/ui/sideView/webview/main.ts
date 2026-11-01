@@ -1,4 +1,3 @@
-import { normalizeServerType } from "../../../llm/serverTypes.js";
 import { renderSettings, renderToolAutoApprovals, clampPercent } from "./settings.js";
 import type { SideViewState } from "./types.js";
 import { escapeHtml as esc } from "../../html.js";
@@ -234,19 +233,18 @@ function bind(): void {
     state.endpointSubmitted = url;
     state.endpointTesting = true;
     state.endpointRequestId = ++endpointRequestSequence;
-    state.endpointMsg = { text: "Reading server metadata…" };
+    state.endpointMsg = { text: "Detecting server and checking image support…" };
     state.endpointMetadata = undefined;
     state.serverModels = [];
     const apiKey = state.serverApiKeyDraft?.trim() || undefined;
     state.serverApiKeyDraft = undefined;
     if (keyInput) keyInput.value = "";
     render();
-    send({ type: "validateEndpoint", url, requestId: state.endpointRequestId, serverType: normalizeServerType(state.settings.serverType), apiKey });
+    send({ type: "validateEndpoint", url, requestId: state.endpointRequestId, apiKey });
   });
   keyInput?.addEventListener("input", event => {
     state.serverApiKeyDraft = (event.target as HTMLInputElement).value;
   });
-  bindSetting("serverType", "change", v => v);
   bindSetting("model", "change", v => v);
   bindSetting("toolCallingMode", "change", v => v);
   bindSetting("temperature", "change", v => Number(v));

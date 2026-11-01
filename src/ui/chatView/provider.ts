@@ -210,7 +210,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     let supported = false;
     let contextSize: number | undefined;
     try {
-      const metadata = await withServerConnection({ endpoint, model, serverType }, () => fetchServerMetadata(endpoint, { model }), true);
+      const metadata = await withServerConnection({ endpoint, model, serverType }, () => fetchServerMetadata(endpoint, { model, probeImages: true }), true);
       supported = metadata.supportsVision;
       contextSize = metadata.contextSize;
     } catch { /* Unknown capabilities keep image input unavailable. */ }

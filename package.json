@@ -328,16 +328,6 @@
           "type": "boolean",
           "default": false,
           "description": "Auto-approve all command tool calls in Act mode. Off by default."
-        },
-        "locality.serverType": {
-          "type": "string",
-          "enum": [
-            "auto",
-            "llama.cpp",
-            "vllm"
-          ],
-          "default": "auto",
-          "description": "Model server backend. Auto detects llama.cpp or vLLM; choose an explicit type for servers behind a proxy."
         }
       }
     }

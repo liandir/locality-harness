@@ -42,9 +42,9 @@ and [Advanced web search](tools.md#advanced-web-search).
 
 ### vLLM setup (v2.2.0)
 
-Set **Server type** to **Automatic**, enter a local/LAN vLLM URL such as
-`http://127.0.0.1:8000/v1`, then click **Set**. Explicit **llama.cpp** and **vLLM**
-overrides are available when a proxy obscures server identification. Root URLs,
+Enter a local/LAN vLLM URL such as `http://127.0.0.1:8000/v1`, then click **Set**.
+Locality automatically detects llama.cpp or vLLM and shows the detected server.
+Proxies must expose the server's discovery and tokenizer endpoints. Root URLs,
 `/v1` URLs, and proxy prefixes are supported. Choose the advertised model ID;
 served aliases and LoRA entries are supported.
 
@@ -69,10 +69,12 @@ click **Set** beside **Server URL**. A successful connection saves the new or re
 in VS Code SecretStorage. An empty field keeps the saved key. Keys are scoped to
 the server URL and proxy prefix and are not stored in settings or chat history.
 
-vLLM image capability initially reads **Checked on first image**. Locality permits
-image attachments and preprocesses the actual prompt before generating. A
-successful image check confirms support; a text-only model produces a useful
-error. Invalid files and server outages do not permanently disable images.
+When connecting or selecting a model, Locality sends a tiny test image generated
+entirely in memory and reports image input as **Supported** or **Unavailable**.
+No test image file is created. vLLM only preprocesses the image; llama.cpp's check
+generates at most one token. Authentication, invalid responses and server outages
+remain connection errors instead of marking the model as text-only. Clicking
+**Set** checks again. Actual vLLM image prompts are also preprocessed before generation.
 The complete vLLM prompt, tools and image tokens are counted on the server for
 the context guard, reserving up to 4,096 tokens (at most a quarter of the context)
 for the answer. Auxiliary requests reserve their explicit output limits.
@@ -88,8 +90,9 @@ records the compatibility baseline and how to run live acceptance tests.
 Connection troubleshooting:
 
 - **401/403:** set or replace the API key for this server.
-- **Could not identify:** select an explicit backend; a missing `/props` alone
-  does not identify a server as vLLM.
+- **Could not identify:** check the server URL and proxy routing. llama.cpp must
+  expose `/props`; vLLM must expose `/v1/models` and `/tokenize`. A missing
+  `/props` alone does not identify a server as vLLM.
 - **Native tools rejected:** enable automatic tool choice and the model's parser.
 - **Reasoning budget rejected:** configure reasoning boundaries/parser or clear
   the budget. Locality does not silently discard an explicit finite budget.
@@ -370,7 +373,6 @@ Only settings supported by the installed edition are available.
 
 | Setting | Default | What it does |
 | --- | --- | --- |
-| `serverType` | `auto` | Automatically identify the server, or select `llama.cpp` or `vllm` explicitly. |
 | `endpoint` | `http://localhost:8080/v1` | URL of your llama.cpp or vLLM server. Use `localhost` or a private IP literal such as `http://127.0.0.1:8080/v1` or `http://192.168.1.50:8080/v1`. |
 | `model` | `local` | Model id sent with requests. Choose a served model or alias from `/v1/models`. |
 | `toolCallingMode` | `native` | Select `native`, `compat-gemma4`, `compat-qwen3`, `compat-muse-glimmer`, or `compat-gpt-oss`. Compatibility profiles are native-first and add only the selected family's recovery behavior. |

@@ -1,4 +1,4 @@
-import type { ServerMetadata, ServerType } from "../llm/serverTypes.js";
+import type { ServerMetadata } from "../llm/serverTypes.js";
 /**
  * Webview commands and presentation messages. Session events and chat data
  * live in shared chat contracts, independently of their host implementations.
@@ -47,7 +47,7 @@ export type SideToExt =
   | { type: "openGithub" }
   | { type: "saveSetting"; key: string; value: unknown }
   | { type: "setReasoningEffort"; effort: ReasoningEffort }
-  | { type: "validateEndpoint"; url: string; requestId?: number; serverType?: ServerType; apiKey?: string }
+  | { type: "validateEndpoint"; url: string; requestId?: number; apiKey?: string }
   | { type: "validateWebSearch"; endpoint: string; apiKey: string }
   | { type: "editUserSettingsJson" }
   | { type: "editWorkspacePrompts" }

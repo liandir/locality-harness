@@ -1,6 +1,5 @@
 import { hasServerApiKey, saveServerApiKey, withConnectionDraft } from "../../llm/connection.js";
 import { clearServerCaches } from "../../llm/server.js";
-import { normalizeServerType, type ServerType } from "../../llm/serverTypes.js";
 import { createSideHost } from "../../build/sideHost.js";
 import type { SideHost } from "../../build/sideHostContracts.js";
 import { seedFeatureSettings } from "../../build/settings.js";
@@ -191,7 +190,7 @@ export class SideViewProvider implements vscode.WebviewViewProvider {
         break;
       case "saveSetting":
         try {
-          if (["endpoint", "model", "serverType"].includes(m.key)) this.connectionAttempt++;
+          if (["endpoint", "model"].includes(m.key)) this.connectionAttempt++;
           await writeSetting(m.key as keyof ReturnType<typeof readSettings>, m.value as never);
         } catch (e) {
           this.pushSettings();
@@ -215,15 +214,13 @@ export class SideViewProvider implements vscode.WebviewViewProvider {
           break;
         }
         try {
-          const { metadata, models, selectedModel } = await this.readEndpointInfo(m.url, true, m.serverType, m.apiKey);
+          const { metadata, models, selectedModel } = await this.readEndpointInfo(m.url, true, m.apiKey);
           if (attempt !== this.connectionAttempt) break;
           const commit = this.connectionWrites.then(async () => {
             if (attempt !== this.connectionAttempt) return;
             if (m.apiKey !== undefined) await saveServerApiKey(m.url, m.apiKey, this.context.secrets);
             if (attempt !== this.connectionAttempt) return;
-            clearServerCaches();
-            if (m.serverType !== undefined) await writeSetting("serverType", m.serverType);
-            if (attempt !== this.connectionAttempt) return;
+            if (m.apiKey !== undefined) clearServerCaches();
             await writeSetting("endpoint", m.url);
             if (attempt !== this.connectionAttempt) return;
             if (readSettings().model !== selectedModel) await writeSetting("model", selectedModel);
@@ -309,13 +306,13 @@ export class SideViewProvider implements vscode.WebviewViewProvider {
 
   private async readEndpointInfo(
     endpoint: string,
-    force = false, serverType: ServerType = normalizeServerType(readSettings().serverType), apiKey?: string
+    force = false, apiKey?: string
   ): Promise<{ metadata: Awaited<ReturnType<typeof fetchServerMetadata>>; models: ServerModel[]; selectedModel: string }> {
     const configured = readSettings().model;
-    return withConnectionDraft({ endpoint, serverType }, apiKey, async () => {
+    return withConnectionDraft({ endpoint }, apiKey, async () => {
       const models = await fetchServerModels(endpoint, force);
       const selectedModel = models.some(model => model.id === configured) ? configured : models[0].id;
-      const metadata = await withConnectionDraft({ endpoint, serverType, model: selectedModel }, apiKey, () => fetchServerMetadata(endpoint, { model: selectedModel, force }));
+      const metadata = await withConnectionDraft({ endpoint, model: selectedModel }, apiKey, () => fetchServerMetadata(endpoint, { model: selectedModel, force, probeImages: true }));
       return { metadata, models, selectedModel };
     });
   }

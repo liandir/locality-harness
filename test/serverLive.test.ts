@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { safeFetch } from "../src/network/safeFetch.js";
 import { serverUrl, withConnectionDraft } from "../src/llm/connection.js";
 import { fetchServerMetadata, complete, streamChat, type LlmStreamChunk } from "../src/llm/client.js";
+import { imageProbeDataUrl } from "../src/llm/imageProbe.js";
 
 // External servers only: this suite never installs models or starts a server.
 const targets = [
@@ -18,9 +19,10 @@ for (const target of targets) {
       const model = process.env[`LOCALITY_LIVE_${target.name}_MODEL`] ?? target.model;
       const key = process.env[`LOCALITY_LIVE_${target.name}_API_KEY`];
       await withConnectionDraft({ endpoint: url, model, serverType: "auto" }, key, async () => {
-        const metadata = await fetchServerMetadata(url, { model, force: true });
+        const metadata = await fetchServerMetadata(url, { model, force: true, probeImages: true });
         expect(metadata.backend).toBe(target.backend);
         expect(metadata.contextSize).toBeGreaterThan(0);
+        expect(metadata.imageSupport).not.toBe("unknown");
         if (target.backend === "vllm") {
           const version = await safeFetch(url, serverUrl(url, "version"), { headers: key ? { Authorization: `Bearer ${key}` } : {}, signal: AbortSignal.timeout(10_000) });
           expect(version.ok).toBe(true);
@@ -28,9 +30,10 @@ for (const target of targets) {
         }
         const signal = AbortSignal.timeout(120_000);
         if (target.name === "VISION") {
+          expect(metadata.imageSupport).toBe("supported");
           const text = await complete(url, { model, purpose: "auxiliary", max_tokens: 128, messages: [{ role: "user", content: [
             { type: "text", text: "Describe the image briefly." },
-            { type: "image_url", image_url: { url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=" } }
+            { type: "image_url", image_url: { url: imageProbeDataUrl() } }
           ] }] }, signal);
           expect(text.trim()).not.toBe("");
           expect((await fetchServerMetadata(url, { model })).imageSupport).toBe("supported");

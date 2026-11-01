@@ -57,6 +57,17 @@ describe("tool calling settings", () => {
 });
 
 describe("reasoning and model settings", () => {
+  it("always detects the backend automatically, ignoring old overrides", async () => {
+    const { readSettings, writeSetting, SETTING_KEYS } = await import("../src/config/settings.js");
+    for (const value of [undefined, "llama.cpp", "vllm"]) {
+      mocks.values.set("serverType", value);
+      expect(readSettings().serverType).toBe("auto");
+    }
+    expect(SETTING_KEYS).not.toContain("serverType");
+    await expect(writeSetting("serverType", "vllm")).rejects.toThrow("unavailable");
+    expect(mocks.update).not.toHaveBeenCalled();
+  });
+
   it("defaults Enter to queue and persists the steering preference", async () => {
     const { readSettings, writeSetting, resetAllSettings } = await import("../src/config/settings.js");
     expect(readSettings().steerWithEnter).toBe(false);

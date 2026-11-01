@@ -274,7 +274,7 @@ describe("reopened chat context window", () => {
 
     resolveMetadata({ contextSize: 262_144, supportsVision: false });
     await vi.waitFor(() => expect(posted).toContainEqual({ type: "serverContext", contextSize: 262_144 }));
-    expect(mocks.metadata).toHaveBeenCalledExactlyOnceWith(mocks.settings.endpoint, { model: mocks.settings.model });
+    expect(mocks.metadata).toHaveBeenCalledExactlyOnceWith(mocks.settings.endpoint, { model: mocks.settings.model, probeImages: true });
     expect(mocks.sessions.get("a")!.sent).toEqual([]);
   });
 
@@ -1013,7 +1013,7 @@ describe("image attachment capabilities", () => {
     storage.importAttachmentBytes.mockResolvedValue({ id: "image", fileName: "image.png", mimeType: "image/png", extension: "png", byteLength: 8 });
     await send({ type: "pasteAttachments", chatId: "a", files: [{ fileName: "image.png", dataUrl: "data:image/png;base64,iVBORw0KGgo=" }] });
     expect(storage.importAttachmentBytes).toHaveBeenCalledWith("a", "image.png", expect.any(Buffer), { allowImages: supported });
-    expect(mocks.metadata).toHaveBeenCalledWith(mocks.settings.endpoint, { model: "model-a" });
+    expect(mocks.metadata).toHaveBeenCalledWith(mocks.settings.endpoint, { model: "model-a", probeImages: true });
   });
 
   it("ignores late capability responses from a previously selected model", async () => {

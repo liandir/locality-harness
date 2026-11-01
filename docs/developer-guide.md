@@ -9,9 +9,15 @@ inherit the current turn. Backend adapters own discovery, tokenization, request
 translation and errors. The streaming parser and terminal-evidence handling stay
 shared. All HTTP calls continue through `safeFetch` in every edition.
 
-The `serverType` setting defaults to `auto`. vLLM metadata comes from
-`/v1/models` and `/tokenize`; llama.cpp uses `/props`. Image support is tri-state;
-unknown vLLM capability allows preprocessing of the first actual image. Credentials
+Backend detection is automatic; the old `serverType` setting is ignored and is
+no longer exposed. vLLM metadata comes from `/v1/models` and `/tokenize`;
+llama.cpp uses `/props`. Connection checks send an in-memory 28×28 RGB PNG
+(under 100 bytes) to vLLM's chat tokenizer or llama.cpp's chat completions with
+a one-token output limit. No image asset is stored. Image support is tri-state
+internally; only successful preprocessing/completion or an explicit unsupported
+modality error resolves the probe. Other failures remain connection errors.
+Concurrent checks share a probe, results are cached per connection, and **Set**
+forces a new check. Credentials
 use SecretStorage and are never sent back to either webview. Model changes invalidate
 cached counts; memory signatures also include the resolved backend, preserving
 retry counters and the last successful memory.

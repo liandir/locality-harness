@@ -32,10 +32,6 @@ export function renderSettings(state: SideViewState, expandedSettings: ReadonlyS
     <div class="panel settings-panel">
       ${state.memorySettingError ? `<p class="memory-error" role="alert">${esc(state.memorySettingError)}</p>` : ""}
       ${section("model", "Model", `
-        <label class="field-label" for="serverType">Server type</label>
-        <select id="serverType">
-          ${[["auto", "Automatic"], ["llama.cpp", "llama.cpp"], ["vllm", "vLLM"]].map(([value, label]) => `<option value="${value}" ${(s.serverType ?? "auto") === value ? "selected" : ""}>${label}</option>`).join("")}
-        </select>
         <label class="field-label" for="endpoint">Server URL</label>
         <div class="setting-action-row">
           <input id="endpoint" type="text" value="${esc(endpoint)}" ${state.endpointTesting ? "readonly" : ""} />
@@ -54,7 +50,7 @@ export function renderSettings(state: SideViewState, expandedSettings: ReadonlyS
           <div><span>Server</span><strong>${state.endpointMetadata.backend === "vllm" ? "vLLM" : "llama.cpp"}</strong></div>
           <div><span>Reported model</span><strong>${esc(state.endpointMetadata.modelAlias)}</strong></div>
           <div><span>Context</span><strong>${esc(state.endpointMetadata.contextSize.toLocaleString())} tokens</strong></div>
-          <div><span>Image input</span><strong>${state.endpointMetadata.imageSupport === "unknown" ? "Checked on first image" : state.endpointMetadata.supportsVision ? "Supported" : "Unavailable"}</strong></div>
+          <div><span>Image input</span><strong>${state.endpointMetadata.imageSupport === "unknown" ? "Unverified" : state.endpointMetadata.supportsVision ? "Supported" : "Unavailable"}</strong></div>
         </div>` : ""}
 
         <div class="field-row">
