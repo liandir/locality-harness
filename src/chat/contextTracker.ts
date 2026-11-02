@@ -1,3 +1,4 @@
+import { connectionIdentity } from "../llm/connection.js";
 import { isImageAttachment } from "./attachments.js";
 import { tokenize } from "../llm/client.js";
 import type { LlmContent } from "../llm/client.js";
@@ -14,16 +15,16 @@ const tokenCountCache = new Map<string, number>();
 const TOKEN_CACHE_MAX = 1024;
 
 /** Authoritative token count for a single string, with a bounded content cache. */
-export async function countTokens(endpoint: string, text: string, model?: string, options: { signal?: AbortSignal; exact?: boolean } = {}): Promise<number> {
+export async function countTokens(endpoint: string, text: string, model?: string, options: { signal?: AbortSignal; exact?: boolean; onEstimate?: () => void } = {}): Promise<number> {
   options.signal?.throwIfAborted();
-  const cacheKey = `${endpoint}\n${model ?? ""}\n${text}`;
+  const cacheKey = `${connectionIdentity(endpoint, model)}\n${text}`;
   const cached = tokenCountCache.get(cacheKey);
   if (cached !== undefined) return cached;
   let estimated = false;
   const n = await tokenize(endpoint, text, model, { ...options, onEstimate: () => { estimated = true; } });
   options.signal?.throwIfAborted();
   // Best-effort callers retain their fallback; estimates never become exact cache entries.
-  if (estimated) return n;
+  if (estimated) { options.onEstimate?.(); return n; }
   if (tokenCountCache.size >= TOKEN_CACHE_MAX) tokenCountCache.clear();
   tokenCountCache.set(cacheKey, n);
   return n;
@@ -39,17 +40,21 @@ export async function recomputeTokens(
   rec: ChatRecord,
   model?: string
 ): Promise<number> {
-  if (rec.tokenizerModel !== model) {
+  if (rec.tokenizerIdentity !== connectionIdentity(endpoint, model)) {
     for (const message of modelMessages(rec)) delete message.tokens;
     rec.tokenizerModel = model;
+    rec.tokenizerIdentity = connectionIdentity(endpoint, model);
   }
   let total = 0;
   for (const m of modelMessages(rec)) {
-    if (typeof m.tokens !== "number") {
-      m.tokens = await countTokens(endpoint, formatForCounting(m), model)
+    let tokens = m.tokens;
+    if (typeof tokens !== "number") {
+      let estimated = false;
+      tokens = await countTokens(endpoint, formatForCounting(m), model, { onEstimate: () => { estimated = true; } })
         + (m.attachments?.filter(isImageAttachment).length ?? 0) * VISION_TOKEN_RESERVE;
+      if (!estimated) m.tokens = tokens;
     }
-    total += m.tokens;
+    total += tokens;
   }
   rec.totalTokens = total;
   return total;

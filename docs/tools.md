@@ -29,12 +29,13 @@ the user's answer.
 | `glob` | Find files by pattern, such as `src/**/*.ts` | All modes |
 | `read_file` | Read a text file or a range of numbered lines | All modes |
 | `view_image` | Inspect a workspace JPEG, PNG, or WebP image | All modes; vision model and native tool calling required |
-| `search_memories` | Find relevant summaries from other chats in the same workspace | All modes; workspace memory must be enabled |
-| `recall_memory` | Read a summary using the name and ID returned by memory search | All modes; workspace memory must be enabled |
+| `create_memory` | Save a specific Markdown note, or update a recalled current note by stable ID | All modes; workspace memory must be enabled; saves automatically |
+| `search_memories` | Find relevant enabled workspace notes by local keywords | All modes; workspace memory must be enabled |
+| `recall_memory` | Read a live note using the name and ID returned by memory search | All modes; workspace memory must be enabled |
 | `ask_user_question` | Ask for a decision with suggested answers and a free-text option | All modes; gathers user input without accessing files |
 
-Memory tools follow the read-approval setting; see [workspace memory](user-guide.md#workspace-memory)
-to enable them and manage saved summaries.
+Search and recall follow the read-approval setting. Memory creation/updates save automatically, including in Plan and Review; other file writes remain restricted. See [workspace memory](user-guide.md#workspace-memory)
+to enable them and manage workspace notes.
 
 ## Edit tools
 

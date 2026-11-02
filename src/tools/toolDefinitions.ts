@@ -8,15 +8,24 @@ const READ_FILE_DESCRIPTION = "Read a UTF-8 text file inside the open workspace,
 
 export const ALL_TOOLS: ToolSpec[] = [
   {
+    name: "create_memory",
+    description: "Save a short, specific, durable workspace note with Markdown contents. Saves automatically in Act, Plan, and Review. Omit id to create; supply an existing stable id to update after recalling its current version with recall_memory. Do not save secrets or task transcripts. Exact duplicates reuse the existing note.",
+    parameters: objectParameters({
+      name: { type: "string", description: "Specific note name, 1-200 characters." },
+      contents: { type: "string", description: "Durable facts or preferences in Markdown, 1-20,000 characters." },
+      id: { type: "string", description: "Optional existing note ID. Recall its current version before updating." }
+    }, ["name", "contents"])
+  },
+  {
     name: "search_memories",
-    description: "Search active memories from other chats in this workspace by deterministic keywords. Returns matching names, IDs, and full UTC dates, ranked by relevance; no memory contents. Use recall_memory to read a match.",
+    description: "Search enabled independent notes in this workspace by deterministic keywords. Returns matching names, IDs, and full UTC dates, ranked by relevance; no memory contents. Use recall_memory to read a match.",
     parameters: objectParameters({
       query: { type: "string", description: "Non-empty keywords, names, paths, or symbols related to the current request." }
     }, ["query"])
   },
   {
     name: "recall_memory",
-    description: "Read one active workspace memory using the exact name and ID from search_memories. Returns its name, ID, full UTC date, and contents. If the source changed or is no longer active, search again.",
+    description: "Read one workspace note using the exact name and ID from search_memories. Returns its name, ID, full UTC date, and contents. Recall immediately before create_memory updates; changed versions must be recalled again.",
     parameters: objectParameters({
       name: { type: "string", description: "Exact memory name from search_memories." },
       id: { type: "string", description: "Exact memory ID from search_memories." }
@@ -161,7 +170,7 @@ export const ALL_TOOLS: ToolSpec[] = [
 const READ_ONLY_TOOL_NAMES = new Set(["view_image", "read_file", "list_dir", "glob", "ask_user_question"]);
 
 export function isMemoryToolName(name: string): boolean {
-  return name === "search_memories" || name === "recall_memory";
+  return name === "create_memory" || name === "search_memories" || name === "recall_memory";
 }
 
 export function toolsForMode(mode: ChatMode, transport: "native" | "legacy" = "legacy", memoryEnabled = false, supportsVision = false, settings?: object): ToolSpec[] {

@@ -4,7 +4,6 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { ChatRecord } from "../src/chat/storage.js";
 import type { ChatSession, UiEvent } from "../src/chat/session.js";
-import type { WorkspaceMemory } from "../src/chat/workspaceMemory.js";
 import { editDiffCases } from "./fixtures/editDiff.js";
 
 const planText = (markdown: string) => `<proposed_plan>\n${markdown}\n</proposed_plan>`;
@@ -25,8 +24,7 @@ const mocks = vi.hoisted(() => ({
     showThinking: true,
     autoCompact: false,
     memoryEnabled: false,
-    memoryLoadOnStart: false,
-    autoGenerateMemories: false,
+    memoryAutoLoad: false,
     memoryMaxCount: 10,
     autoCompactThresholdPercent: 80,
     autoapproveReads: true,
@@ -41,6 +39,8 @@ const mocks = vi.hoisted(() => ({
   complete: vi.fn(),
   fetchServerContextSize: vi.fn(),
   supportsVision: true,
+  backend: "llama.cpp" as "llama.cpp" | "vllm",
+  countPrompt: vi.fn(),
   runCommand: vi.fn(),
   startCommand: vi.fn(),
   updateSetting: vi.fn(),
@@ -52,7 +52,7 @@ vi.mock("vscode", () => ({
   workspace: {
     getConfiguration: () => ({
       get: (key: string) => (mocks.settings as Record<string, unknown>)[key],
-      inspect: (key: string) => ["memoryEnabled", "memoryLoadOnStart", "autoGenerateMemories"].includes(key)
+      inspect: (key: string) => ["memoryEnabled", "memoryAutoLoad"].includes(key)
         ? { workspaceValue: (mocks.settings as Record<string, unknown>)[key] } : undefined,
       update: mocks.updateSetting
     }),
@@ -91,8 +91,12 @@ vi.mock("../src/llm/client.js", () => ({
   fetchServerMetadata: async () => {
     const contextSize = await mocks.fetchServerContextSize();
     if (contextSize === undefined) throw new Error("Unavailable context size");
-    return { modelAlias: "test-model", contextSize, supportsVision: mocks.supportsVision };
+    return { modelAlias: "test-model", contextSize, supportsVision: mocks.supportsVision, backend: mocks.backend };
   }
+}));
+
+vi.mock("../src/llm/server.js", async importOriginal => ({
+  ...await importOriginal<typeof import("../src/llm/server.js")>(), countServerPrompt: mocks.countPrompt
 }));
 
 vi.mock("../src/tools/terminalTool.js", () => ({
@@ -111,6 +115,8 @@ beforeEach(() => {
   mocks.complete.mockReset();
   mocks.fetchServerContextSize.mockReset();
   mocks.supportsVision = true;
+  mocks.backend = "llama.cpp";
+  mocks.countPrompt.mockReset().mockResolvedValue(100);
   mocks.runCommand.mockReset();
   mocks.startCommand.mockReset();
   mocks.tokenize.mockResolvedValue(1);
@@ -128,13 +134,71 @@ beforeEach(() => {
   mocks.settings.commandToolsEnabled = true;
   mocks.settings.autoCompact = false;
   mocks.settings.memoryEnabled = false;
-  mocks.settings.memoryLoadOnStart = false;
-  mocks.settings.autoGenerateMemories = false;
+  mocks.settings.memoryAutoLoad = false;
   mocks.settings.memoryMaxCount = 10;
   mocks.settings.autoCompactThresholdPercent = 80;
   mocks.settings.toolCallingMode = "compat-gemma4";
   mocks.settings.reasoningBudget = 16384;
   mocks.settings.reasoningEfforts = { Low: "low", Medium: "medium", High: "high" };
+});
+
+describe("vLLM session lifecycle", () => {
+  it.each([false, true])("keeps plan approval tied to completion (interrupted=%s)", async interrupted => {
+    mocks.backend = "vllm";
+    const { ChatSession } = await import("../src/chat/session.js");
+    const { StreamFailure } = await import("../src/llm/completion.js");
+    const record = newRecord();
+    const events: UiEvent[] = [];
+    const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record, emit: event => events.push(event) });
+    mocks.streamChat.mockImplementation(async function* () {
+      yield { kind: "thought", text: "Consider the tests." };
+      yield { kind: "text", text: planText("- Implement the change\n- Run the tests") };
+      expect(record.pendingPlanMessageTs).toBeUndefined();
+      if (interrupted) throw new StreamFailure("Connection lost", { cause: "unexpected_eof", completionEvidence: "none" });
+    });
+    try {
+      await session.sendUserMessage("Plan the change", [], "plan");
+      expect(mocks.countPrompt).toHaveBeenCalled();
+      expect(record.pendingPlanMessageTs !== undefined).toBe(!interrupted);
+      expect(events.some(event => event.kind === "planFinal")).toBe(!interrupted);
+      if (interrupted) expect(record.messages.at(-1)?.interruption?.diagnostics?.cause).toBe("unexpected_eof");
+    } finally { await session.shutdown(); }
+  });
+
+  it("uses exact full-prompt counts and holds multiple native calls for sequential approvals", async () => {
+    mocks.backend = "vllm";
+    mocks.settings.autoapproveReads = false;
+    const ws = await fs.mkdtemp(path.join(os.tmpdir(), "locality-vllm-"));
+    const { ChatSession } = await import("../src/chat/session.js");
+    const record = newRecord();
+    const events: UiEvent[] = [];
+    const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: ws, record, emit: event => events.push(event) });
+    let calls = 0;
+    mocks.streamChat.mockImplementation(async function* (_endpoint, request) {
+      if (++calls === 1) {
+        yield { kind: "toolCall", id: "a", name: "list_dir", argsJson: '{"path":"."}' };
+        yield { kind: "toolCall", id: "b", name: "list_dir", argsJson: '{"path":"."}' };
+      } else {
+        expect(request.messages.filter((message: { role: string }) => message.role === "tool").map((message: { tool_call_id: string }) => message.tool_call_id)).toEqual(["a", "b"]);
+        yield { kind: "text", text: "Both directories checked." };
+      }
+    });
+    const proposals = () => events.filter((event): event is Extract<UiEvent, { kind: "toolCallProposed" }> => event.kind === "toolCallProposed");
+    try {
+      const turn = session.sendUserMessage("Check the directory twice");
+      await vi.waitFor(() => expect(proposals()).toHaveLength(1));
+      expect(proposals()[0].approvalRequired).toBe(true);
+      session.approve(proposals()[0].toolId, true);
+      await vi.waitFor(() => expect(proposals()).toHaveLength(2));
+      session.approve(proposals()[1].toolId, true);
+      await turn;
+      expect(calls).toBe(2);
+      const counted = mocks.countPrompt.mock.calls[0][1];
+      expect(counted.tools.length).toBeGreaterThan(0);
+      expect(counted.messages.some((message: { content: unknown }) => typeof message.content === "string" && message.content.startsWith("<tools>"))).toBe(false);
+      expect(record.messages.at(-1)?.content).toBe("Both directories checked.");
+    } finally { session.cancel(); await session.shutdown(); await fs.rm(ws, { recursive: true, force: true }); }
+  });
 });
 
 function contextActivityIds(events: UiEvent[]): string[] {
@@ -485,65 +549,6 @@ describe("session shutdown", () => {
 });
 
 describe("ChatSession", () => {
-  it.each([false, true])("accepts new messages while deferring model requests for memory creation (edit=%s)", async edit => {
-    let finish!: () => void;
-    const release = vi.fn();
-    const memory = {
-      beginChatTurn: vi.fn((_signal: AbortSignal, waiting: () => void) => {
-        waiting();
-        return new Promise<() => void>(resolve => { finish = () => resolve(release); });
-      })
-    } as unknown as WorkspaceMemory;
-    mocks.streamChat.mockImplementation(async function* () { yield { kind: "text", text: "Ready" }; });
-    const { ChatSession } = await import("../src/chat/session.js");
-    const record = newRecord();
-    record.messages = [{ role: "user", content: "original", ts: 1 }, { role: "assistant", content: "answer", ts: 2 }];
-    const events: UiEvent[] = [];
-    const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record, memory, emit: event => events.push(event) });
-    const turn = edit ? session.editUserMessage(1, "edited") : session.sendUserMessage("next");
-    expect(session.isTurnActive()).toBe(true);
-    expect(events[0]).toEqual({ kind: "turnPreparing", reason: "memory" });
-    if (!edit) {
-      await vi.waitFor(() => expect(events).toContainEqual(expect.objectContaining({ kind: "userMessage", text: "next" })));
-      expect(record.messages.at(-1)).toMatchObject({ role: "user", content: "next" });
-    }
-    expect(record.messages).toHaveLength(edit ? 2 : 3);
-    expect(record.messages[0].content).toBe("original");
-    expect(events.some(event => event.kind === "turnWorkStarted")).toBe(false);
-    expect(mocks.fetchServerContextSize).not.toHaveBeenCalled();
-    expect(mocks.streamChat).not.toHaveBeenCalled();
-    finish();
-    await turn;
-    expect(mocks.streamChat).toHaveBeenCalledOnce();
-    expect(events.some(event => event.kind === "turnEnd")).toBe(true);
-    expect(session.isTurnActive()).toBe(false);
-    expect(release).toHaveBeenCalledOnce();
-    if (!edit) expect(events.filter(event => event.kind === "userMessage")).toHaveLength(1);
-  });
-
-  it("stops a waiting memory handoff without sending the pending chat to the model", async () => {
-    const memory = {
-      beginChatTurn: vi.fn((signal: AbortSignal, waiting: () => void) => {
-        waiting();
-        return new Promise<() => void>((_resolve, reject) => {
-          signal.addEventListener("abort", () => reject(signal.reason), { once: true });
-        });
-      })
-    } as unknown as WorkspaceMemory;
-    const { ChatSession } = await import("../src/chat/session.js");
-    const events: UiEvent[] = [];
-    const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record: newRecord(), memory, emit: event => events.push(event) });
-    const turn = session.sendUserMessage("next");
-    await vi.waitFor(() => expect(events).toContainEqual(expect.objectContaining({ kind: "userMessage", text: "next" })));
-    await session.shutdown();
-    await turn;
-    expect(events).toContainEqual({ kind: "abort", reason: "Stopped by user.", messageTs: expect.any(Number), diagnostics: { cause: "user_cancel" } });
-    expect(session.isTurnActive()).toBe(false);
-    expect(mocks.streamChat).not.toHaveBeenCalled();
-    expect(mocks.fetchServerContextSize).not.toHaveBeenCalled();
-    expect(session.getRecord().contextMessages).toEqual([expect.objectContaining({ role: "user", content: "next" })]);
-    expect(session.getRecord().messages.at(-1)?.interruption?.reason).toBe("Stopped by user.");
-  });
 
   it("keeps ordinary prompt processing out of the context-loading status", async () => {
     mocks.streamChat.mockImplementation(async function* (
@@ -3708,8 +3713,7 @@ describe("ChatSession", () => {
     expect(mocks.streamChat).not.toHaveBeenCalled();
     expect(events.some(event =>
       event.kind === "abort"
-      && event.reason.includes("server is unavailable")
-      && event.reason.includes("/props")
+      && event.reason.includes("Unavailable context size")
     )).toBe(true);
   });
 
@@ -4591,371 +4595,6 @@ describe("delete user messages", () => {
   });
 });
 
-describe("workspace memory tools", () => {
-  it.each([
-    ["native", "act"], ["native", "plan"], ["native", "review"],
-    ["compat-qwen3", "act"], ["compat-qwen3", "plan"], ["compat-qwen3", "review"]
-  ] as const)("searches then recalls within the active workspace in %s/%s", async (profile, mode) => {
-    mocks.settings.memoryEnabled = true;
-    mocks.settings.toolCallingMode = profile;
-    mocks.settings.readToolsEnabled = false;
-    const { ChatStorage } = await import("../src/chat/storage.js");
-    const { transcriptRevision, searchMemories } = await import("../src/chat/memory.js");
-    const { ChatSession } = await import("../src/chat/session.js");
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "locality-memory-tools-"));
-    try {
-      const storage = new ChatStorage(path.join(dir, "workspace"), path.join(dir, "chats"));
-      const neighbor = new ChatStorage(path.join(dir, "workspace-other"), path.join(dir, "chats"));
-      const source = storage.newRecord(profile);
-      source.title = "Parser decisions";
-      source.messages = [{ role: "user", content: "Parser design", ts: 1 }];
-      source.memory = { text: "Parser LOCAL_CONTENT_SENTINEL", sourceRevision: transcriptRevision(source), generatedAt: Date.UTC(2026, 8, 11, 12, 30), manual: false, enabled: true };
-      await storage.save(source);
-      const outside = neighbor.newRecord(profile);
-      outside.title = "Parser outside";
-      outside.messages = [{ role: "user", content: "Parser", ts: 1 }];
-      outside.memory = { ...source.memory, text: "Parser OTHER_WORKSPACE_SENTINEL", sourceRevision: transcriptRevision(outside) };
-      await neighbor.save(outside);
-      const record = storage.newRecord(profile);
-      record.mode = mode;
-      const events: UiEvent[] = [];
-      let step = 0;
-      let selected: { name: string; id: string };
-      const requests: { messages: { role: string; content: unknown }[]; tools?: { function: { name: string } }[] }[] = [];
-      mocks.streamChat.mockImplementation(async function* (_endpoint, request) {
-        requests.push(request);
-        if (profile !== "native" && request.tools) throw new mocks.NativeToolsUnsupportedError("tools param requires --jinja flag");
-        const call = (name: string, args: object) => profile === "native"
-          ? { kind: "toolCall", name, argsJson: JSON.stringify(args), id: `memory_call_${step}` }
-          : { kind: "text", text: `<tool_call>${JSON.stringify({ name, arguments: args })}</tool_call>` };
-        if (step++ === 0) {
-          expect(JSON.stringify(request.messages)).not.toContain("LOCAL_CONTENT_SENTINEL");
-          yield call("search_memories", { query: "parser" });
-        } else if (step === 2) {
-          const result = JSON.parse(record.messages.filter(m => m.role === "tool").at(-1)!.content);
-          expect(events.filter(e => e.kind === "initialMemoryCalls").every(e => e.calls.length === 0)).toBe(true);
-          expect(result.memories).toHaveLength(1);
-          expect(record.memorySources?.[result.memories[0].id]).toBe(source.id);
-          expect(result.memories[0]).toMatchObject({ name: source.title, date: "2026-09-11T12:30Z" });
-          expect(JSON.stringify(result)).not.toContain("LOCAL_CONTENT_SENTINEL");
-          selected = result.memories[0];
-          yield call("recall_memory", { name: selected.name, id: selected.id });
-        } else {
-          yield { kind: "text", text: "Done." };
-        }
-      });
-      const session = new ChatSession({ storage, workspaceRoot: record.workspaceRoot, record, emit: e => events.push(e) });
-      await session.refreshMemoryVisibility();
-      expect(events.at(-1)).toEqual({ kind: "initialMemoryCalls", calls: [] });
-      await session.sendUserMessage("Explain the parser");
-      const result = JSON.parse(record.messages.filter(m => m.role === "tool").at(-1)!.content);
-      expect(result).toMatchObject({ name: source.title, contents: source.memory.text, date: "2026-09-11T12:30Z" });
-      const { initialMemoryContext } = await import("../src/chat/initialMemoryContext.js");
-      expect(initialMemoryContext(record.recalledMemories!, 1)[0].content)
-        .toBe(record.messages.filter(message => message.role === "tool").at(-1)!.content);
-      for (const request of requests) {
-        expect(JSON.stringify(request.messages.filter(m => m.role === "system"))).not.toContain("LOCAL_CONTENT_SENTINEL");
-        expect(JSON.stringify(request)).not.toContain("OTHER_WORKSPACE_SENTINEL");
-      }
-      const outsideMatch = searchMemories("parser", [outside], record.id).memories[0];
-      expect(result.id).not.toBe(outsideMatch.id);
-      expect(events.filter(e => e.kind === "toolCallProposed")).toHaveLength(2);
-      expect(events.filter(e => e.kind === "toolCallProposed").every(e => e.approvalRequired === false)).toBe(true);
-      // Explicit recalls remain in their original positions in the timeline.
-      expect(events.filter(e => e.kind === "initialMemoryCalls").every(e => e.calls.length === 0)).toBe(true);
-      const saved = (await storage.load(record.id))!;
-      expect(saved.recalledMemories).toHaveLength(1);
-      expect(saved.memorySources).toEqual({ [result.id]: source.id });
-      const reopened = new ChatSession({ storage, workspaceRoot: saved.workspaceRoot, record: saved, emit: e => events.push(e) });
-      await reopened.refreshMemoryVisibility();
-      expect(events.at(-1)).toEqual({ kind: "initialMemoryCalls", calls: [] });
-    } finally { await fs.rm(dir, { recursive: true, force: true }); }
-  });
-
-  it.each(["search_memories", "recall_memory"])("does not expose or execute %s while disabled", async name => {
-    const { ChatSession } = await import("../src/chat/session.js");
-    const records = vi.fn();
-    let step = 0;
-    mocks.streamChat.mockImplementation(async function* (_endpoint, request) {
-      expect(request.tools.map((tool: { function: { name: string } }) => tool.function.name)).not.toContain(name);
-      expect(request.messages[0].content).not.toContain("search_memories");
-      expect(request.messages[0].content).not.toContain("recall_memory");
-      if (step++ === 0) yield { kind: "toolCall", name, argsJson: name === "search_memories" ? '{"query":"parser"}' : '{"name":"Parser","id":"123"}', id: "disabled_call" };
-      else yield { kind: "text", text: "Done." };
-    });
-    const record = newRecord();
-    const session = new ChatSession({ storage: { save: vi.fn(), records } as never, workspaceRoot: "/tmp/workspace", record, emit: () => undefined });
-    await session.sendUserMessage("check");
-    expect(records).not.toHaveBeenCalled();
-    expect(record.messages.find(m => m.role === "tool")?.toolCall?.status).toBe("rejected");
-  });
-
-  it("rechecks the switch after awaiting read approval", async () => {
-    mocks.settings.memoryEnabled = true;
-    mocks.settings.autoapproveReads = false;
-    const { ChatSession } = await import("../src/chat/session.js");
-    const records = vi.fn();
-    let step = 0;
-    let propose: (id: string) => void = () => undefined;
-    const proposed = new Promise<string>(resolve => { propose = resolve; });
-    mocks.streamChat.mockImplementation(async function* () {
-      if (step++ === 0) yield { kind: "toolCall", name: "search_memories", argsJson: '{"query":"parser"}', id: "pending_search" };
-      else yield { kind: "text", text: "Done." };
-    });
-    const record = newRecord();
-    const session = new ChatSession({ storage: { save: vi.fn(), records } as never, workspaceRoot: "/tmp/workspace", record,
-      emit: e => { if (e.kind === "toolCallProposed") propose(e.toolId); } });
-    const turn = session.sendUserMessage("check");
-    const toolId = await proposed;
-    mocks.settings.memoryEnabled = false;
-    session.approve(toolId, true);
-    await turn;
-    expect(records).not.toHaveBeenCalled();
-    expect(record.messages.find(m => m.role === "tool")?.content).toContain("Workspace memories are disabled");
-  });
-});
-
-describe("initial workspace memory loading", () => {
-  it("keeps the model's first preamble and tool calls after the harness recall results", async () => {
-    const { ChatSession } = await import("../src/chat/session.js");
-    const { initialMemoryContext } = await import("../src/chat/initialMemoryContext.js");
-    const record = newRecord();
-    record.messages = [
-      { role: "user", content: "Fix the game", ts: 1 },
-      { role: "tool", content: "Search result", ts: 2, toolCall: { id: "model_search", name: "search_memories", argsJson: '{"query":"game"}' } },
-      { role: "assistant", content: "I will search next.", ts: 3, events: [{ kind: "text", text: "I will search next." }, { kind: "toolCall", name: "search_memories", argsJson: '{"query":"game"}', id: "model_search" }] }
-    ];
-    record.initialMemories = [{ sourceId: "source", title: "Game", text: "Loaded memory", generatedAt: 1, sourceRevision: "revision" }];
-    record.contextMessages = [record.messages[0], ...initialMemoryContext(record.initialMemories, 1), ...record.messages.slice(1)];
-    const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record, emit: () => undefined });
-    const messages = await (session as unknown as {
-      buildNativePromptMessages(prompt: string): Promise<{ role: string; content: string; tool_call_id?: string; tool_calls?: { id: string }[] }[]>;
-    }).buildNativePromptMessages("system instructions");
-    expect(messages.map(message => message.role)).toEqual(["system", "user", "assistant", "tool", "assistant", "tool"]);
-    expect(messages[2].content).toBe("");
-    expect(messages[3].content).toContain("Loaded memory");
-    expect(messages[3].tool_call_id).toBe(messages[2].tool_calls?.[0].id);
-    expect(messages[4].content).toBe("I will search next.");
-    expect(messages[4].tool_calls?.map(call => call.id)).toEqual(["model_search"]);
-    expect(messages[5].content).toBe("Search result");
-    await session.shutdown();
-  });
-
-  it("places recalled reference data after the user text and image attachments in native context", async () => {
-    const { ChatSession } = await import("../src/chat/session.js");
-    const { initialMemoryContext } = await import("../src/chat/initialMemoryContext.js");
-    const record = newRecord();
-    record.messages = [{ role: "user", content: "Describe this image", ts: 1, attachments: [
-      { id: "image", fileName: "screen.png", mimeType: "image/png", extension: "png", byteLength: 10 }
-    ] }];
-    record.initialMemories = [{ sourceId: "source", title: "Game", text: "LOADED_MEMORY", generatedAt: 1, sourceRevision: "revision" }];
-    record.contextMessages = [record.messages[0], ...initialMemoryContext(record.initialMemories, 1)];
-    const session = new ChatSession({ storage: { save: vi.fn(), attachmentDataUrl: vi.fn().mockResolvedValue("data:image/png;base64,test") } as never,
-      workspaceRoot: "/tmp/workspace", record, emit: () => undefined });
-    const messages = await (session as unknown as {
-      buildNativePromptMessages(prompt: string): Promise<{ role: string; content: string | { type: string; text?: string }[] }[]>;
-    }).buildNativePromptMessages("system instructions");
-    expect(messages.map(message => message.role)).toEqual(["system", "user", "assistant", "tool"]);
-    expect(messages[1].content).toEqual([
-      expect.objectContaining({ type: "image_url" }),
-      expect.objectContaining({ type: "text", text: expect.stringContaining("Describe this image") })
-    ]);
-    expect(messages[3].content).toBe(record.contextMessages[1].content);
-    await session.shutdown();
-  });
-
-  it.each(["native", "compat-qwen3"] as const)("keeps displayed snapshots in exact context order across source changes and reopen in %s", async profile => {
-    mocks.settings.memoryLoadOnStart = true;
-    mocks.settings.memoryMaxCount = 3;
-    mocks.settings.toolCallingMode = profile;
-    const { ChatStorage } = await import("../src/chat/storage.js");
-    const { ChatSession } = await import("../src/chat/session.js");
-    const { memoryMetadata } = await import("../src/chat/memory.js");
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "locality-memory-order-"));
-    const storage = new ChatStorage(path.join(dir, "workspace"), path.join(dir, "chats"));
-    const sessions: ChatSession[] = [];
-    try {
-      // Rank differs from alphabetical and storage order.
-      const sources = [];
-      for (const [title, text, generatedAt] of [["Zebra parser", "FIRST_MEMORY", 3], ["Alpha parser", "THIRD_MEMORY", 1], ["Middle parser", "SECOND_MEMORY", 2]] as const) {
-        const source = storage.newRecord(profile);
-        source.title = title;
-        source.memory = { text, generatedAt, sourceRevision: "0".repeat(64), enabled: true, manual: true };
-        await storage.save(source);
-        sources.push(source);
-      }
-      const requests: { messages: { role: string; content: string; tool_call_id?: string; tool_calls?: { id: string; function: { name: string; arguments: string } }[] }[] }[] = [];
-      mocks.streamChat.mockImplementation(async function* (_endpoint, request) {
-        if (profile !== "native" && request.tools) throw new mocks.NativeToolsUnsupportedError("tools param requires --jinja flag");
-        requests.push(request);
-        yield { kind: "text", text: "FIRST_ANSWER" };
-      });
-      const events: UiEvent[] = [];
-      const record = storage.newRecord(profile);
-      const session = new ChatSession({ storage, workspaceRoot: record.workspaceRoot, record, emit: event => events.push(event) });
-      sessions.push(session);
-      await session.sendUserMessage("USER_REQUEST parser");
-      const displayed = events.filter(event => event.kind === "initialMemoryCalls").at(-1)!.calls;
-      expect(displayed.map(call => JSON.parse(call.content).contents)).toEqual(["FIRST_MEMORY", "SECOND_MEMORY", "THIRD_MEMORY"]);
-      const payload = record.initialMemories!.map(memory => ({ ...memoryMetadata(memory), contents: memory.text }));
-      expect(displayed.map(call => JSON.parse(call.content))).toEqual(payload);
-      const assertRequest = () => {
-        const messages = requests.at(-1)!.messages;
-        expect(messages.filter(message => message.role === "system")).toHaveLength(1);
-        expect(messages[0].content).not.toContain("FIRST_MEMORY");
-        const request = messages[1];
-        expect(request.role).toBe("user");
-        expect(request.content).toBe("USER_REQUEST parser");
-        const results = profile === "native" ? messages.slice(3, 6) : [messages[3], messages[5], messages[7]];
-        expect(results.map(message => JSON.parse(profile === "native" ? message.content : message.content.slice(message.content.indexOf("\n") + 1))))
-          .toEqual(payload);
-        expect(results.map(message => profile === "native" ? message.content : message.content.slice(message.content.indexOf("\n") + 1)))
-          .toEqual(displayed.map(call => call.content));
-        if (profile === "native") {
-          const calls = messages[2].tool_calls!;
-          expect(messages[2].content).toBe("");
-          expect(calls.map(call => call.function.name)).toEqual(["recall_memory", "recall_memory", "recall_memory"]);
-          expect(calls.map(call => JSON.parse(call.function.arguments))).toEqual(payload.map(({ name, id }) => ({ name, id })));
-          expect(results.map(message => message.tool_call_id)).toEqual(calls.map(call => call.id));
-          expect(calls.map(call => call.id)).toEqual(displayed.map(call => call.toolCall!.id));
-          expect(new Set(calls.map(call => call.id)).size).toBe(3);
-        } else {
-          expect(messages.slice(2, 8).map(message => message.role)).toEqual(["assistant", "user", "assistant", "user", "assistant", "user"]);
-          expect([messages[2], messages[4], messages[6]].every(message => message.content.includes("recall_memory"))).toBe(true);
-        }
-      };
-      assertRequest();
-      await storage.delete(sources[0].id);
-      await storage.updateMemory(sources[1].id, current => ({ ...current.memory!, enabled: false }));
-      await storage.updateMemory(sources[2].id, current => ({ ...current.memory!, text: "REPLACED_MEMORY", generatedAt: 9 }));
-      session.refreshMemoryVisibility();
-      expect(events.at(-1)).toEqual({ kind: "initialMemoryCalls", calls: displayed });
-      await session.shutdown();
-      const saved = (await storage.load(record.id))!;
-      const reopened = new ChatSession({ storage, workspaceRoot: saved.workspaceRoot, record: saved, emit: event => events.push(event) });
-      sessions.push(reopened);
-      reopened.refreshMemoryVisibility();
-      expect(events.at(-1)).toEqual({ kind: "initialMemoryCalls", calls: displayed });
-      await reopened.sendUserMessage("FOLLOWUP_REQUEST");
-      assertRequest();
-      expect(requests.at(-1)!.messages.slice(-2).map(message => message.content)).toEqual(["FIRST_ANSWER", "FOLLOWUP_REQUEST"]);
-      await reopened.editUserMessage(saved.messages.find(message => message.content === "FOLLOWUP_REQUEST")!.ts, "EDITED_FOLLOWUP");
-      expect(events.filter(event => event.kind === "initialMemoryCalls").at(-1)!.calls).toEqual(displayed);
-      assertRequest();
-    } finally {
-      await Promise.all(sessions.map(session => session.shutdown()));
-      await fs.rm(dir, { recursive: true, force: true });
-    }
-  });
-
-  it.each(["native", "compat-qwen3"] as const)("loads once, persists, and replaces memories on first-message edits in %s", async profile => {
-    mocks.settings.memoryLoadOnStart = true;
-    mocks.settings.readToolsEnabled = false;
-    mocks.settings.memoryMaxCount = 1;
-    mocks.settings.toolCallingMode = profile;
-    const { ChatStorage } = await import("../src/chat/storage.js");
-    const { transcriptRevision } = await import("../src/chat/memory.js");
-    const { ChatSession } = await import("../src/chat/session.js");
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "locality-initial-memory-"));
-    const sessions: ChatSession[] = [];
-    try {
-      const storage = new ChatStorage(path.join(dir, "workspace"), path.join(dir, "chats"));
-      const neighbor = new ChatStorage(path.join(dir, "other"), path.join(dir, "chats"));
-      const source = async (title: string, text: string, owner = storage, enabled = true, stale = false) => {
-        const rec = owner.newRecord(profile);
-        rec.title = title;
-        rec.messages = [{ role: "user", content: title, ts: 1 }];
-        rec.memory = { text, sourceRevision: stale ? "0".repeat(64) : transcriptRevision(rec), generatedAt: 1, manual: false, enabled };
-        await owner.save(rec);
-        return rec;
-      };
-      const parser = await source("Parser", "PARSER_MEMORY_SENTINEL");
-      await source("Parser alternative", "LIMITED_MEMORY_SENTINEL");
-      const colors = await source("Colors", "COLORS_MEMORY_SENTINEL");
-      await source("Parser", "FOREIGN_MEMORY_SENTINEL", neighbor);
-      await source("Parser", "DISABLED_MEMORY_SENTINEL", storage, false);
-      await source("Parser", "STALE_MEMORY_SENTINEL", storage, true, true);
-      const requests: { messages: { role: string; content: unknown }[]; tools?: { function: { name: string } }[] }[] = [];
-      mocks.streamChat.mockImplementation(async function* (_endpoint, request) {
-        if (profile !== "native" && request.tools) throw new mocks.NativeToolsUnsupportedError("tools param requires --jinja flag");
-        requests.push(request);
-        yield { kind: "text", text: "Done." };
-      });
-      const events: UiEvent[] = [];
-      const record = storage.newRecord(profile);
-      const session = new ChatSession({ storage, workspaceRoot: record.workspaceRoot, record, emit: e => events.push(e) });
-      sessions.push(session);
-      await session.sendUserMessage("Parser");
-      expect(record.initialMemories?.map(memory => memory.sourceId)).toEqual([parser.id]);
-      expect(JSON.stringify(record.messages)).not.toContain("PARSER_MEMORY_SENTINEL");
-      expect(JSON.stringify(requests.at(-1))).toContain("PARSER_MEMORY_SENTINEL");
-      expect(JSON.stringify(requests.at(-1))).not.toMatch(/LIMITED_MEMORY_SENTINEL|COLORS_MEMORY_SENTINEL|FOREIGN_MEMORY_SENTINEL|DISABLED_MEMORY_SENTINEL|STALE_MEMORY_SENTINEL|search_memories/);
-      expect(requests.at(-1)?.tools?.some(tool => tool.function.name === "recall_memory")).not.toBe(true);
-      expect(record.contextMessages?.[1].tokens).toBeGreaterThan(0);
-      expect(mocks.tokenize.mock.calls.some(call => String(call[1]).includes("PARSER_MEMORY_SENTINEL"))).toBe(true);
-      expect(events).toContainEqual({ kind: "initialMemoryCalls", calls: [expect.objectContaining({ role: "tool", content: expect.stringContaining("PARSER_MEMORY_SENTINEL") })] });
-      await session.shutdown();
-
-      const saved = (await storage.load(record.id))!;
-      expect(saved.initialMemories).toEqual(record.initialMemories);
-      const reopened = new ChatSession({ storage, workspaceRoot: saved.workspaceRoot, record: saved, emit: e => events.push(e) });
-      sessions.push(reopened);
-      await reopened.refreshMemoryVisibility();
-      expect(events.at(-1)).toMatchObject({ kind: "initialMemoryCalls", calls: [{ role: "tool", content: expect.stringContaining("PARSER_MEMORY_SENTINEL") }] });
-      await reopened.sendUserMessage("Colors");
-      expect(JSON.stringify(requests.at(-1))).toContain("PARSER_MEMORY_SENTINEL");
-      expect(JSON.stringify(requests.at(-1))).not.toContain("COLORS_MEMORY_SENTINEL");
-
-      await reopened.editUserMessage(saved.messages[0].ts, "Colors");
-      expect(saved.initialMemories?.map(memory => memory.sourceId)).toEqual([colors.id]);
-      expect(JSON.stringify(requests.at(-1))).toContain("COLORS_MEMORY_SENTINEL");
-      expect(JSON.stringify(requests.at(-1))).not.toContain("PARSER_MEMORY_SENTINEL");
-      mocks.settings.memoryLoadOnStart = false;
-      await reopened.sendUserMessage("Next");
-      expect(JSON.stringify(requests.at(-1))).toContain("COLORS_MEMORY_SENTINEL");
-      await reopened.editUserMessage(saved.messages[0].ts, "Parser");
-      expect(saved.initialMemories).toBeUndefined();
-      expect(JSON.stringify(requests.at(-1))).not.toContain("MEMORY_SENTINEL");
-    } finally {
-      await Promise.all(sessions.map(session => session.shutdown()));
-      await fs.rm(dir, { recursive: true, force: true });
-    }
-  });
-
-  it.each([false, true])("does not preload with the Chat switch off, regardless of tools and generation (%s)", async enabled => {
-    mocks.settings.memoryEnabled = enabled;
-    mocks.settings.autoGenerateMemories = enabled;
-    const { ChatSession } = await import("../src/chat/session.js");
-    const metadata = vi.fn();
-    mocks.streamChat.mockImplementation(async function* () { yield { kind: "text", text: "Done." }; });
-    const session = new ChatSession({ storage: { save: vi.fn(), metadata } as never, workspaceRoot: "/tmp/workspace", record: newRecord(), emit: () => {} });
-    await session.sendUserMessage("Parser");
-    expect(metadata).not.toHaveBeenCalled();
-    await session.shutdown();
-  });
-
-  it.each(["disabled", "unreadable"])("continues without loading when memories become %s during index access", async outcome => {
-    mocks.settings.memoryLoadOnStart = true;
-    const { ChatSession } = await import("../src/chat/session.js");
-    const events: UiEvent[] = [];
-    const metadata = vi.fn().mockImplementationOnce(async () => {
-      if (outcome === "unreadable") throw new Error("unreadable index");
-      mocks.settings.memoryLoadOnStart = false;
-      return [{ id: "source", title: "Parser", revision: "revision", memory: {
-        text: "PARSER_MEMORY_SENTINEL", enabled: true, manual: true, generatedAt: 1, sourceRevision: "revision"
-      } }];
-    });
-    mocks.streamChat.mockImplementation(async function* () { yield { kind: "text", text: "Done." }; });
-    const record = newRecord();
-    const session = new ChatSession({ storage: { save: vi.fn(), metadata } as never, workspaceRoot: "/tmp/workspace", record, emit: e => events.push(e) });
-    await session.sendUserMessage("Parser");
-    if (outcome === "unreadable") expect(events).toContainEqual({ kind: "notice", text: "Could not load workspace memories for this chat." });
-    expect(record.messages.at(-1)?.content).toBe("Done.");
-    expect(record.initialMemories).toBeUndefined();
-    await session.shutdown();
-  });
-});
-
 describe("workspace image viewing", () => {
   it.each([
     ["image.png", "image/png", Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1])],
@@ -5101,7 +4740,7 @@ describe("steering an active turn", () => {
     await fs.rm(workspaceRoot, { recursive: true, force: true });
   });
 
-  it.each(["act", "plan", "review"] as const)("interrupts generation and preserves the %s mode and system prompt", async mode => {
+  it.each(["act", "plan", "review"] as const)("interrupts generation and preserves the %s policy while refreshing the query timestamp", async mode => {
     const requests: import("../src/llm/client.js").ChatCompletionRequest[] = [];
     let requestSignal: AbortSignal | undefined;
     mocks.streamChat.mockImplementation(async function* (_endpoint, request, signal: AbortSignal) {
@@ -5125,7 +4764,12 @@ describe("steering an active turn", () => {
     expect(requestSignal?.aborted).toBe(true);
     await turn;
     expect(requests).toHaveLength(2);
-    expect(requests[1].messages[0]).toEqual(requests[0].messages[0]);
+    const policy = (message: typeof requests[number]["messages"][number]) => ({
+      ...message, content: String(message.content).replace(/Latest user prompt time: \S+/, "Latest user prompt time: <timestamp>")
+    });
+    expect(policy(requests[1].messages[0])).toEqual(policy(requests[0].messages[0]));
+    const steeringTs = record.messages.find(message => message.steering)!.ts;
+    expect(requests[1].messages[0].content).toContain(`Latest user prompt time: ${new Date(steeringTs).toISOString()}`);
     expect(requests[1].tools).toEqual(requests[0].tools);
     expect(requests[1].reasoning_effort).toEqual(requests[0].reasoning_effort);
     expect(requests[1].messages.filter(m => m.role === "system")).toHaveLength(1);
@@ -5535,5 +5179,245 @@ describe("complete edit proposal counts", () => {
       await session.shutdown();
       await fs.rm(ws, { recursive: true, force: true });
     }
+  });
+});
+
+describe("explicit workspace notes", () => {
+  it("saves without approval while search and recall retain read approvals", async () => {
+    const { ChatSession } = await import("../src/chat/session.js");
+    const { MemoryStore } = await import("../src/chat/memoryStore.js");
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "locality-note-approvals-"));
+    mocks.settings.memoryEnabled = true; mocks.settings.autoapproveReads = false;
+    const record = newRecord(), events: UiEvent[] = [];
+    let step = 0;
+    mocks.streamChat.mockImplementation(async function* () {
+      const call = (name: string, args: object) => ({ kind: "toolCall", name, argsJson: JSON.stringify(args), id: "approval_" + step });
+      if (step++ === 0) yield call("create_memory", { name: "Parser", contents: "Durable fact" });
+      else if (step === 2) yield call("search_memories", { query: "Parser" });
+      else if (step === 3) yield call("recall_memory", { name: "Parser", id: JSON.parse(record.messages.find(m => m.role === "tool")!.content).id });
+      else yield { kind: "text", text: "Saved." };
+    });
+    const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: root, record, emit: e => events.push(e) });
+    const proposals = () => events.filter((e): e is Extract<UiEvent, { kind: "toolCallProposed" }> => e.kind === "toolCallProposed");
+    try {
+      const turn = session.sendUserMessage("Remember the parser");
+      await vi.waitFor(() => expect(proposals()).toHaveLength(2));
+      expect(proposals()[0].approvalRequired).toBe(false);
+      expect((await new MemoryStore(root).list()).memories).toHaveLength(1);
+      expect(proposals()[1].approvalRequired).toBe(true);
+      session.approve(proposals()[1].toolId, true);
+      await vi.waitFor(() => expect(proposals()).toHaveLength(3));
+      expect(proposals()[2].approvalRequired).toBe(true);
+      session.approve(proposals()[2].toolId, true);
+      await turn;
+    } finally { session.cancel(); await session.shutdown(); await fs.rm(root, { recursive: true, force: true }); }
+  });
+  it.each(["native", "compat-qwen3"] as const)("creates, searches, recalls and updates automatically in all modes using %s", async profile => {
+    const { MemoryStore } = await import("../src/chat/memoryStore.js");
+    const { ChatSession } = await import("../src/chat/session.js");
+    for (const mode of ["act", "plan", "review"] as const) {
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), "locality-note-tools-"));
+      const record = newRecord(); record.toolCallingMode = profile; record.mode = mode;
+      mocks.settings.memoryEnabled = true; mocks.settings.readToolsEnabled = false; mocks.settings.editToolsEnabled = false;
+      mocks.settings.toolCallingMode = profile;
+      const store = new MemoryStore(root), events: UiEvent[] = [];
+      let step = 0, id = "";
+      mocks.streamChat.mockImplementation(async function* (_endpoint, request) {
+        if (profile !== "native" && request.tools) throw new mocks.NativeToolsUnsupportedError("tools param requires --jinja flag");
+        const call = (name: string, args: object) => profile === "native"
+          ? { kind: "toolCall", name, argsJson: JSON.stringify(args), id: "note_" + step }
+          : { kind: "text", text: "<tool_call>" + JSON.stringify({ name, arguments: args }) + "</tool_call>" };
+        switch (step++) {
+          case 0: yield call("create_memory", { name: "Parser", contents: "Use grammar versions." }); break;
+          case 1:
+            id = JSON.parse(record.messages.filter(m => m.role === "tool").at(-1)!.content).id;
+            yield call("search_memories", { query: "Parser" }); break;
+          case 2:
+            expect(JSON.parse(record.messages.filter(m => m.role === "tool").at(-1)!.content).memories[0].id).toBe(id);
+            yield call("recall_memory", { name: "Parser", id }); break;
+          case 3: yield call("create_memory", { name: "Parser", contents: "Use grammar versions and locale.", id }); break;
+          default: yield { kind: "text", text: mode === "plan" ? planText("- Inspect parser\n- Verify cache") : "Saved." };
+        }
+      });
+      const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: root, record, emit: e => events.push(e) });
+      try {
+        await session.sendUserMessage("Remember parser decisions", [], mode);
+        expect((await store.list()).memories).toHaveLength(1);
+        expect((await store.get(id)).contents).toBe("Use grammar versions and locale.");
+        expect(events.filter(e => e.kind === "toolCallProposed")).toHaveLength(4);
+        expect(events.filter(e => e.kind === "toolCallProposed").every(e => !e.approvalRequired)).toBe(true);
+        expect(record.memory).toBeUndefined(); expect(record.memorySources).toBeUndefined();
+      } finally { await session.shutdown(); await fs.rm(root, { recursive: true, force: true }); }
+    }
+  });
+  it.each(["disabled", "malformed", "truncated", "interrupted", "enabled_mid_stream"])("never saves a %s create call", async outcome => {
+    const { ChatSession } = await import("../src/chat/session.js");
+    const { MemoryStore } = await import("../src/chat/memoryStore.js");
+    const { StreamFailure } = await import("../src/llm/completion.js");
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "locality-note-stop-"));
+    mocks.settings.memoryEnabled = outcome !== "disabled" && outcome !== "enabled_mid_stream"; mocks.settings.toolCallingMode = "native";
+    let step = 0;
+    mocks.streamChat.mockImplementation(async function* () {
+      if (step++ > 0) { yield { kind: "text", text: "Stopped." }; return; }
+      if (outcome === "enabled_mid_stream") mocks.settings.memoryEnabled = true;
+      yield { kind: "toolCall", id: "create", name: "create_memory", argsJson: outcome === "malformed" ? '{"name":"Parser"}' : outcome === "truncated" ? '{"name":' : '{"name":"Parser","contents":"Saved"}' };
+      if (outcome === "interrupted" || outcome === "enabled_mid_stream") throw new StreamFailure("Lost connection", { cause: "unexpected_eof", completionEvidence: "none" });
+    });
+    const record = newRecord(), session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: root, record, emit: () => {} });
+    try { await session.sendUserMessage("Remember"); expect((await new MemoryStore(root).list()).memories).toEqual([]); }
+    finally { await session.shutdown(); await fs.rm(root, { recursive: true, force: true }); }
+  });
+  it("rejects an update without recall and stale recalls after external edits", async () => {
+    const { ChatSession } = await import("../src/chat/session.js");
+    const { MemoryStore, noteRevision } = await import("../src/chat/memoryStore.js");
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "locality-note-stale-")), store = new MemoryStore(root);
+    const note = (await store.save({ name: "Parser", contents: "Original" })).note;
+    const record = newRecord(); mocks.settings.memoryEnabled = true;
+    let step = 0;
+    mocks.streamChat.mockImplementation(async function* () {
+      const call = (name: string, args: object) => ({ kind: "toolCall", id: "note_" + step, name, argsJson: JSON.stringify(args) });
+      if (step++ === 0) yield call("create_memory", { name: "Parser", contents: "Unrecalled", id: note.id });
+      else if (step === 2) {
+        expect(record.messages.filter(m => m.role === "tool").at(-1)?.content).toContain("Recall");
+        yield call("recall_memory", { name: note.name, id: note.id });
+      } else if (step === 3) {
+        await store.save({ ...note, contents: "External correction" }, noteRevision(note));
+        yield call("create_memory", { name: note.name, contents: "Stale correction", id: note.id });
+      } else yield { kind: "text", text: "Done" };
+    });
+    const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: root, record, emit: () => {} });
+    try {
+      await session.sendUserMessage("Remember parser");
+      expect((await store.get(note.id)).contents).toBe("External correction");
+      expect(record.messages.filter(m => m.role === "tool").at(-1)?.content).toContain("Recall");
+    } finally { await session.shutdown(); await fs.rm(root, { recursive: true, force: true }); }
+  });
+  it.each(["llama.cpp", "vllm"] as const)("replaces automatic system notes per query, caps results, persists snapshots and includes notes in %s counts", async backend => {
+    const { ChatSession } = await import("../src/chat/session.js");
+    const { ChatStorage } = await import("../src/chat/storage.js");
+    const { MemoryStore } = await import("../src/chat/memoryStore.js");
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "locality-note-query-"));
+    const store = new MemoryStore(root), storage = new ChatStorage(root, path.join(root, "chats"));
+    await store.save({ name: "Parser", contents: "PARSER_SENTINEL" });
+    await store.save({ name: "Colors", contents: "COLOR_SENTINEL" });
+    await store.save({ name: "Parser other", contents: "SECOND_PARSER" });
+    mocks.settings.memoryAutoLoad = true; mocks.settings.memoryMaxCount = 1; mocks.backend = backend;
+    const prompts: string[] = [];
+    mocks.streamChat.mockImplementation(async function* (_endpoint, request) {
+      prompts.push(request.messages[0].content);
+      expect(request.messages.filter((m: { role: string }) => m.role === "tool")).toEqual([]);
+      yield { kind: "text", text: "Done." };
+    });
+    const record = storage.newRecord("native"), events: UiEvent[] = [];
+    let session = new ChatSession({ storage, workspaceRoot: root, record, emit: e => events.push(e) });
+    try {
+      await session.sendUserMessage("Parser"); expect(record.memorySelections?.[0].memories).toHaveLength(1);
+      expect(prompts[0]).toContain("workspace memories"); expect(prompts[0]).not.toContain("COLOR_SENTINEL");
+      await session.shutdown(); const saved = (await storage.load(record.id))!;
+      expect(saved.memorySelections).toEqual(record.memorySelections);
+      session = new ChatSession({ storage, workspaceRoot: root, record: saved, emit: e => events.push(e) });
+      await session.sendUserMessage("Colors"); expect(prompts.at(-1)).toContain("COLOR_SENTINEL"); expect(prompts.at(-1)).not.toContain("PARSER_SENTINEL");
+      await session.sendUserMessage("zebras"); expect(prompts.at(-1)).not.toContain("workspace memories (JSON");
+      expect(saved.memorySelections?.at(-1)?.memories).toEqual([]);
+      expect(saved.contextMessages?.some(m => m.initialMemoryContext)).not.toBe(true);
+      if (backend === "vllm") expect(JSON.stringify(mocks.countPrompt.mock.calls)).toContain("COLOR_SENTINEL");
+      else expect(JSON.stringify(mocks.tokenize.mock.calls)).toContain("COLOR_SENTINEL");
+    } finally { await session.shutdown(); await fs.rm(root, { recursive: true, force: true }); }
+  });
+});
+
+describe("automatic note budgeting and steering", () => {
+  it.each(["llama.cpp", "vllm"] as const)("keeps the system note separate from compacted history on %s", async backend => {
+    const { MemoryStore } = await import("../src/chat/memoryStore.js");
+    const { ChatSession } = await import("../src/chat/session.js");
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "locality-memory-compact-"));
+    const note = (await new MemoryStore(root).save({ name: "Parser", contents: "COMPACT_NOTE_SENTINEL" })).note;
+    mocks.settings.memoryAutoLoad = true; mocks.backend = backend;
+    mocks.streamChat.mockImplementation(async function* () { yield { kind: "text", text: "Done." }; });
+    const record = newRecord(), events: UiEvent[] = [];
+    const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: root, record, emit: e => events.push(e) });
+    try {
+      for (let i = 0; i < 3; i++) await session.sendUserMessage(`Parser query ${i}`);
+      await session.compactNow();
+      expect(events).toContainEqual(expect.objectContaining({ kind: "compactEnd", status: "executed" }));
+      expect(record.memorySelections?.at(-1)?.memories).toEqual([note]);
+      expect(JSON.stringify(record.contextMessages)).not.toContain("COMPACT_NOTE_SENTINEL");
+      const messages = await (session as unknown as { buildPromptMessages(): Promise<{ role: string; content: string }[]> }).buildPromptMessages();
+      expect(messages[0].content.match(/COMPACT_NOTE_SENTINEL/g)).toHaveLength(1);
+      expect(JSON.stringify(mocks.tokenize.mock.calls)).toContain("COMPACT_NOTE_SENTINEL");
+    } finally { await session.shutdown(); await fs.rm(root, { recursive: true, force: true }); }
+  });
+  it.each(["llama.cpp", "vllm"] as const)("preserves the loaded selection when tool continuation exceeds the %s budget", async backend => {
+    const { MemoryStore } = await import("../src/chat/memoryStore.js");
+    const { ChatSession } = await import("../src/chat/session.js");
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "locality-memory-stable-"));
+    const note = (await new MemoryStore(root).save({ name: "Parser", contents: "STABLE_NOTE_SENTINEL" })).note;
+    mocks.settings.memoryAutoLoad = true; mocks.settings.autoCompact = false; mocks.backend = backend;
+    mocks.fetchServerContextSize.mockResolvedValue(4096);
+    let step = 0;
+    mocks.countPrompt.mockImplementation(async () => step ? 5000 : 100);
+    mocks.tokenize.mockImplementation(async () => step ? 5000 : 20);
+    mocks.streamChat.mockImplementation(async function* () {
+      step++;
+      yield { kind: "toolCall", name: "list_dir", id: "list", argsJson: '{"path":"."}' };
+    });
+    const record = newRecord(), events: UiEvent[] = [];
+    const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: root, record, emit: e => events.push(e) });
+    try {
+      await session.sendUserMessage("Parser");
+      expect(record.memorySelections?.[0].memories).toEqual([note]);
+      expect(events.some(e => e.kind === "abort")).toBe(true);
+      expect(mocks.streamChat).toHaveBeenCalledTimes(1);
+    } finally { await session.shutdown(); await fs.rm(root, { recursive: true, force: true }); }
+  });
+  it.each(["llama.cpp", "vllm"] as const)("drops lowest-ranked whole notes before compaction on %s", async backend => {
+    const { MemoryStore } = await import("../src/chat/memoryStore.js");
+    const { ChatSession } = await import("../src/chat/session.js");
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "locality-memory-budget-"));
+    const store = new MemoryStore(root);
+    await store.save({ name: "Parser details", contents: "LOW_RANK_SENTINEL" });
+    await store.save({ name: "Parser", contents: "Parser HIGH_RANK_SENTINEL" });
+    mocks.settings.memoryAutoLoad = true; mocks.settings.autoCompact = true; mocks.backend = backend;
+    mocks.fetchServerContextSize.mockResolvedValue(4096);
+    mocks.countPrompt.mockImplementation(async (_endpoint, request) => JSON.stringify(request).includes("LOW_RANK_SENTINEL") ? 5000 : 100);
+    mocks.tokenize.mockImplementation(async (_endpoint, text: string) => text.includes("LOW_RANK_SENTINEL") ? 5000 : 20);
+    const events: UiEvent[] = [], record = newRecord();
+    mocks.streamChat.mockImplementation(async function* (_endpoint, request) {
+      expect(request.messages[0].content).toContain("HIGH_RANK_SENTINEL");
+      expect(request.messages[0].content).not.toContain("LOW_RANK_SENTINEL");
+      yield { kind: "text", text: "Done." };
+    });
+    const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: root, record, emit: e => events.push(e) });
+    try {
+      await session.sendUserMessage("Parser");
+      expect(mocks.streamChat).toHaveBeenCalled();
+      expect(record.memorySelections?.[0].memories.map(note => note.name)).toEqual(["Parser"]);
+      expect(events.some(e => e.kind === "compactStart")).toBe(false);
+    } finally { await session.shutdown(); await fs.rm(root, { recursive: true, force: true }); }
+  });
+  it("replaces the current selection for steering and keeps it stable through tools", async () => {
+    const { MemoryStore } = await import("../src/chat/memoryStore.js");
+    const { ChatSession } = await import("../src/chat/session.js");
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "locality-memory-steer-"));
+    const store = new MemoryStore(root);
+    await store.save({ name: "Parser", contents: "PARSER_STEER_SENTINEL" });
+    await store.save({ name: "Colors", contents: "COLOR_STEER_SENTINEL" });
+    mocks.settings.memoryAutoLoad = true;
+    const record = newRecord(), prompts: string[] = [];
+    const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: root, record, emit: () => {} });
+    let step = 0;
+    mocks.streamChat.mockImplementation(async function* (_endpoint, request) {
+      prompts.push(request.messages[0].content);
+      if (step++ === 0) { yield { kind: "text", text: "Looking at parser" }; expect(session.steerUserMessage("Colors")).toBe(true); }
+      else if (step === 2) yield { kind: "toolCall", name: "list_dir", id: "list", argsJson: '{"path":"."}' };
+      else yield { kind: "text", text: "Done" };
+    });
+    try {
+      await session.sendUserMessage("Parser");
+      expect(prompts[0]).toContain("PARSER_STEER_SENTINEL");
+      for (const prompt of prompts.slice(1)) { expect(prompt).toContain("COLOR_STEER_SENTINEL"); expect(prompt).not.toContain("PARSER_STEER_SENTINEL"); }
+      expect(record.memorySelections).toHaveLength(2);
+      expect(prompts.length).toBeGreaterThanOrEqual(3);
+    } finally { await session.shutdown(); await fs.rm(root, { recursive: true, force: true }); }
   });
 });

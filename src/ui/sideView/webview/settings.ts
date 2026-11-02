@@ -37,6 +37,8 @@ export function renderSettings(state: SideViewState, expandedSettings: ReadonlyS
           <input id="endpoint" type="text" value="${esc(endpoint)}" ${state.endpointTesting ? "readonly" : ""} />
           <button id="saveEndpoint" class="action-btn" ${state.endpointTesting ? "disabled" : ""}>${state.endpointTesting ? "Connecting…" : "Set"}</button>
         </div>
+        <label class="field-label" for="serverApiKey">API-key (optional)</label>
+        <input id="serverApiKey" type="password" autocomplete="off" value="${esc(state.serverApiKeyDraft ?? "")}" placeholder="${state.hasServerApiKey ? "Key saved — enter a replacement" : "No key"}" />
         <div class="validation ${validationCls}" role="${state.endpointMsg?.ok === false ? "alert" : "status"}">${esc(state.endpointMsg?.text ?? "")}</div>
         ${state.serverModels.length > 0 ? `
           <label class="field-label" for="model">Model</label>
@@ -45,9 +47,10 @@ export function renderSettings(state: SideViewState, expandedSettings: ReadonlyS
           </select>
         ` : ""}
         ${state.endpointMetadata ? `<div class="endpoint-metadata">
+          <div><span>Server</span><strong>${state.endpointMetadata.backend === "vllm" ? "vLLM" : "llama.cpp"}</strong></div>
           <div><span>Reported model</span><strong>${esc(state.endpointMetadata.modelAlias)}</strong></div>
           <div><span>Context</span><strong>${esc(state.endpointMetadata.contextSize.toLocaleString())} tokens</strong></div>
-          <div><span>Image input</span><strong>${state.endpointMetadata.supportsVision ? "Supported" : "Unavailable"}</strong></div>
+          <div><span>Image input</span><strong>${state.endpointMetadata.imageSupport === "unknown" ? "Unverified" : state.endpointMetadata.supportsVision ? "Supported" : "Unavailable"}</strong></div>
         </div>` : ""}
 
         <div class="field-row">
@@ -118,8 +121,6 @@ export function renderSettings(state: SideViewState, expandedSettings: ReadonlyS
           <input id="autoCompactThresholdPercent" type="range" min="50" max="95" step="1" value="${autoCompactPct}" />
         </label>
 
-        ${switchControl("autoGenerateMemories", "Auto-generate memories", s.autoGenerateMemories === true)}
-        <p class="setting-help">Create or update a memory after Act and Review responses, independently of memory loading and tools.</p>
       `)}
 
       ${section("user", "User", `
@@ -137,8 +138,8 @@ export function renderSettings(state: SideViewState, expandedSettings: ReadonlyS
 
 function renderMemorySettings(settings: Record<string, unknown>): string {
   return `<div class="memory-settings">
-    ${switchControl("memoryLoadOnStart", "Load memories at chat start", settings.memoryLoadOnStart === true)}
-    <p class="setting-help">Load relevant workspace memories from the first message. Independent of memory tools and generation.</p>
+    ${switchControl("memoryAutoLoad", "Auto-load memories", settings.memoryAutoLoad === true)}
+    <p class="setting-help">Load relevant enabled workspace notes for each user query, independently of memory tools.</p>
     <label class="field-label" for="memoryMaxCount">Maximum memories / search results</label>
     <input id="memoryMaxCount" type="number" min="1" max="${MAX_MEMORY_COUNT}" step="1" value="${esc(String(settings.memoryMaxCount ?? DEFAULT_MEMORY_MAX_COUNT))}" />
   </div>`;

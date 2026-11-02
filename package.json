@@ -1,8 +1,8 @@
 {
   "name": "locality",
   "displayName": "Locality",
-  "description": "Drive a LAN-hosted llama.cpp LLM from VS Code with hard network isolation, workspace-scoped tools, and an approval-gated terminal.",
-  "version": "2.1.7",
+  "description": "Drive a LAN-hosted llama.cpp or vLLM server from VS Code with hard network isolation, workspace-scoped tools, and an approval-gated terminal.",
+  "version": "2.2.0",
   "repository": {
     "type": "git",
     "url": "https://github.com/liandir/locality.git"
@@ -152,12 +152,12 @@
         "locality.endpoint": {
           "type": "string",
           "default": "http://localhost:8080/v1",
-          "description": "URL of the llama.cpp server. Use localhost or a private IP literal such as http://127.0.0.1:8080/v1 or http://192.168.1.50:8080/v1; DNS hostnames are refused."
+          "description": "URL of the llama.cpp or vLLM server. Use localhost or a private IP literal such as http://127.0.0.1:8080/v1 or http://192.168.1.50:8080/v1; DNS hostnames are refused."
         },
         "locality.model": {
           "type": "string",
           "default": "local",
-          "description": "Model id sent to llama.cpp. The Settings view populates this from the server's /v1/models endpoint."
+          "description": "Model id sent to the server. The Settings view populates this from the server's /v1/models endpoint."
         },
         "locality.toolCallingMode": {
           "type": "string",
@@ -206,7 +206,7 @@
           "default": null,
           "minimum": 1,
           "maximum": 9007199254740991,
-          "description": "Per-request llama.cpp reasoning budget: a positive integer sets the token threshold; null (empty in Locality settings) means unlimited."
+          "description": "Per-request reasoning token budget. Empty means unlimited. vLLM requires a reasoning parser/configuration for finite budgets."
         },
         "locality.reasoningEfforts": {
           "type": "object",
@@ -218,7 +218,7 @@
           "additionalProperties": {
             "type": "string"
           },
-          "description": "Additional reasoning-effort choices shown in settings. Each key is the display label and its value is sent as llama.cpp reasoning_effort. Default is built in; use Activate Reasoning to turn reasoning on or off."
+          "description": "Additional reasoning-effort choices shown in settings. Each key is the display label and its value is sent as reasoning_effort. vLLM accepts none, minimal, low, medium, high, xhigh, and max; model support varies. Default is built in; use Activate Reasoning to turn reasoning on or off."
         },
         "locality.titlePrompt": {
           "type": "string",
@@ -244,19 +244,7 @@
           "type": "boolean",
           "default": false,
           "scope": "window",
-          "description": "Expose search_memories and recall_memory to the model for active summaries from other chats in this workspace, independently of file read tools, initial memory loading, and automatic generation. Enable in workspace settings; user-level values are ignored."
-        },
-        "locality.memoryLoadOnStart": {
-          "type": "boolean",
-          "default": false,
-          "scope": "window",
-          "description": "Load relevant active workspace memories into model context from the first message of a new chat. Independent of memory tool access and automatic generation. Already loaded context is retained when switched off. Enable in workspace settings; user-level values are ignored."
-        },
-        "locality.autoGenerateMemories": {
-          "type": "boolean",
-          "default": false,
-          "scope": "window",
-          "description": "Automatically create or update a memory when an Act or Review response finishes, independently of memory loading and tool access. Manual generation and editing remain available when off. Enable in workspace settings; user-level values are ignored."
+          "description": "Enable create_memory, search_memories, and recall_memory for workspace notes, independently of file tools and automatic loading. Memory creation and updates save automatically in every mode. Workspace settings only."
         },
         "locality.memoryMaxCount": {
           "type": "integer",
@@ -264,7 +252,7 @@
           "minimum": 1,
           "maximum": 100,
           "scope": "window",
-          "description": "Maximum number of relevant memories loaded at the start of a chat or matches returned by each search_memories call. The agent chooses which search results to recall."
+          "description": "Maximum number of relevant workspace notes loaded for each query or returned by search_memories."
         },
         "locality.autoCompact": {
           "type": "boolean",
@@ -297,7 +285,7 @@
           "default": 4,
           "minimum": 0,
           "maximum": 64,
-          "description": "Approximate chat-template/special tokens llama.cpp adds per message. Added to the exact /tokenize counts so the context guard does not under-count the rendered prompt."
+          "description": "Estimated chat-template overhead per message for llama.cpp. vLLM counts the complete server-rendered prompt instead."
         },
         "locality.autoapproveReads": {
           "type": "boolean",
@@ -328,6 +316,12 @@
           "type": "boolean",
           "default": false,
           "description": "Auto-approve all command tool calls in Act mode. Off by default."
+        },
+        "locality.memoryAutoLoad": {
+          "type": "boolean",
+          "default": false,
+          "scope": "window",
+          "description": "Load relevant enabled workspace notes into the system prompt before each user query. Independent of memory tools. Workspace settings only."
         }
       }
     }
@@ -362,9 +356,12 @@
     "katex": "^0.18.2",
     "markdown-it": "^14.3.3",
     "shiki": "^4.1.0",
-    "undici": "^6.29.0"
+    "undici": "^6.29.1"
   },
   "overrides": {
+    "@azure/identity": {
+      "@azure/msal-node": "^7.1.1"
+    },
     "katex": "$katex",
     "undici": "$undici"
   },

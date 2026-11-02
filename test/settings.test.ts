@@ -57,6 +57,17 @@ describe("tool calling settings", () => {
 });
 
 describe("reasoning and model settings", () => {
+  it("always detects the backend automatically, ignoring old overrides", async () => {
+    const { readSettings, writeSetting, SETTING_KEYS } = await import("../src/config/settings.js");
+    for (const value of [undefined, "llama.cpp", "vllm"]) {
+      mocks.values.set("serverType", value);
+      expect(readSettings().serverType).toBe("auto");
+    }
+    expect(SETTING_KEYS).not.toContain("serverType");
+    await expect(writeSetting("serverType", "vllm")).rejects.toThrow("unavailable");
+    expect(mocks.update).not.toHaveBeenCalled();
+  });
+
   it("defaults Enter to queue and persists the steering preference", async () => {
     const { readSettings, writeSetting, resetAllSettings } = await import("../src/config/settings.js");
     expect(readSettings().steerWithEnter).toBe(false);
@@ -140,7 +151,7 @@ describe("workspace memory setting", () => {
     expect(mocks.update).toHaveBeenCalledWith("memoryMaxCount", 12, 2);
   });
 
-  const switches = ["memoryEnabled", "memoryLoadOnStart", "autoGenerateMemories"] as const;
+  const switches = ["memoryEnabled", "memoryAutoLoad"] as const;
   it.each(switches)("%s is independently opt-in for this workspace and ignores global activation", async key => {
     const { readSettings, writeSetting, resetAllSettings } = await import("../src/config/settings.js");
     expect(readSettings()[key]).toBe(false);
@@ -155,4 +166,17 @@ describe("workspace memory setting", () => {
     await resetAllSettings();
     expect(mocks.update).toHaveBeenCalledWith(key, undefined, 2);
   });
+});
+
+it("migrates the legacy workspace loading value without enabling global values or overriding the new value", async () => {
+  const { readSettings, migrateMemorySettings } = await import("../src/config/settings.js");
+  mocks.workspace.set("memoryLoadOnStart", true);
+  expect(readSettings().memoryAutoLoad).toBe(true);
+  await migrateMemorySettings();
+  expect(mocks.update).toHaveBeenCalledWith("memoryAutoLoad", true, 2);
+  mocks.update.mockClear(); mocks.workspace.set("memoryAutoLoad", false);
+  expect(readSettings().memoryAutoLoad).toBe(false);
+  await migrateMemorySettings();
+  expect(mocks.update).not.toHaveBeenCalledWith("memoryAutoLoad", true, 2);
+  expect(mocks.update).toHaveBeenCalledWith("memoryLoadOnStart", undefined, 2);
 });

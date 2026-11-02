@@ -1,10 +1,12 @@
+import { configureServerConnections } from "./llm/connection.js";
+import { clearServerCaches, onServerCapabilitiesChange } from "./llm/server.js";
 import { WorkspaceMemory } from "./chat/workspaceMemory.js";
 import * as vscode from "vscode";
 import { SideViewProvider } from "./ui/sideView/provider.js";
 import { ChatViewProvider } from "./ui/chatView/provider.js";
 import { ChatStorage } from "./chat/storage.js";
 import type { ChatRecord } from "./chat/types.js";
-import { readSettings, onSettingsChange } from "./config/settings.js";
+import { readSettings, onSettingsChange, migrateMemorySettings } from "./config/settings.js";
 import { CommitMessageController } from "./scm/commitMessage.js";
 import {
   availableReasoningEffort,
@@ -19,9 +21,17 @@ let memory: WorkspaceMemory;
 let storageWatcher: { dispose(): void } | undefined;
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
+  await migrateMemorySettings();
+  configureServerConnections(() => readSettings(), context.secrets);
+  let connectionSettings = readSettings();
+  context.subscriptions.push(onSettingsChange(() => {
+    const current = readSettings();
+    if (current.endpoint !== connectionSettings.endpoint || current.model !== connectionSettings.model) clearServerCaches();
+    connectionSettings = current;
+  }));
   let ws = currentWorkspaceRoot();
   if (ws) storage = new ChatStorage(ws);
-  memory = new WorkspaceMemory(() => storage, 1000, { reportError: message => { void vscode.window.showErrorMessage(message); } });
+  memory = new WorkspaceMemory(() => currentWorkspaceRoot());
 
   chatProvider = new ChatViewProvider(
     context,
@@ -56,9 +66,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   watchStorage();
   context.subscriptions.push(
     memory,
+    onServerCapabilitiesChange(connection => {
+      const current = readSettings();
+      if (connection.endpoint === current.endpoint && connection.model === current.model && connection.serverType === current.serverType) {
+        sideProvider.refreshServerMetadata(); chatProvider.pushSettings();
+      }
+    }),
     { dispose: () => storageWatcher?.dispose() },
     { dispose: () => { void chatProvider.closeAll(); } },
-    onSettingsChange(() => memory.settingsChanged()),
     memory.onChange(() => { void sideProvider.pushMemories(); chatProvider.refreshMemoryVisibility(); }),
     new CommitMessageController(() => currentWorkspaceRoot()),
     vscode.window.registerWebviewViewProvider(SideViewProvider.viewType, sideProvider),
@@ -92,10 +107,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       const r = currentWorkspaceRoot();
       if (r === ws) return;
       ws = r;
-      memory.suspend();
       void chatProvider.closeAll();
       storage = r ? new ChatStorage(r) : undefined;
-      void memory.restore();
+      memory.workspaceChanged();
       watchStorage();
       chatProvider.pushSettings();
       void chatProvider.pushRecentChats();
@@ -190,7 +204,6 @@ async function clearChats(): Promise<void> {
     "Delete all"
   );
   if (choice !== "Delete all" || targetStorage !== storage) return;
-  await memory.cancelAll();
   await chatProvider.clearChats();
   void sideProvider.pushMemories();
   await sideProvider.pushChats();

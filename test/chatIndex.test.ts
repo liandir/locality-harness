@@ -8,7 +8,7 @@ import { promisify } from "node:util";
 import { build } from "esbuild";
 import { ChatStorage } from "../src/chat/storage.js";
 import { readChatHeader, writeChatFile } from "../src/chat/chatFile.js";
-import { memoryListItem, transcriptRevision } from "../src/chat/memory.js";
+import { transcriptRevision } from "../src/chat/memory.js";
 
 vi.mock("node:fs/promises", async original => {
   const real = await original<typeof import("node:fs/promises")>();
@@ -113,10 +113,9 @@ describe("chat headers and workspace indexes", () => {
     const other = otherStorage.newRecord("native");
     await otherStorage.save(other);
     const foreignIndex = await fs.readFile(indexPath(other.workspaceRoot), "utf8");
-    await storage.updateMemory(rec.id, current => ({
-      text: "Useful summary", sourceRevision: transcriptRevision(current), generatedAt: 10, enabled: true, manual: false
-    }));
-    expect(memoryListItem((await storage.metadata())[0])).toMatchObject({ text: "Useful summary", usable: true, status: "ready" });
+    rec.memory = { text: "Legacy summary", sourceRevision: transcriptRevision(rec), generatedAt: 10, enabled: true, manual: false };
+    await storage.save(rec);
+    expect((await storage.metadata())[0].memory?.text).toBe("Legacy summary");
     const fork = await storage.fork((await storage.load(rec.id))!);
     rec.title = "Renamed";
     await storage.save(rec);

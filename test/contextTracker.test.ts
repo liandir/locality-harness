@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { withServerConnection } from "../src/llm/connection.js";
 
 const mocks = vi.hoisted(() => ({
   tokenize: vi.fn()
@@ -67,6 +68,23 @@ describe("promptTokens", () => {
 });
 
 describe("countTokens caching", () => {
+  it("separates backend identities and never persists a fallback as an exact count", async () => {
+    const { countTokens, recomputeTokens } = await import("../src/chat/contextTracker.js");
+    const { ChatStorage } = await import("../src/chat/storage.js");
+    const unique = `backend-count-${Math.random()}`;
+    for (const serverType of ["llama.cpp", "vllm"] as const) {
+      await withServerConnection({ endpoint: "http://x", model: "same", serverType }, () => countTokens("http://x", unique, "same"));
+    }
+    expect(mocks.tokenize.mock.calls.filter(call => call[1] === unique)).toHaveLength(2);
+    const record = new ChatStorage("/tmp/workspace").newRecord("native");
+    record.messages = [{ role: "user", content: unique + " fallback", ts: 1, tokens: 999 }];
+    mocks.tokenize.mockImplementationOnce((_endpoint, _text, _model, options) => { options.onEstimate(); return 13; });
+    expect(await recomputeTokens("http://x", record, "same")).toBe(13);
+    expect(record.messages[0].tokens).toBeUndefined();
+    mocks.tokenize.mockResolvedValueOnce(17);
+    expect(await recomputeTokens("http://x", record, "same")).toBe(17);
+    expect(record.messages[0].tokens).toBe(17);
+  });
   it("tokenizes a given string only once", async () => {
     const { countTokens } = await import("../src/chat/contextTracker.js");
     const unique = `cache-probe-${Math.random()}`;

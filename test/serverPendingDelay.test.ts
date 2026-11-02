@@ -46,9 +46,9 @@ describe("serverPendingVisibility", () => {
     expect(serverPendingVisibility(undefined, 1_000, 1_100).since).toBeUndefined();
   });
 
-  it("leaves memory waits to the creation card, then starts the normal server delay afresh", () => {
-    expect(serverPendingVisibility("memory", 1_000, 1_100)).toEqual({ since: undefined, visible: true, remainingMs: 0 });
-    expect(serverPendingLabel("memory")).toBeUndefined();
+  it("starts a fresh server delay after an idle state", () => {
+    expect(serverPendingVisibility(undefined, 1_000, 1_100)).toEqual({ since: undefined, visible: true, remainingMs: 0 });
+    expect(serverPendingLabel(undefined)).toBeUndefined();
     expect(serverPendingVisibility("server", undefined, 2_000).remainingMs).toBe(SERVER_PENDING_NOTICE_DELAY_MS);
   });
 

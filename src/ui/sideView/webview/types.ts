@@ -1,5 +1,6 @@
+import type { ServerMetadata } from "../../../llm/serverTypes.js";
 import type { ChatTab, SideTab } from "../../messaging.js";
-import type { MemoryListItem } from "../../../chat/memory.js";
+import type { ManagedMemory } from "../../messaging.js";
 import type { ReasoningEffort } from "../../../chat/reasoningEffort.js";
 
 export interface SideViewState {
@@ -15,11 +16,15 @@ export interface SideViewState {
   endpointTesting?: boolean;
   endpointSubmitted?: string;
   endpointRequestId?: number;
-  endpointMetadata?: { modelAlias: string; contextSize: number; supportsVision: boolean };
+  endpointMetadata?: ServerMetadata;
+  serverApiKeyDraft?: string;
+  hasServerApiKey?: boolean;
   serverModels: { id: string }[];
   openTabs: ChatTab[];
   version: string;
-  memories: MemoryListItem[];
+  memories: ManagedMemory[];
+  memorySearch?: string;
+  memoryWarnings?: string[];
   memoryError?: string;
   memorySettingError?: string;
 }

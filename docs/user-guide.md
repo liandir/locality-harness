@@ -20,11 +20,11 @@ This guide covers model setup, everyday use, settings, and saved chats.
 Click the Locality icon in the Activity Bar, then switch to the **Settings**
 tab in the side panel. Configure the server and tool calling before chatting:
 
-- **Server URL** — the address of your `llama.cpp` server, e.g.
+- **Server URL** — the address of your llama.cpp or vLLM server, e.g.
   `http://127.0.0.1:8080/v1` or `http://192.168.1.50:8080/v1`. It must be
   `localhost` or a private IP literal; DNS hostnames such as `nas.local` are
   refused. Click **Set** to validate the endpoint, list `/v1/models`, and read
-  `/props` metadata. Choose the model below the URL; its reported alias and
+  backend-specific metadata. Choose the model below the URL; its reported alias and
   context length are shown alongside it.
 - **Tool calling** — defaults to **Native server only**, which requires
   OpenAI-compatible structured calls from the server. The Gemma 4, Qwen 3, Muse
@@ -40,7 +40,65 @@ commands) have sensible defaults and can be revisited later.
 For edition-specific features, see [Safe-list configuration](tools.md#safe-list-configuration)
 and [Advanced web search](tools.md#advanced-web-search).
 
-### Muse Glimmer server requirements
+### vLLM setup (v2.2.0)
+
+Enter a local/LAN vLLM URL such as `http://127.0.0.1:8000/v1`, then click **Set**.
+Locality automatically detects llama.cpp or vLLM and shows the detected server.
+Proxies must expose the server's discovery and tokenizer endpoints. Root URLs,
+`/v1` URLs, and proxy prefixes are supported. Choose the advertised model ID;
+served aliases and LoRA entries are supported.
+
+For a reasoning and tool-capable Qwen3 server, the vLLM 0.32.0 setup is:
+
+```bash
+vllm serve Qwen/Qwen3-4B --host 127.0.0.1 --port 8000 \
+  --max-model-len 32768 --enable-auto-tool-choice \
+  --tool-call-parser hermes --reasoning-parser qwen3
+```
+
+Choose **Native server only** in Locality. Other models need their corresponding
+[tool parser](https://docs.vllm.ai/en/v0.32.0/features/tool_calling/) and
+[reasoning configuration](https://docs.vllm.ai/en/v0.32.0/features/reasoning_outputs/).
+Reasoning effort values must be supported by the served model. Finite reasoning
+budgets use `thinking_token_budget` and require a configured reasoning parser or
+reasoning boundaries; leave the budget empty for unlimited reasoning. Models
+whose templates cannot disable thinking may still reason when the switch is off.
+
+If the server uses `--api-key`, enter its key in the masked **API key** field and
+click **Set** beside **Server URL**. A successful connection saves the new or replacement key
+in VS Code SecretStorage. An empty field keeps the saved key. Keys are scoped to
+the server URL and proxy prefix and are not stored in settings or chat history.
+
+When connecting or selecting a model, Locality sends a tiny test image generated
+entirely in memory and reports image input as **Supported** or **Unavailable**.
+No test image file is created. vLLM only preprocesses the image; llama.cpp's check
+generates at most one token. Authentication, invalid responses and server outages
+remain connection errors instead of marking the model as text-only. Clicking
+**Set** checks again. Actual vLLM image prompts are also preprocessed before generation.
+The complete vLLM prompt, tools and image tokens are counted on the server for
+the context guard, reserving up to 4,096 tokens (at most a quarter of the context)
+for the answer. Auxiliary requests reserve their explicit output limits.
+vLLM uses the normal waiting indicator without llama.cpp's
+prompt-progress percentage.
+
+Chat, planning, tools, compaction, memory, titles, and commit messages use the
+same configured connection in every edition. Changing the connection applies
+to subsequent turns; background memory work suspends and resumes with compatible
+checkpoints. The [developer guide](developer-guide.md#live-server-validation)
+records the compatibility baseline and how to run live acceptance tests.
+
+Connection troubleshooting:
+
+- **401/403:** set or replace the API key for this server.
+- **Could not identify:** check the server URL and proxy routing. llama.cpp must
+  expose `/props`; vLLM must expose `/v1/models` and `/tokenize`. A missing
+  `/props` alone does not identify a server as vLLM.
+- **Native tools rejected:** enable automatic tool choice and the model's parser.
+- **Reasoning budget rejected:** configure reasoning boundaries/parser or clear
+  the budget. Locality does not silently discard an explicit finite budget.
+- **Context exceeded:** compact the chat or increase the server's `--max-model-len`.
+
+### Muse Glimmer with llama.cpp
 
 Muse Glimmer requires llama.cpp build `b10353` or newer and `--jinja`. Its
 template emits `to=self` reasoning, `to=user` answers, and ATEM tool calls;
@@ -89,7 +147,7 @@ stops running chats.
 The brain button selects reasoning behavior per chat. **None** sends
 `chat_template_kwargs.enable_thinking: false`; **Default** sends no
 `reasoning_effort` or thinking override. Additional choices come from the
-`reasoningEfforts` setting and send its configured value as llama.cpp
+`reasoningEfforts` setting and send its configured value as the server's
 `reasoning_effort`. This is independent of the numeric reasoning budget.
 
 For example, the default `settings.json` mapping is:
@@ -206,7 +264,7 @@ from the staged diff.
 
 - If staged changes exist, hover text reads **Generate commit message with
   Locality**. Click the button to send the staged diff to your configured
-  local `llama.cpp` endpoint and write the generated message into Git's commit
+  local model endpoint and write the generated message into Git's commit
   input box.
 - If nothing is staged, hover text reads **Please stage changes before
   generating a commit message.** Clicking the button briefly wiggles the icon.
@@ -315,8 +373,8 @@ Only settings supported by the installed edition are available.
 
 | Setting | Default | What it does |
 | --- | --- | --- |
-| `endpoint` | `http://localhost:8080/v1` | URL of your llama.cpp server. Use `localhost` or a private IP literal such as `http://127.0.0.1:8080/v1` or `http://192.168.1.50:8080/v1`. |
-| `model` | `local` | Model id sent with requests. The Settings view replaces this fallback with a selection from llama.cpp's `/v1/models` response. |
+| `endpoint` | `http://localhost:8080/v1` | URL of your llama.cpp or vLLM server. Use `localhost` or a private IP literal such as `http://127.0.0.1:8080/v1` or `http://192.168.1.50:8080/v1`. |
+| `model` | `local` | Model id sent with requests. Choose a served model or alias from `/v1/models`. |
 | `toolCallingMode` | `native` | Select `native`, `compat-gemma4`, `compat-qwen3`, `compat-muse-glimmer`, or `compat-gpt-oss`. Compatibility profiles are native-first and add only the selected family's recovery behavior. |
 | `temperature` | `0.8` | Sampling temperature for chat requests. Lower is more deterministic, higher more varied. |
 | `topK` | `40` | Top-k sampling: keep only the K most likely tokens at each step (`0` disables). |
@@ -357,8 +415,8 @@ defaults** button that returns every setting above — including the server URL 
 to its default. It asks for confirmation first.
 
 The sampling settings (`temperature`, `topK`, `topP`) are sent with every chat
-request, so they override whatever `--temp`, `--top-k`, or `--top-p` flags the
-`llama.cpp` server was started with. Commit-message generation also uses the
+request, so they override the server's sampling defaults for either backend.
+Commit-message generation also uses the
 configured temperature. Titles, memories, and context compaction keep their own
 fixed low-temperature settings.
 
@@ -414,96 +472,56 @@ trash icon. Deleting cannot be undone.
 
 ## Workspace memory
 
-Memory has three independent workspace switches, all off by default. User-level
-activation is ignored; existing `locality.memoryEnabled` settings continue to
-control tool access.
+Memories are independent workspace notes stored as versioned JSON files in
+`.locality/memories/<uuid>.json`. Each record has a name, Markdown contents,
+creation/update dates, and an enabled flag. Notes belong to the workspace;
+deleting or clearing chats does not delete them. Git ignore rules are unchanged.
+Old chat summaries remain readable in historical chats and are not imported.
 
-- **Chat → Load memories at chat start** (`locality.memoryLoadOnStart`) loads
-  relevant active summaries using the first user message as a local keyword query.
-  It reads summaries from the workspace index without opening other transcripts.
-  Loaded memories enter model context, count toward the context limit, and can be
-  compacted. They survive reopening; later messages do not trigger another automatic
-  search. Editing the first message replaces that initial context using the new
-  query and current switch. Turning the switch off does not erase already loaded context.
-- **Tools → Activate memories** (`locality.memoryEnabled`) exposes `search_memories`
-  and `recall_memory`. It works independently of **Activate reads** and initial loading.
-- **Automation → Auto-generate memories** (`locality.autoGenerateMemories`) queues a
-  summary after a final **Act** or **Review** response, even when loading and memory
-  tools are off. The setting at turn completion decides whether to queue work;
-  skipped turns are not generated retroactively, and already queued summaries finish.
+Two independent workspace switches are off by default:
 
-Summaries use the configured local model. **Plan** responses and plan revisions do
-not generate memories automatically. After accepting a plan, generation waits for
-the Act implementation response. New generated memories are active automatically;
-individual exclusions and manually edited summaries are preserved. Manual generation
-and editing remain available regardless of the three switches.
+- **Tools > Activate memories** (`locality.memoryEnabled`) exposes
+  `create_memory`, `search_memories`, and `recall_memory`, independently of
+  file tools. Saving notes is automatic in Act, Plan, and Review, without an edit
+  approval prompt. Search and recall retain the read-approval setting.
+- **Chat > Auto-load memories** (`locality.memoryAutoLoad`) ranks enabled notes
+  for every new user query, including queued messages and steering. The old
+  chat-start preference is preserved under this setting. Selected notes go into
+  one reference-data section of the system prompt; each new query replaces the
+  previous selection. Tool continuations keep the current selection.
 
-A **Creating memory** card appears after the answer and becomes **Created memory**
-when finished. If the chat already has a memory, the card shows **Updating memory**
-and then **Updated memory**. Expand it to see the same full contents and date shown by recall.
-Completed cards remain available when reopening the chat. A new message sent
-during generation appears immediately beneath the active memory card;
-the model request proceeds once that summary finishes. Compaction and commit-message
-inference can interrupt generation; interrupted work resumes when idle.
-In **Recent Chats** (the Chats tab), **Re-generate all memories** sits below
-**Start new chat** and processes existing chats on request.
-Use **Cancel generation** to clear queued work and cancel the current summary.
+**Maximum memories / search results** (`locality.memoryMaxCount`) caps both
+automatic loading and search results: default 10, range 1-100. Local keyword
+ranking recognizes paths and camelCase/snake_case symbols, with name and phrase
+boosts. Unrelated notes are omitted. Loading uses no model or embedding service.
+Notes count toward the prompt budget; the lowest-ranked whole notes are removed
+if needed before normal compaction. A disclosure beside each user message shows
+the notes actually loaded. Historical snapshots remain readable after edits or deletion.
 
-Select the **cloud icon** beside a chat’s delete button to inspect, edit, include/exclude, and
-regenerate its summary. Saving an edit makes the summary manually maintained, so background
-updates cannot overwrite it. **Regenerate** replaces it with an automatically
-maintained summary. Failed generation can be retried without affecting the chat.
-Summaries are limited to 1,024 tokens, with a smaller budget on small model contexts.
-Oversized summaries are retried with a shorter target instead of cutting out text
-or inserting truncation notices. Raw tool messages, hidden reasoning, and
-imported memories are excluded from summarization input; common credential
-formats are redacted, and the model is instructed to omit secrets.
+Ask the agent to remember a specific durable fact or preference. The agent uses
+`create_memory({ name, contents, id? })`: omit the ID to create an enabled note,
+or recall the current note first and supply its ID to update it. Names alone
+never overwrite notes. Exact duplicate creations reuse the existing record.
+Updates preserve the stable ID, creation date, and enabled flag. A stale update
+fails with instructions to recall again. Names have a 200-character limit and
+contents a 20,000-character limit. Common credential patterns are redacted;
+avoid putting secrets in notes. Saving makes no additional model request.
 
-In addition to optional loading at chat start, the agent can retrieve memories
-through tools. When **Activate memories** is enabled, the system prompt suggests
-considering retrieval at the beginning of a request:
+`search_memories({ query })` returns enabled matches with stable UUIDs, names,
+and full UTC dates. `recall_memory({ name, id })` reads a live note and its
+Markdown contents. Search-result links open notes, rather than chats. Memories
+are historical reference data: current user instructions, project instructions,
+and inspected workspace evidence take precedence.
 
-- **`search_memories`** takes a `query` and returns matching `name`, `id`, and
-  `date` fields, plus the total match count and whether results were truncated.
-  Local BM25 keyword ranking includes title and phrase boosts, recognizes paths
-  and camelCase/snake_case symbols, and breaks ties by date and source ID.
-  It uses no embeddings, network requests, or retrieval model. Search covers all
-  active, usable memories in the current workspace, excluding the current chat.
-- **`recall_memory`** takes the exact `name` and `id` from search and returns
-  those fields, the full UTC `date`, and `contents`. IDs are 16 hexadecimal
-  characters from SHA-256 of the source chat ID, name, and contents. Identical
-  names are disambiguated; renaming or editing a memory changes its ID. Recall
-  checks the current source again, so stale IDs and inactive or deleted sources
-  fail with a request to search again.
+The **Memories** sidebar tab provides search, Markdown preview/editing, rename,
+enable/disable, and individual deletion with confirmation. Markdown edits use
+normal Save; if another window or external editor changed the note, reopen it
+and apply your changes to the current version. Disabling/deleting a note affects
+future automatic retrieval and search. Existing tool results and historical
+loaded-note disclosures remain in the chat.
 
-Both tools return full UTC dates with minute precision, such as
-`2026-09-11T14:05Z`. **Maximum memories / search results** caps both initial
-loading and per-search results from 1 to 100, defaulting to 10
-(`locality.memoryMaxCount`). The agent chooses
-which matches to recall. The tools work in Act, Plan, and Review modes and follow
-the read-approval setting. When **Activate memories** is off, both tools and their
-system-prompt guidance are omitted, and attempted calls cannot retrieve content.
+There is no background memory generation, generation queue, or retry setting.
+Malformed memory files are excluded individually with a warning; repair or remove
+the named file to resolve it. They are never overwritten automatically.
 
-**Recalled memories** shows sources loaded at chat start or read through tools, with links to
-their editors in Recent Chats. Recalled contents are ordinary tool results in
-chat history and are subject to normal context limits and compaction. Turning
-memories off prevents new retrieval; it does not erase existing tool results.
-Summary generation excludes
-raw tool results and asks the model to omit facts merely copied from memories.
-Current instructions and inspected code take precedence over historical memory.
-
-Chat-card timestamps adapt to when you view them: time only today, day and short
-month on other days in the same year, and the year for dates in another year.
-They use local time without seconds; hover retains the full local date and time.
-The latest saved user-message timestamp remains in system context only to place
-the request relative to memory dates. Assistant timestamps are display-only.
-
-For a reproducible, synthetic memory-on/off probe against a running local server:
-
-```bash
-npm run eval:memory -- http://localhost:8080 your-model-id /tmp/memory-eval.json
-```
-
-This records summary size, retrieval selections, recall/override checks, server
-prompt/completion tokens, and elapsed response time. It is a small functional
-probe, not a coding benchmark or a statistically reliable speed comparison.
+Run the offline keyword-retrieval evaluation with `npm run eval:memory`.

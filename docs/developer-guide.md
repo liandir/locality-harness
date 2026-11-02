@@ -1,5 +1,54 @@
 # Developer guide
 
+## Model server integration
+
+The shared connection service snapshots endpoint, backend selection, model, and
+credentials for each foreground turn or background attempt. Background jobs
+start a fresh asynchronous connection scope; nested compaction and title work
+inherit the current turn. Backend adapters own discovery, tokenization, request
+translation and errors. The streaming parser and terminal-evidence handling stay
+shared. All HTTP calls continue through `safeFetch` in every edition.
+
+Backend detection is automatic; the old `serverType` setting is ignored and is
+no longer exposed. vLLM metadata comes from `/v1/models` and `/tokenize`;
+llama.cpp uses `/props`. Connection checks send an in-memory 28×28 RGB PNG
+(under 100 bytes) to vLLM's chat tokenizer or llama.cpp's chat completions with
+a one-token output limit. No image asset is stored. Image support is tri-state
+internally; only successful preprocessing/completion or an explicit unsupported
+modality error resolves the probe. Other failures remain connection errors.
+Concurrent checks share a probe, results are cached per connection, and **Set**
+forces a new check. Credentials
+use SecretStorage and are never sent back to either webview. Model changes invalidate
+cached counts. Workspace note saves are local filesystem operations and are independent of the backend.
+
+## Live-server validation
+
+The v2.2.0 API contract baseline is **vLLM 0.32.0**. Automated fixtures cover its
+discovery, preprocessing, generation, reasoning and native-tool response formats.
+Live model acceptance is separate: no live results should be claimed from fixtures.
+
+**Live validation status: pending.** No external test servers were available during
+implementation. The three vLLM model cases and the llama.cpp smoke test below
+must pass, with their configurations recorded, before publishing v2.2.0.
+
+`test/serverLive.test.ts` is skipped unless endpoints are supplied. Provision the
+servers externally, then set the following variables in the invoking shell:
+
+| Endpoint variable | Default model | Coverage |
+| --- | --- | --- |
+| `LOCALITY_LIVE_QWEN_ENDPOINT` | `Qwen/Qwen3-4B` | reasoning budget, tools and continuation |
+| `LOCALITY_LIVE_GPTOSS_ENDPOINT` | `openai/gpt-oss-20b` | reasoning effort |
+| `LOCALITY_LIVE_VISION_ENDPOINT` | `Qwen/Qwen2.5-VL-3B-Instruct` | image preprocessing and generation |
+| `LOCALITY_LIVE_LLAMA_ENDPOINT` | `local` | llama.cpp regression smoke test |
+
+Each prefix accepts `_MODEL` and `_API_KEY` overrides, for example
+`LOCALITY_LIVE_QWEN_MODEL`. All endpoints must satisfy the normal local/LAN policy.
+Run `node node_modules/vitest/vitest.mjs run test/serverLive.test.ts`. The vLLM
+cases verify the reported server version; run the normal browser and unit suites
+as well. Before publishing v2.2.0, record the server version, exact model/revision,
+parser flags and result for each live case in the release notes. Live tests do
+not launch servers or download models.
+
 [Back to Locality](../README.md) · [Build editions](build-editions.md) · [Contributor conventions](../AGENTS.md)
 
 This guide covers working on Locality from source. To install a released
@@ -20,6 +69,15 @@ npm run build
 `npm run build` builds the Commands edition into `dist/`. Use `npm run watch`
 to rebuild it as you edit. Edit source files under `src/` and styles under
 `media/`; generated files in `dist/` should not be edited by hand.
+
+The dependency overrides keep KaTeX and undici aligned with the direct versions.
+The override inside `@azure/identity` selects MSAL Node 7.1.1 or newer in the 7.x
+line for the VSIX packaging tool, addressing
+[GHSA-xcx6-jx8p-x3h5](https://github.com/advisories/GHSA-xcx6-jx8p-x3h5).
+Remove that override once Azure Identity's own dependency range includes the fix.
+MSAL v7 changes interactive browser authentication; VSCE's credential chain does
+not use that flow. Verify packaging and any Azure-based publishing authentication
+when changing this override.
 
 To build a different edition, use one of `no-commands`, `safe-list`, `commands`,
 or `advanced`:
@@ -146,3 +204,25 @@ Edition and tool coverage includes:
   bounded responses, and changed destinations.
 - Shared Git checks for staged diffs, repository selection, and unavailable
   integration.
+
+## Workspace notes
+
+`memoryStore.ts` owns versioned JSON records under `.locality/memories`, guarded
+paths, atomic writes and cross-window locking. `workspaceMemory.ts` owns the active
+store and filesystem notifications. `workspaceNotes.ts` supplies shared types and
+local ranking. No chat IDs, model signatures, generation state or token caches
+are stored in notes. Legacy chat-summary types exist only for history compatibility;
+old jobs never resume and are not imported.
+
+All editions declare create/search/recall together. Creation updates require the
+host's revision from a successful live recall; Markdown editors retain the opened
+revision. Saving and deletion check the live record under the same lock. Invalid
+files produce individual warnings and remain untouched. Switching workspaces
+invalidates editor access and stale sidebar responses.
+
+Automatic selection occurs for each user message, stays stable through tools,
+and enters the shared system-prompt builder and normal backend token counting.
+Drop lowest-ranked whole notes before overflow/compaction. Persist only retrieval
+snapshots for per-message disclosures, never synthetic recall calls or ownership.
+The memory tool is the explicit write exception in Plan and Review; file tools
+retain their mode and approval rules. Native calls still require terminal evidence.

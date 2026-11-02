@@ -16,7 +16,7 @@ function record(): ChatRecord {
     messages: [{ role: "user", content: "Check parser", ts: 1 }, { role: "assistant", content: "Parser verified.", ts: 2 }], memoryCreations: [failed()] };
 }
 for (const theme of ["light", "dark"] as const) {
-  test(`${theme}: restored memory failures disclose diagnostics and send a guarded retry`, async ({ page }) => {
+  test(`${theme}: restored memory failures disclose historical diagnostics without retry controls`, async ({ page }) => {
     await webview(page, theme);
     await hostMessage(page, { kind: "chatLoaded", record: record() });
     const card = page.locator("[data-memory-creation]");
@@ -30,16 +30,15 @@ for (const theme of ["light", "dark"] as const) {
     // Embedded diagnostics share the parent's surface.
     await expect(card.locator(".tool-output-surface")).toHaveCount(1);
     const retry = card.getByRole("button", { name: "Retry", exact: true });
-    await retry.focus(); await page.keyboard.press("Enter");
-    expect(await page.evaluate(() => (window as unknown as { posted: unknown[] }).posted)).toContainEqual({ type: "retryMemory", id: record().id, chatId: record().id, attemptId });
+    await expect(retry).toHaveCount(0);
     await hostMessage(page, { kind: "memoryCreations", creations: [{ messageTs: 2, operation: "update", status: "retry_wait", attemptId }] });
     await expect(retry).toHaveCount(0);
-    await expect(heading).toContainText("Memory retry scheduled");
+    await expect(heading).toContainText("Legacy memory generation stopped");
     await expect(heading).not.toHaveClass(/active-tool-head/);
     await page.reload(); await webview(page, theme);
     await hostMessage(page, { kind: "chatLoaded", record: record() });
     await page.locator("[data-memory-creation] > summary").click();
-    await expect(page.getByRole("button", { name: "Retry", exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Retry", exact: true })).toHaveCount(0);
   });
 
   test(`${theme}: memory progress respects a manually paused viewport`, async ({ page }) => {

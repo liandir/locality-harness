@@ -1,3 +1,6 @@
+import { noteRevision } from "../../chat/memoryStore.js";
+import { hasServerApiKey, saveServerApiKey, withConnectionDraft } from "../../llm/connection.js";
+import { clearServerCaches } from "../../llm/server.js";
 import { createSideHost } from "../../build/sideHost.js";
 import type { SideHost } from "../../build/sideHostContracts.js";
 import { seedFeatureSettings } from "../../build/settings.js";
@@ -22,6 +25,9 @@ import { MemoryDocuments } from "../memoryDocuments.js";
 export class SideViewProvider implements vscode.WebviewViewProvider {
   static readonly viewType = "locality.side";
   private view?: vscode.WebviewView;
+  private connectionAttempt = 0;
+  private metadataGeneration = 0;
+  private connectionWrites = Promise.resolve();
   private featureHost?: SideHost;
   private subs: vscode.Disposable[] = [];
   private activeTab: SideTab = "welcome";
@@ -74,7 +80,10 @@ export class SideViewProvider implements vscode.WebviewViewProvider {
     const s = readSettings();
     this.post({ type: "settings", settings: s as unknown as Record<string, unknown>, reasoningEffort: this.currentReasoningEffort(), ...(resetDrafts ? { resetDrafts: true } : {}) });
     void this.featureHost?.pushSettings();
+    void this.pushCredentialState(s.endpoint);
   }
+
+  refreshServerMetadata(): void { void this.pushEndpointMetadata(readSettings().endpoint); }
 
   pushReasoningEffort(): void {
     this.post({ type: "reasoningEffort", effort: this.currentReasoningEffort() });
@@ -85,12 +94,12 @@ export class SideViewProvider implements vscode.WebviewViewProvider {
   }
 
   async pushMemories(): Promise<void> {
-    if (!this.view || this.activeTab !== "chats") return;
+    if (!this.view || this.activeTab !== "memories") return;
     const generation = ++this.memoryListGeneration;
     const storage = this.getStorage();
     try {
-      const memories = await this.memory?.list() ?? [];
-      if (generation === this.memoryListGeneration && storage === this.getStorage()) this.post({ type: "memories", memories });
+      const listing = await this.memory?.list() ?? { memories: [], warnings: [] };
+      if (generation === this.memoryListGeneration && storage === this.getStorage()) this.post({ type: "memories", memories: listing.memories.map(note => ({ ...note, revision: noteRevision(note) })), warnings: listing.warnings });
     } catch {
       if (generation === this.memoryListGeneration) this.post({ type: "memoryError", error: "Could not load workspace memories." });
     }
@@ -107,7 +116,7 @@ export class SideViewProvider implements vscode.WebviewViewProvider {
   focusTab(tab: SideTab): void {
     this.activeTab = tab;
     this.post({ type: "focusTab", tab });
-    if (tab === "chats") void this.pushMemories();
+    if (tab === "memories") void this.pushMemories();
   }
 
   async revealMemory(id: string, readonly = true): Promise<void> {
@@ -118,7 +127,7 @@ export class SideViewProvider implements vscode.WebviewViewProvider {
     if (!this.memory) return;
     try {
       if (!this.memoryDocuments) {
-        this.memoryDocuments = new MemoryDocuments(this.getStorage, this.memory);
+        this.memoryDocuments = new MemoryDocuments(this.memory);
         this.context.subscriptions.push(this.memoryDocuments, vscode.workspace.registerFileSystemProvider(
           MemoryDocuments.scheme, this.memoryDocuments, { isCaseSensitive: true }
         ));
@@ -147,15 +156,31 @@ export class SideViewProvider implements vscode.WebviewViewProvider {
       case "listMemories": await this.pushMemories(); break;
       case "openMemory": await this.openMemory(m.id, m.readonly); break;
       case "setMemoryEnabled":
-      case "regenerateMemory":
-      case "cancelMemoryGeneration":
+      case "renameMemory":
+      case "deleteMemory": {
+        const store = this.memory?.current();
+        if (!store) break;
         try {
-          if (m.type === "setMemoryEnabled") await this.memory?.setEnabled(m.id, m.enabled);
-          else if (m.type === "regenerateMemory") await this.memory?.regenerate(m.id);
-          else await this.memory?.cancelAll();
+          const note = await store.get(m.id);
+          if (m.type === "setMemoryEnabled") {
+            if (store !== this.memory?.current()) break;
+            await store.setEnabled(m.id, m.enabled, m.revision);
+          } else if (m.type === "renameMemory") {
+            const name = await vscode.window.showInputBox({ title: "Rename memory", value: note.name,
+              validateInput: value => !value.trim() || value.length > 200 ? "Enter 1-200 characters." : undefined });
+            if (name === undefined || store !== this.memory?.current()) break;
+            await store.save({ id: note.id, name, contents: note.contents }, m.revision);
+          } else {
+            const choice = await vscode.window.showWarningMessage(
+              'Delete memory "' + note.name + '"? This cannot be undone.', { modal: true }, "Delete");
+            if (choice !== "Delete" || store !== this.memory?.current()) break;
+            await store.delete(note.id, m.revision);
+          }
+          this.memory?.changed();
           await this.pushMemories();
         } catch (error) { this.post({ type: "memoryError", error: (error as Error).message }); }
         break;
+      }
       case "openGithub":
         await vscode.env.openExternal(vscode.Uri.parse("https://github.com/liandir/locality"));
         break;
@@ -182,6 +207,7 @@ export class SideViewProvider implements vscode.WebviewViewProvider {
         break;
       case "saveSetting":
         try {
+          if (["endpoint", "model"].includes(m.key)) this.connectionAttempt++;
           await writeSetting(m.key as keyof ReturnType<typeof readSettings>, m.value as never);
         } catch (e) {
           this.pushSettings();
@@ -197,23 +223,38 @@ export class SideViewProvider implements vscode.WebviewViewProvider {
         }
         break;
       case "validateEndpoint": {
+        const attempt = ++this.connectionAttempt;
         const v = await validateEndpoint(m.url);
+        if (attempt !== this.connectionAttempt) break;
         if (!v.ok) {
           this.post({ type: "endpointValidation", requestId: m.requestId, ok: false, error: v.error, resolved: v.resolved });
           break;
         }
         try {
-          const { metadata, models, selectedModel } = await this.readEndpointInfo(m.url, true);
-          await writeSetting("endpoint", m.url);
-          if (readSettings().model !== selectedModel) await writeSetting("model", selectedModel);
-          this.onEndpointConnected?.();
-          this.post({ type: "endpointValidation", requestId: m.requestId, ok: true, resolved: v.resolved, metadata, models, selectedModel });
+          const { metadata, models, selectedModel } = await this.readEndpointInfo(m.url, true, m.apiKey);
+          if (attempt !== this.connectionAttempt) break;
+          const commit = this.connectionWrites.then(async () => {
+            if (attempt !== this.connectionAttempt) return;
+            if (m.apiKey !== undefined) await saveServerApiKey(m.url, m.apiKey, this.context.secrets);
+            if (attempt !== this.connectionAttempt) return;
+            if (m.apiKey !== undefined) clearServerCaches();
+            await writeSetting("endpoint", m.url);
+            if (attempt !== this.connectionAttempt) return;
+            if (readSettings().model !== selectedModel) await writeSetting("model", selectedModel);
+            if (attempt !== this.connectionAttempt) return;
+            await this.pushCredentialState(m.url);
+            this.onEndpointConnected?.();
+            this.post({ type: "endpointValidation", requestId: m.requestId, ok: true, resolved: v.resolved, metadata, models, selectedModel });
+          });
+          this.connectionWrites = commit.catch(() => undefined);
+          await commit;
         } catch (error) {
+          if (attempt !== this.connectionAttempt) break;
           this.post({
             type: "endpointValidation", requestId: m.requestId,
             ok: false,
             resolved: v.resolved,
-            error: `Could not read llama.cpp server information: ${(error as Error).message}`
+            error: `Could not read model server information: ${(error as Error).message}`
           });
         }
         break;
@@ -254,32 +295,43 @@ export class SideViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  private async pushCredentialState(endpoint: string): Promise<void> {
+    try { this.post({ type: "serverCredential", endpoint, configured: await hasServerApiKey(endpoint, this.context.secrets) }); }
+    catch { /* Connection validation owns error presentation. */ }
+  }
+
   private async pushEndpointMetadata(endpoint: string): Promise<void> {
+    const generation = ++this.metadataGeneration;
+    const settings = readSettings();
     const v = await validateEndpoint(endpoint);
     if (!v.ok) return;
     try {
       const { metadata, models, selectedModel } = await this.readEndpointInfo(endpoint);
+      if (generation !== this.metadataGeneration || readSettings().endpoint !== settings.endpoint || readSettings().model !== settings.model || readSettings().serverType !== settings.serverType) return;
       if (readSettings().model !== selectedModel) await writeSetting("model", selectedModel);
       this.post({ type: "endpointValidation", ok: true, resolved: v.resolved, metadata, models, selectedModel });
     } catch (error) {
+      if (generation !== this.metadataGeneration || readSettings().endpoint !== settings.endpoint || readSettings().serverType !== settings.serverType || readSettings().model !== settings.model) return;
       this.post({
         type: "endpointValidation",
         ok: false,
         resolved: v.resolved,
-        error: `Could not read llama.cpp server information: ${(error as Error).message}`
+        error: `Could not read model server information: ${(error as Error).message}`
       });
     }
   }
 
   private async readEndpointInfo(
     endpoint: string,
-    force = false
+    force = false, apiKey?: string
   ): Promise<{ metadata: Awaited<ReturnType<typeof fetchServerMetadata>>; models: ServerModel[]; selectedModel: string }> {
-    const models = await fetchServerModels(endpoint, force);
     const configured = readSettings().model;
-    const selectedModel = models.some(model => model.id === configured) ? configured : models[0].id;
-    const metadata = await fetchServerMetadata(endpoint, { model: selectedModel, force });
-    return { metadata, models, selectedModel };
+    return withConnectionDraft({ endpoint }, apiKey, async () => {
+      const models = await fetchServerModels(endpoint, force);
+      const selectedModel = models.some(model => model.id === configured) ? configured : models[0].id;
+      const metadata = await withConnectionDraft({ endpoint, model: selectedModel }, apiKey, () => fetchServerMetadata(endpoint, { model: selectedModel, force, probeImages: true }));
+      return { metadata, models, selectedModel };
+    });
   }
 
   private html(webview: vscode.Webview): string {

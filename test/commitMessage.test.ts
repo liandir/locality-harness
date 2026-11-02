@@ -161,7 +161,7 @@ describe("CommitMessageController", () => {
       expect.any(AbortSignal),
       { acceptPartialOnLength: true }
     );
-    expect(mocks.complete.mock.calls[0][1]).not.toHaveProperty("max_tokens");
+    expect(mocks.complete.mock.calls[0][1]).toHaveProperty("max_tokens", 512);
     expect(mocks.complete.mock.calls[0][1]).not.toHaveProperty("thinking_budget_tokens");
     controller.dispose();
   });

@@ -1,10 +1,11 @@
+import type { ServerMetadata } from "../llm/serverTypes.js";
 /**
  * Webview commands and presentation messages. Session events and chat data
  * live in shared chat contracts, independently of their host implementations.
  * Tool proposals carry host-computed full-file diff counts; streaming progress
  * carries no added/removed counts, and previews may be capped independently.
  */
-import type { MemoryListItem } from "../chat/memory.js";
+import type { WorkspaceNote } from "../chat/workspaceNotes.js";
 import type { UiEvent } from "../chat/events.js";
 import type { ChatAttachment } from "../chat/types.js";
 import type { ReasoningEffort } from "../chat/reasoningEffort.js";
@@ -26,13 +27,13 @@ export interface UiQueuedMessage {
 
 // --- Side view (welcome / chats / settings) ---
 
-export type SideTab = "welcome" | "chats" | "settings";
+export type SideTab = "welcome" | "chats" | "memories" | "settings";
 export const SETTINGS_SECTIONS = ["model", "tools", "chat", "automation", "user", "reset"] as const;
 export type SettingsSection = typeof SETTINGS_SECTIONS[number];
 export type WorkspacePathType = "file" | "directory" | "other" | "missing";
 
 export interface ChatTab { id: string; title: string; running?: boolean; open?: boolean }
-export interface ChatMenuMemory { id: string; hasMemory: boolean; status: MemoryListItem["status"] }
+export interface ManagedMemory extends WorkspaceNote { revision: string }
 
 export type SideToExt =
   | { type: "ready" }
@@ -46,7 +47,7 @@ export type SideToExt =
   | { type: "openGithub" }
   | { type: "saveSetting"; key: string; value: unknown }
   | { type: "setReasoningEffort"; effort: ReasoningEffort }
-  | { type: "validateEndpoint"; url: string; requestId?: number }
+  | { type: "validateEndpoint"; url: string; requestId?: number; apiKey?: string }
   | { type: "validateWebSearch"; endpoint: string; apiKey: string }
   | { type: "editUserSettingsJson" }
   | { type: "editWorkspacePrompts" }
@@ -54,24 +55,25 @@ export type SideToExt =
   | { type: "resetAllDefaults" }
   | { type: "listMemories" }
   | { type: "openMemory"; id: string; readonly: boolean }
-  | { type: "setMemoryEnabled"; id: string; enabled: boolean }
-  | { type: "regenerateMemory"; id: string }
-  | { type: "cancelMemoryGeneration" };
+  | { type: "setMemoryEnabled"; id: string; enabled: boolean; revision: string }
+  | { type: "renameMemory"; id: string; revision: string }
+  | { type: "deleteMemory"; id: string; revision: string };
 
-export type ChatContextMessage = Extract<SideToExt, { type: "openChat" | "renameChat" | "deleteChat" | "openMemory" | "regenerateMemory" }>;
+export type ChatContextMessage = Extract<SideToExt, { type: "openChat" | "renameChat" | "deleteChat" }>;
 
 export type ExtToSide =
   | { type: "settingsSections"; expanded: SettingsSection[] }
-  | { type: "memories"; memories: MemoryListItem[] }
+  | { type: "memories"; memories: ManagedMemory[]; warnings?: string[] }
   | { type: "memoryError"; error: string }
   | { type: "settings"; settings: Record<string, unknown>; reasoningEffort: ReasoningEffort; resetDrafts?: boolean }
   | { type: "reasoningEffort"; effort: ReasoningEffort }
   | { type: "webSearchSettings"; endpoint: string; apiKey: string; verified: boolean; error?: string; reset?: boolean }
   | { type: "webSearchValidation"; ok: boolean; error?: string; endpoint?: string }
   | { type: "appInfo"; version: string }
+  | { type: "serverCredential"; endpoint: string; configured: boolean }
   | { type: "chats"; chats: { id: string; title: string; updatedAt: number }[] }
   | { type: "focusTab"; tab: SideTab }
-  | { type: "endpointValidation"; requestId?: number; ok: boolean; error?: string; resolved?: string[]; metadata?: { modelAlias: string; contextSize: number; supportsVision: boolean }; models?: { id: string }[]; selectedModel?: string }
+  | { type: "endpointValidation"; requestId?: number; ok: boolean; error?: string; resolved?: string[]; metadata?: ServerMetadata; models?: { id: string }[]; selectedModel?: string }
   | { type: "settingSaved"; key: string; ok: boolean; error?: string }
   | { type: "openTabs"; tabs: ChatTab[] };
 
@@ -79,9 +81,6 @@ export type ExtToSide =
 
 export type ChatToExt = (
   | { type: "openMemory"; id: string; readonly?: boolean }
-  | { type: "openMemoryChat"; id: string }
-  | { type: "regenerateMemory"; id: string }
-  | { type: "retryMemory"; id: string; attemptId: string }
   | { type: "deleteChat"; id: string }
   | { type: "ready" }
   | { type: "send"; text: string; mode: ChatMode; attachmentIds?: string[] }
@@ -133,7 +132,6 @@ export type ExtToChat = UiEvent
   | { type: "serverContext"; contextSize?: number }
   | { type: "fileUndoFinished"; userMessageTs: number }
   | { type: "chatTabs"; tabs: ChatTab[]; activeId?: string }
-  | { type: "chatMemories"; memories: ChatMenuMemory[] }
   | { type: "chatSnapshot"; id: string; events: ExtToChat[]; busy: boolean; draft: string }
   | { type: "settings"; mode: ChatMode; showThinking: boolean; steerWithEnter: boolean; autoCompact: boolean; autoCompactThresholdPercent: number; workspaceRoot?: string }
   | { type: "attachmentSelected"; attachment: UiAttachment }

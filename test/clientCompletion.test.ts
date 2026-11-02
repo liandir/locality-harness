@@ -75,6 +75,7 @@ describe("stream completion contract", () => {
     await expect(drain(new AbortController().signal)).rejects.toMatchObject({ diagnostics: { cause: "transport" } });
     const controller = new AbortController();
     controller.abort();
-    await expect(drain(controller.signal)).rejects.toThrow("socket closed");
+    await expect(drain(controller.signal)).rejects.toBe(controller.signal.reason);
+    expect(fetch).toHaveBeenCalledTimes(1);
   });
 });

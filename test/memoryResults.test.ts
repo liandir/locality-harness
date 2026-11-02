@@ -3,7 +3,7 @@ import MarkdownIt from "markdown-it";
 import { renderMemoryCreation, renderMemoryResult } from "../src/ui/chatView/webview/memoryResults.js";
 
 const md = new MarkdownIt({ html: false });
-const metadata = { name: "Parser decisions", id: "abc123", date: "2026-09-11T12:30Z" };
+const metadata = { name: "Parser decisions", id: "12345678-1234-1234-1234-123456789abc", date: "2026-09-11T12:30Z" };
 
 describe("memory tool result rendering", () => {
   it.each(["create", "update"] as const)("renders %s with the same full contents and date as recall", operation => {
@@ -18,14 +18,14 @@ describe("memory tool result rendering", () => {
 
   it.each(["queued", "generating"] as const)("shows %s creation as live tool activity", status => {
     const html = renderMemoryCreation({ messageTs: 2, status }, md, "");
-    expect(html).toContain("Creating memory");
-    expect(html.includes("active-tool-head")).toBe(status === "generating");
+    expect(html).toContain("Legacy memory generation stopped");
+    expect(html).not.toContain("active-tool-head");
     expect(html).not.toContain("Created memory");
   });
 
   it.each(["queued", "generating", "failed"] as const)("uses update wording for %s operations on an existing memory", status => {
     const html = renderMemoryCreation({ messageTs: 2, status, operation: "update" }, md, "");
-    expect(html).toContain(status === "failed" ? "Memory update failed" : "Updating memory");
+    expect(html).toContain(status === "failed" ? "Memory update failed" : "Legacy memory generation stopped");
     expect(html).not.toMatch(/Creating memory|Created memory|Memory creation failed/);
   });
 
@@ -52,14 +52,14 @@ describe("memory tool result rendering", () => {
 
   it("links names to source chats and lists dates in search relevance order with truncation feedback", () => {
     const html = renderMemoryResult("search_memories", JSON.stringify({
-      memories: [{ ...metadata, name: "Zebra parser" }, { ...metadata, name: "Another parser", id: "def456" }],
+      memories: [{ ...metadata, name: "Zebra parser" }, { ...metadata, name: "Another parser", id: "12345678-1234-1234-1234-123456789def" }],
       total: 5, truncated: true
     }), md);
     expect(html).toContain('<ul class="tool-filelist">');
     expect(html.match(/<li /g)).toHaveLength(2);
     expect(html.indexOf("Zebra parser")).toBeLessThan(html.indexOf("Another parser"));
-    expect(html).toContain('data-open-memory-chat="abc123"');
-    expect(html).toContain('data-open-memory-chat="def456"');
+    expect(html).toContain('data-open-memory="12345678-1234-1234-1234-123456789abc"');
+    expect(html).toContain('data-open-memory="12345678-1234-1234-1234-123456789def"');
     expect(html).toContain('datetime="2026-09-11T12:30:00.000Z"');
     expect(html).toContain("Showing 2 of 5 matches");
   });
@@ -72,7 +72,7 @@ describe("memory tool result rendering", () => {
     const unsafe = { ...metadata, name: '<img src=x onerror="alert(1)">', id: "<script>" };
     const list = renderMemoryResult("search_memories", JSON.stringify({ memories: [unsafe] }), md);
     expect(list).toContain("&lt;img");
-    expect(list).toContain('data-open-memory-chat="&lt;script&gt;"');
+    expect(list).not.toContain("data-open-memory");
     expect(list).not.toContain("<script>");
     expect(list).not.toContain("<img");
     const recalled = renderMemoryResult("recall_memory", JSON.stringify({ ...metadata, contents: "<script>alert(1)</script>" }), md);

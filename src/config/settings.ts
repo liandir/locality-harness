@@ -1,3 +1,4 @@
+import type { ServerType } from "../llm/serverTypes.js";
 import { readFeatureSettings, featureSettingKeys } from "../build/settings.js";
 import * as vscode from "vscode";
 import { DEFAULT_MEMORY_MAX_COUNT, MAX_MEMORY_COUNT } from "../chat/memoryLimits.js";
@@ -14,6 +15,8 @@ export const DEFAULT_COMMIT_MESSAGE_PROMPT =
 
 export interface HarnessSettings {
   endpoint: string;
+  /** Internal connection selection; persisted backend overrides are ignored. */
+  serverType?: ServerType;
   model: string;
   toolCallingMode: ToolCallingProfile;
   temperature: number;
@@ -27,8 +30,7 @@ export interface HarnessSettings {
   steerWithEnter: boolean;
   autoCompact: boolean;
   memoryEnabled: boolean;
-  memoryLoadOnStart: boolean;
-  autoGenerateMemories: boolean;
+  memoryAutoLoad: boolean;
   memoryMaxCount: number;
   autoCompactThresholdPercent: number;
   tailBudgetPercent: number;
@@ -56,6 +58,7 @@ export function readSettings(): HarnessSettings {
   const cfg = vscode.workspace.getConfiguration(NS);
   const reasoningBudget = cfg.get<unknown>("reasoningBudget");
   return {
+    serverType: "auto",
     endpoint: cfg.get<string>("endpoint") ?? "http://localhost:8080/v1",
     model: cfg.get<string>("model")?.trim() || "local",
     toolCallingMode: normalizeToolCallingProfile(cfg.get<unknown>("toolCallingMode")),
@@ -69,8 +72,7 @@ export function readSettings(): HarnessSettings {
     showThinking: cfg.get<boolean>("showThinking") ?? false,
     steerWithEnter: cfg.get<boolean>("steerWithEnter") === true,
     memoryEnabled: cfg.inspect?.<boolean>("memoryEnabled")?.workspaceValue === true,
-    memoryLoadOnStart: cfg.inspect?.<boolean>("memoryLoadOnStart")?.workspaceValue === true,
-    autoGenerateMemories: cfg.inspect?.<boolean>("autoGenerateMemories")?.workspaceValue === true,
+    memoryAutoLoad: (cfg.inspect?.<boolean>("memoryAutoLoad")?.workspaceValue ?? cfg.inspect?.<boolean>("memoryLoadOnStart")?.workspaceValue) === true,
     memoryMaxCount: Math.floor(clampNumber(cfg.get<number>("memoryMaxCount") ?? DEFAULT_MEMORY_MAX_COUNT, 1, MAX_MEMORY_COUNT, DEFAULT_MEMORY_MAX_COUNT)),
     autoCompact: cfg.get<boolean>("autoCompact") ?? true,
     autoCompactThresholdPercent: clampPercent(cfg.get<number>("autoCompactThresholdPercent") ?? 80),
@@ -105,7 +107,7 @@ export async function writeSetting<K extends keyof HarnessSettings>(
     throw new Error("Enter a positive whole number or leave the reasoning budget empty for unlimited reasoning.");
   }
   const cfg = vscode.workspace.getConfiguration(NS);
-  let target = ["memoryEnabled", "memoryLoadOnStart", "autoGenerateMemories", "memoryMaxCount"].includes(key)
+  let target = ["memoryEnabled", "memoryAutoLoad", "memoryMaxCount"].includes(key)
     ? vscode.ConfigurationTarget.Workspace : vscode.ConfigurationTarget.Global;
   if (scope === "effective") {
     const inspected = cfg.inspect(key);
@@ -113,6 +115,7 @@ export async function writeSetting<K extends keyof HarnessSettings>(
     else if (inspected?.workspaceValue !== undefined) target = vscode.ConfigurationTarget.Workspace;
   }
   await cfg.update(key, value, target);
+  if (key === "memoryAutoLoad") await cfg.update("memoryLoadOnStart", undefined, vscode.ConfigurationTarget.Workspace);
 }
 
 /** Every harness setting key; maps 1:1 to the package.json configuration properties. */
@@ -131,8 +134,7 @@ export const SETTING_KEYS: (keyof HarnessSettings)[] = [
   "steerWithEnter",
   "autoCompact",
   "memoryEnabled",
-  "memoryLoadOnStart",
-  "autoGenerateMemories",
+  "memoryAutoLoad",
   "memoryMaxCount",
   "autoCompactThresholdPercent",
   "tailBudgetPercent",
@@ -165,6 +167,7 @@ export async function restoreDefaultGeneratedPrompts(): Promise<void> {
 /** Reset every harness setting to its default by clearing the user override. */
 export async function resetAllSettings(): Promise<void> {
   const cfg = vscode.workspace.getConfiguration(NS);
+  await cfg.update("memoryLoadOnStart", undefined, vscode.ConfigurationTarget.Workspace);
   for (const key of SETTING_KEYS) {
     await cfg.update(key, undefined, vscode.ConfigurationTarget.Global);
     await cfg.update(key, undefined, vscode.ConfigurationTarget.Workspace);
@@ -175,4 +178,15 @@ export function onSettingsChange(handler: () => void): vscode.Disposable {
   return vscode.workspace.onDidChangeConfiguration(e => {
     if (e.affectsConfiguration(NS)) handler();
   });
+}
+
+/** Preserve the existing workspace opt-in under the per-query setting name. */
+export async function migrateMemorySettings(): Promise<void> {
+  const cfg = vscode.workspace.getConfiguration(NS);
+  const old = cfg.inspect<boolean>("memoryLoadOnStart")?.workspaceValue;
+  if (old === undefined) return;
+  if (cfg.inspect<boolean>("memoryAutoLoad")?.workspaceValue === undefined) {
+    await cfg.update("memoryAutoLoad", old, vscode.ConfigurationTarget.Workspace);
+  }
+  await cfg.update("memoryLoadOnStart", undefined, vscode.ConfigurationTarget.Workspace);
 }

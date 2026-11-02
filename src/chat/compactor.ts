@@ -69,6 +69,7 @@ export async function compact(
   rec.contextMessages = working.messages;
   rec.totalTokens = working.totalTokens;
   rec.tokenizerModel = working.tokenizerModel;
+  rec.tokenizerIdentity = working.tokenizerIdentity;
   return result;
 }
 
@@ -192,7 +193,7 @@ async function summarizeHead(
   let chunkTokens = 0;
   const flush = async () => {
     if (chunk.length === 0) return;
-    running = await summarizeChunk(endpoint, running, chunk, signal, model);
+    running = await summarizeChunk(endpoint, running, chunk, signal, model, Math.min(2048, outputReserve));
     chunk = [];
     chunkTokens = 0;
   };
@@ -214,7 +215,7 @@ async function summarizeChunk(
   priorSummary: string,
   chunk: { content: string }[],
   signal: AbortSignal,
-  model?: string
+  model?: string, maxTokens = 2048
 ): Promise<string> {
   const instruction = priorSummary
     ? SUMMARY_SYSTEM +
@@ -227,7 +228,7 @@ async function summarizeChunk(
     { role: "system", content: instruction },
     ...chunk.map(m => ({ role: "user" as const, content: m.content }))
   ];
-  const text = await complete(endpoint, { model, messages, temperature: 0.3 }, signal);
+  const text = await complete(endpoint, { model, messages, purpose: "auxiliary", max_tokens: maxTokens, temperature: 0.3 }, signal);
   return text.trim();
 }
 

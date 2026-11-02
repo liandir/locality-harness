@@ -23,7 +23,11 @@ vi.mock("vscode", () => ({
   window: { registerWebviewViewProvider: vi.fn(), showInformationMessage: vi.fn(), showErrorMessage: vi.fn() },
   commands: { registerCommand: (name: string, handler: () => Promise<void>) => { mocks.commands.set(name, handler); } }
 }));
-vi.mock("../src/config/settings.js", () => ({ onSettingsChange: vi.fn(() => ({ dispose() {} })) }));
+vi.mock("../src/config/settings.js", () => ({
+  migrateMemorySettings: vi.fn(),
+  onSettingsChange: vi.fn(() => ({ dispose() {} })),
+  readSettings: () => ({ endpoint: "http://127.0.0.1:8080", model: "local", serverType: "auto" })
+}));
 vi.mock("../src/scm/commitMessage.js", () => ({ CommitMessageController: class {} }));
 vi.mock("../src/chat/storage.js", () => ({
   ChatStorage: class {

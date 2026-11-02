@@ -1,9 +1,9 @@
+import { withServerConnection } from "../../llm/connection.js";
 import { unresolvedInterruption } from "../../chat/interruption.js";
 import { featureStyles } from "../../build/assets.js";
 import { fetchServerMetadata } from "../../llm/client.js";
 import { fileURLToPath } from "node:url";
 import { MAX_TEXT_ATTACHMENT_BYTES } from "../../chat/attachments.js";
-import { memoryMetadata } from "../../chat/memory.js";
 import type { WorkspaceMemory } from "../../chat/workspaceMemory.js";
 import * as vscode from "vscode";
 import * as path from "node:path";
@@ -46,13 +46,12 @@ interface ChatRuntime {
   running: boolean;
   compacting: boolean;
   runningProcesses: Set<string>;
-  memoryRefreshGeneration: number;
 }
 
 function newRuntime(): ChatRuntime {
   return { queuedMessages: [], stagedAttachmentIds: new Set(), pendingAttachments: new Map(),
     messageLoopRunning: false, sessionCreationPending: false, attachmentSelectionPending: false,
-    events: [], draft: "", open: true, removed: false, running: false, compacting: false, runningProcesses: new Set(), memoryRefreshGeneration: 0 };
+    events: [], draft: "", open: true, removed: false, running: false, compacting: false, runningProcesses: new Set() };
 }
 
 export class ChatViewProvider implements vscode.WebviewViewProvider {
@@ -62,7 +61,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private runtimes = new Map<string, ChatRuntime>();
   private navigationGeneration = 0;
   private recentChatsGeneration = 0;
-  private chatMemoriesGeneration = 0;
   private serverMetadataGeneration = 0;
   private serverMetadataKey?: string;
   private deleting = new Map<string, ChatStorage>();
@@ -199,8 +197,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   private async refreshServerCapabilities(): Promise<boolean> {
     const generation = ++this.serverMetadataGeneration;
-    const { endpoint, model } = readSettings();
-    const endpointKey = `${endpoint}\n${model}`;
+    const { endpoint, model, serverType } = readSettings();
+    const endpointKey = `${endpoint}\n${model}\n${serverType}`;
     if (this.serverMetadataKey !== endpointKey) {
       this.serverMetadataKey = endpointKey;
       this.post({ type: "serverContext" });
@@ -209,12 +207,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     let supported = false;
     let contextSize: number | undefined;
     try {
-      const metadata = await fetchServerMetadata(endpoint, { model });
+      const metadata = await withServerConnection({ endpoint, model, serverType }, () => fetchServerMetadata(endpoint, { model, probeImages: true }), true);
       supported = metadata.supportsVision;
       contextSize = metadata.contextSize;
     } catch { /* Unknown capabilities keep image input unavailable. */ }
     const current = readSettings();
-    if (endpoint !== current.endpoint || model !== current.model) return false;
+    if (endpoint !== current.endpoint || model !== current.model || serverType !== current.serverType) return false;
     if (generation === this.serverMetadataGeneration) {
       this.post({ type: "serverContext", contextSize });
       this.post({ kind: "visionCapability", supported });
@@ -243,37 +241,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   refreshMemoryVisibility(): void {
-    void this.pushChatMemories();
-    for (const runtime of this.runtimes.values()) {
-      void runtime.session?.refreshMemoryVisibility();
-      void this.refreshMemoryCreations(runtime);
-    }
-  }
-
-  private async pushChatMemories(): Promise<void> {
-    if (!this.memory) return;
-    const generation = ++this.chatMemoriesGeneration;
-    const storage = this.getStorage();
-    try {
-      const memories = storage ? await this.memory.list() : [];
-      if (generation !== this.chatMemoriesGeneration || storage !== this.getStorage()) return;
-      this.post({ type: "chatMemories", memories: memories.map(memory => ({
-        id: memory.sourceId, hasMemory: !!memory.text.trim(), status: memory.status
-      })) });
-    } catch {
-      if (generation === this.chatMemoriesGeneration && storage === this.getStorage()) this.post({ type: "chatMemories", memories: [] });
-    }
-  }
-
-  private async refreshMemoryCreations(runtime: ChatRuntime): Promise<void> {
-    if (!this.memory || !runtime.session) return;
-    const generation = ++runtime.memoryRefreshGeneration;
-    const creations = await this.memory.creations(runtime.session.getRecord().id);
-    if (runtime.removed || runtime.storage !== this.getStorage() || generation !== runtime.memoryRefreshGeneration) return;
-    const event: UiEvent = { kind: "memoryCreations", creations };
-    runtime.events = runtime.events.filter(old => old.kind !== "memoryCreations");
-    runtime.events.push(event);
-    if (runtime === this.active) this.post(event);
+    for (const runtime of this.runtimes.values()) runtime.session?.refreshMemoryVisibility();
   }
 
   getTabs(): ChatTab[] {
@@ -333,8 +301,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   async closeAll(): Promise<void> {
     this.navigationGeneration++;
-    this.chatMemoriesGeneration++;
-    this.post({ type: "chatMemories", memories: [] });
     const runtimes = [...this.runtimes.values()];
     this.active.removed = true;
     this.runtimes.clear();
@@ -384,7 +350,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         if (runtime.removed) return;
         if (event.kind === "visionCapability") {
           const current = readSettings();
-          if (event.endpoint === current.endpoint && event.model === current.model) this.post(event);
+          if (event.endpoint === current.endpoint && event.model === current.model && event.serverType === current.serverType) this.post(event);
           return;
         }
         // A fresh baseline plus this turn's events preserves streamed text and
@@ -392,7 +358,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         if (event.kind === "turnPreparing" && !runtime.running) {
           const retained = new Map<string, UiEvent>();
           for (const old of runtime.events) {
-            if (["tokens", "initialMemoryCalls", "memoryCreations", "compactStatus"].includes(old.kind)) retained.set(old.kind, old);
+            if (["tokens", "initialMemoryCalls", "memorySelections", "memoryCreations", "compactStatus"].includes(old.kind)) retained.set(old.kind, old);
           }
           runtime.events = [{ kind: "chatLoaded", record: structuredClone(session.getRecord()) }, ...retained.values()];
           runtime.running = true;
@@ -411,6 +377,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           this.pushTabs();
         }
         if (event.kind === "chatLoaded") runtime.events = [];
+        if (event.kind === "memorySelections" || event.kind === "initialMemoryCalls") runtime.events = runtime.events.filter(old => old.kind !== event.kind);
         const previous = runtime.events.at(-1);
         if ((event.kind === "text" || event.kind === "thought") && previous?.kind === event.kind && previous.messageId === event.messageId) {
           previous.delta += event.delta;
@@ -419,12 +386,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         if (event.kind === "turnEnd" || event.kind === "abort") {
           runtime.running = false;
           this.pushTabs();
-          // Decide from the current workspace setting when the answer finishes,
-          // so toggles during a running turn apply to both creation and updates.
-          if (event.kind === "turnEnd" && event.messageTs !== undefined
-            && (event.mode === "act" || event.mode === "review") && readSettings().autoGenerateMemories) {
-            this.memory?.enqueue(rec.id, false, event.messageTs);
-          }
         }
         if (event.kind === "titleChanged") { this.onChatOpened(rec); this.pushTabs(); }
       }
@@ -469,7 +430,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       runtime.events.push({ kind: "titleChanged", title: next, animate: false });
       if (runtime === this.active) this.post({ kind: "titleChanged", title: next, animate: false });
     } else {
-      // Reload after the input box: memory generation may have updated this record.
+      // Reload after the input box: another window may have updated this record.
       const latest = await storage?.load(id);
       if (!latest || storage !== this.getStorage()) return;
       latest.title = next;
@@ -529,7 +490,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       if (m.type === "undoResponseFiles") return;
       await this.fileUndoTask;
     }
-    const navigation = ["openChat", "closeChatTab", "openChats", "openSettings", "newChat", "openMemory", "regenerateMemory", "deleteChat", "ready"].includes(m.type) || (m.type === "renameChat" && !!m.id);
+    const navigation = ["openChat", "closeChatTab", "openChats", "openSettings", "newChat", "openMemory", "deleteChat", "ready"].includes(m.type) || (m.type === "renameChat" && !!m.id);
     if (!navigation && m.chatId && m.chatId !== this.session?.getRecord().id) {
       if (m.type === "saveDraft") { const runtime = this.runtimes.get(m.chatId); if (runtime) runtime.draft = m.text; }
       return;
@@ -744,15 +705,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       }
       case "openChat": await this.openChatById(m.id); break;
       case "openMemory": await this.onOpenMemory?.(m.id, m.readonly ?? true); break;
-      case "openMemoryChat": await this.openMemoryChat(m.id); break;
-      case "regenerateMemory":
-      case "retryMemory":
-        try {
-          if (m.type === "retryMemory") await this.memory?.retry(m.id, m.attemptId);
-          else await this.memory?.regenerate(m.id);
-          await this.pushChatMemories();
-        } catch (error) { void vscode.window.showErrorMessage((error as Error).message); }
-        break;
       case "deleteChat": await vscode.commands.executeCommand("locality.deleteChat", m.id); break;
       case "cancel": {
         const runtime = this.active;
@@ -1152,40 +1104,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     } catch (err) {
       vscode.window.showErrorMessage(`Locality: could not open file: ${(err as Error).message}`);
     }
-  }
-
-  private async openMemoryChat(id: string): Promise<void> {
-    const session = this.session;
-    const storage = this.getStorage();
-    const record = session?.getRecord();
-    if (!record || !storage) return;
-    const snapshot = [...record.initialMemories ?? [], ...record.recalledMemories ?? []]
-      .find(memory => memoryMetadata(memory).id === id);
-    let sourceId = snapshot?.sourceId ?? record.memorySources?.[id];
-    if (!sourceId) {
-      // Recompute older versioned IDs using the original result and each
-      // workspace source ID, so renamed/regenerated memories still navigate.
-      let recalled: { title: string; text: string; generatedAt: number; sourceRevision: string } | undefined;
-      for (const message of record.messages) {
-        if (message.role !== "tool" || message.toolCall?.name !== "recall_memory"
-            || message.toolCall.status === "failed" || message.toolCall.status === "rejected") continue;
-        try {
-          const result = JSON.parse(message.content);
-          if (result?.id === id && typeof result.name === "string" && typeof result.contents === "string") {
-            recalled = { title: result.name, text: result.contents, generatedAt: 0, sourceRevision: "" };
-            break;
-          }
-        } catch { /* Ignore incomplete historical output. */ }
-      }
-      const sources = await storage.metadata(true);
-      sourceId = sources.find(source => {
-        const memory = recalled ?? (source.memory && { title: source.title, ...source.memory });
-        return memory && memoryMetadata({ ...memory, sourceId: source.id }).id === id;
-      })?.id;
-    }
-    if (session !== this.session || storage !== this.getStorage()) return;
-    if (typeof sourceId === "string") await this.openChatById(sourceId);
-    else void vscode.window.showErrorMessage("The source chat for this memory is no longer available.");
   }
 
   private async openReviewDiff(filePath: string): Promise<void> {

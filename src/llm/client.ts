@@ -1,5 +1,9 @@
 import { GenerationLengthError, StreamFailure, serverErrorMessage, type CompletionDiagnostics } from "./completion.js";
 export { GenerationLengthError, StreamFailure } from "./completion.js";
+import { connectionHeaders, redactServerError, serverUrl } from "./connection.js";
+import { countServerPrompt, isUnsupportedImage, resolvedConnection, serializeRequest, serverFailure, setImageSupport, VisionUnsupportedError } from "./server.js";
+export { fetchServerMetadata, fetchServerModels, fetchServerContextSize, tokenize, VisionUnsupportedError } from "./server.js";
+export type { ServerMetadata, ServerModel } from "./serverTypes.js";
 import { beginForeground } from "./activity.js";
 import { safeFetch, NetworkPolicyError } from "../network/safeFetch.js";
 import { progressSignature, writeProgressFromJsonToolBody } from "./toolProgress.js";
@@ -30,6 +34,8 @@ export interface ChatCompletionRequest {
   model?: string;
   /** Internal scheduling flag, never sent to the server. */
   background?: boolean;
+  /** Auxiliary tasks disable optional reasoning on servers without a parser. */
+  purpose?: "auxiliary";
   messages: LlmMessage[];
   temperature?: number;
   top_k?: number;
@@ -61,13 +67,6 @@ export class MalformedNativeToolCallError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "MalformedNativeToolCallError";
-  }
-}
-
-export class VisionUnsupportedError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "VisionUnsupportedError";
   }
 }
 
@@ -137,43 +136,26 @@ export async function* streamChat(
 async function* streamChatRequest(
   endpoint: string, req: ChatCompletionRequest, signal: AbortSignal
 ): AsyncGenerator<LlmStreamChunk, void, void> {
-  const url = new URL("/v1/chat/completions", endpoint).toString();
-  const res = await safeFetch(endpoint, url, {
+  const connection = await resolvedConnection(endpoint, req.model, signal);
+  await countServerPrompt(endpoint, req, signal);
+  const res = await safeFetch(connection.endpoint, serverUrl(connection.endpoint, "v1/chat/completions"), {
     method: "POST",
-    headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
-    body: JSON.stringify({
-      model: req.model ?? "local",
-      stream: true,
-      temperature: req.temperature ?? 0.8,
-      // llama.cpp accepts its native sampling params alongside the OpenAI
-      // fields; undefined values are dropped so the server defaults apply.
-      top_k: req.top_k,
-      top_p: req.top_p,
-      messages: req.messages,
-      max_tokens: req.max_tokens,
-      thinking_budget_tokens: req.thinking_budget_tokens,
-      reasoning_effort: req.reasoning_effort,
-      chat_template_kwargs: req.chat_template_kwargs,
-      tools: req.tools,
-      tool_choice: req.tools?.length ? (req.tool_choice ?? "auto") : undefined,
-      parallel_tool_calls: req.tools?.length ? (req.parallel_tool_calls ?? false) : undefined,
-      return_progress: req.return_progress,
-      stream_options: { include_usage: true }
-    }),
-    signal
+    headers: { ...connectionHeaders(connection), "Content-Type": "application/json", Accept: "text/event-stream" },
+    body: JSON.stringify(serializeRequest(req, connection)), signal
   });
   if (!res.ok || !res.body) {
-    const text = await res.text().catch(() => "");
+    const text = redactServerError(await res.clone().text().catch(() => ""), connection);
     if (req.tools?.length && nativeToolsUnsupported(res.status, text)) {
       throw new NativeToolsUnsupportedError(text.slice(0, 500) || `HTTP ${res.status}`);
     }
     if (req.tools?.length && malformedNativeToolCall(res.status, text)) {
       throw new MalformedNativeToolCallError(text.slice(0, 500) || `HTTP ${res.status}`);
     }
-    if (visionUnsupported(res.status, text)) {
+    if (isUnsupportedImage(res.status, text)) {
+      if (connection.backend === "vllm") setImageSupport(connection, "unsupported");
       throw new VisionUnsupportedError(text.slice(0, 500) || `HTTP ${res.status}`);
     }
-    throw new StreamFailure(`The model server returned HTTP ${res.status}. ${serverErrorMessage(text)}`, { cause: "server_error", httpStatus: res.status, completionEvidence: "none" });
+    throw await serverFailure(res, connection, "The model server");
   }
   req.onResponseAccepted?.();
   const reader = res.body.getReader();
@@ -233,7 +215,7 @@ async function* streamChatRequest(
     }
     if (obj.error !== undefined) {
       const message = typeof obj.error === "string" ? obj.error : obj.error?.message;
-      throw new StreamFailure(`Generation failed: ${serverErrorMessage(message)}`, { ...diagnostics, cause: "server_error" });
+      throw new StreamFailure(`Generation failed: ${serverErrorMessage(typeof message === "string" ? redactServerError(message, connection) : message)}`, { ...diagnostics, cause: "server_error" });
     }
     const total = obj.prompt_progress?.total;
     const processed = obj.prompt_progress?.processed;
@@ -311,13 +293,6 @@ function malformedNativeToolCall(status: number, body: string): boolean {
     && (text.includes("failed to parse") || text.includes("json.exception.parse_error"));
 }
 
-function visionUnsupported(status: number, body: string): boolean {
-  if (status < 400) return false;
-  const text = body.toLowerCase();
-  return text.includes("image input is not supported")
-    || (text.includes("image") && text.includes("mmproj"));
-}
-
 /** Non-streaming convenience: collect the full text. */
 export async function complete(
   endpoint: string,
@@ -336,121 +311,4 @@ export async function complete(
     if (!(options?.acceptPartialOnLength && error instanceof GenerationLengthError)) throw error;
   }
   return out;
-}
-
-export interface ServerMetadata {
-  modelAlias: string;
-  contextSize: number;
-  supportsVision: boolean;
-}
-
-export interface ServerModel {
-  id: string;
-}
-
-const serverMetadataCache = new Map<string, { value: ServerMetadata; at: number }>();
-const serverModelsCache = new Map<string, { value: ServerModel[]; at: number }>();
-const SERVER_CTX_TTL_MS = 60_000;
-
-/**
- * Read authoritative model metadata from llama.cpp's GET /props endpoint.
- * Endpoint saving uses `options.force`; chat turns reuse the short-lived cache.
- */
-export async function fetchServerMetadata(
-  endpoint: string,
-  options: { model?: string; force?: boolean; signal?: AbortSignal } = {}
-): Promise<ServerMetadata> {
-  options.signal?.throwIfAborted();
-  const cacheKey = `${endpoint}\n${options.model ?? ""}`;
-  const cached = serverMetadataCache.get(cacheKey);
-  if (!options.force && cached && Date.now() - cached.at < SERVER_CTX_TTL_MS) return cached.value;
-
-  serverMetadataCache.delete(cacheKey);
-  const url = new URL("/props", endpoint);
-  if (options.model) url.searchParams.set("model", options.model);
-  const res = await safeFetch(endpoint, url.toString(), {
-    signal: options.signal ? AbortSignal.any([options.signal, AbortSignal.timeout(5_000)]) : AbortSignal.timeout(5_000)
-  });
-  if (!res.ok) throw new StreamFailure(`llama.cpp /props returned HTTP ${res.status}.`, { cause: "server_error", httpStatus: res.status });
-  const obj = (await res.json()) as {
-    modalities?: { vision?: unknown };
-    model_alias?: unknown;
-    model_path?: unknown;
-    default_generation_settings?: { n_ctx?: unknown; model?: unknown };
-  };
-  if (!obj || typeof obj !== "object") throw new StreamFailure("The server returned invalid model metadata.", { cause: "protocol_error" });
-  const n = obj.default_generation_settings?.n_ctx;
-  if (typeof n !== "number" || !Number.isFinite(n) || n <= 0) {
-    throw new Error("llama.cpp /props did not report a valid context length.");
-  }
-  const aliasValue = obj.model_alias ?? obj.default_generation_settings?.model;
-  const modelAlias = typeof aliasValue === "string" && aliasValue.trim()
-    ? aliasValue.trim()
-    : modelNameFromPath(obj.model_path);
-  if (!modelAlias) throw new Error("llama.cpp /props did not report a model alias or model path.");
-
-  const value = { modelAlias, contextSize: Math.floor(n), supportsVision: obj.modalities?.vision === true };
-  serverMetadataCache.set(cacheKey, { value, at: Date.now() });
-  return value;
-}
-
-export async function fetchServerContextSize(endpoint: string, model?: string, options: { signal?: AbortSignal; strict?: boolean } = {}): Promise<number | undefined> {
-  try {
-    return (await fetchServerMetadata(endpoint, { model, signal: options.signal })).contextSize;
-  } catch (error) {
-    options.signal?.throwIfAborted();
-    if (options.strict) throw error;
-    return undefined;
-  }
-}
-
-/** List model ids advertised by llama.cpp's OpenAI-compatible endpoint. */
-export async function fetchServerModels(endpoint: string, force = false): Promise<ServerModel[]> {
-  const cached = serverModelsCache.get(endpoint);
-  if (!force && cached && Date.now() - cached.at < SERVER_CTX_TTL_MS) return cached.value;
-  const res = await safeFetch(endpoint, new URL("/v1/models", endpoint).toString(), {
-    signal: AbortSignal.timeout(5_000)
-  });
-  if (!res.ok) throw new Error(`llama.cpp /v1/models returned HTTP ${res.status}.`);
-  const obj = (await res.json()) as { data?: { id?: unknown }[] };
-  const ids = (Array.isArray(obj.data) ? obj.data : [])
-    .map(item => typeof item?.id === "string" ? item.id.trim() : "")
-    .filter(Boolean);
-  const unique = [...new Set(ids)];
-  if (unique.length === 0) throw new Error("llama.cpp /v1/models did not report any model ids.");
-  const value = unique.map(id => ({ id }));
-  serverModelsCache.set(endpoint, { value, at: Date.now() });
-  return value;
-}
-
-function modelNameFromPath(value: unknown): string {
-  if (typeof value !== "string" || !value.trim()) return "";
-  const normalized = value.replaceAll("\\", "/");
-  return normalized.slice(normalized.lastIndexOf("/") + 1) || normalized;
-}
-
-/** Use llama.cpp's /tokenize for authoritative token counts. */
-export async function tokenize(endpoint: string, text: string, model?: string, options: { signal?: AbortSignal; exact?: boolean; onEstimate?: () => void } = {}): Promise<number> {
-  options.signal?.throwIfAborted();
-  const url = new URL("/tokenize", endpoint).toString();
-  try {
-    const res = await safeFetch(endpoint, url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ content: text, model }),
-      signal: options.signal ? AbortSignal.any([options.signal, AbortSignal.timeout(5000)]) : AbortSignal.timeout(5000)
-    });
-    if (!res.ok) throw new StreamFailure(`tokenize ${res.status}`, { cause: "server_error", httpStatus: res.status });
-    const obj = (await res.json()) as { tokens?: number[] };
-    if (!obj || !Array.isArray(obj.tokens) || !obj.tokens.every(Number.isSafeInteger) || (text.trim() && !obj.tokens.length)) {
-      throw new StreamFailure("The tokenizer returned invalid data.", { cause: "protocol_error" });
-    }
-    options.signal?.throwIfAborted();
-    return obj.tokens.length;
-  } catch (error) {
-    options.signal?.throwIfAborted();
-    if (options.exact) throw error;
-    options.onEstimate?.();
-    return Math.ceil(text.length / 4);
-  }
 }

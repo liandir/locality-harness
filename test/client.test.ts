@@ -213,7 +213,7 @@ describe("OpenAI-compatible client", () => {
     await expect(fetchServerMetadata("http://127.0.0.1:8080/v1", { model: "gemma-4-31b-it", force: true })).resolves.toEqual({
       modelAlias: "gemma-4-31b-it",
       contextSize: 65536,
-      supportsVision: false
+      supportsVision: false, backend: "llama.cpp", imageSupport: "unsupported"
     });
     const [requestedUrl] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
     expect(requestedUrl).toBe("http://127.0.0.1:8080/props?model=gemma-4-31b-it");
@@ -228,7 +228,7 @@ describe("OpenAI-compatible client", () => {
     await expect(fetchServerMetadata("http://127.0.0.1:8080", { force: true })).resolves.toEqual({
       modelAlias: "qwen3-coder.gguf",
       contextSize: 32768,
-      supportsVision: false
+      supportsVision: false, backend: "llama.cpp", imageSupport: "unsupported"
     });
   });
 

@@ -1,11 +1,11 @@
+import { validWorkspaceNote } from "./workspaceNotes.js";
 import { validMemoryAttempt } from "./memoryJobTypes.js";
-import { pendingMemory, memorySourceMatches } from "./memoryJobs.js";
 import type { ChatAttachment, ChatMessage, ChatRecord } from "./types.js";
 export type { Role, StoredToolStatus, ChatAttachment, ChatMessage, ChatRecord } from "./types.js";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { validMemory, validMemoryCreation, validSnapshot, memoryCreation, type ChatMemory, type MemoryCreation } from "./memory.js";
+import { validMemory, validMemoryCreation, validSnapshot } from "./memory.js";
 import { WorkspaceChatIndex } from "./chatIndex.js";
 import { makeChatHeader, parseChatRecord, readChatHeader, writeChatFile, type ChatHeader, type IndexedChat } from "./chatFile.js";
 import { isValidChatId, normalizeWorkspaceRoot } from "./storagePaths.js";
@@ -190,69 +190,9 @@ export class ChatStorage {
     if (!isValidChatId(rec.id)) throw new Error(`Invalid chat id: ${rec.id}`);
     await this.ensureDir();
     await this.serialize(rec.id, async () => {
-      const existing = await this.load(rec.id);
-      // Memory maintenance is independent of the live session's transcript.
-      // A session save must never overwrite a newer manual/background summary.
-      if (existing) {
-        rec.memory = existing.memory;
-        rec.memoryAttempt = existing.memoryAttempt;
-        if (pendingMemory(rec.memoryAttempt) && !memorySourceMatches(rec, rec.memoryAttempt)) {
-          rec.memoryAttempt = { ...rec.memoryAttempt, state: "cancelled", checkpoint: undefined, startedAt: undefined };
-        }
-        rec.memoryCreations = existing.memoryCreations?.filter(item =>
-          rec.messages.some(message => message.role === "assistant" && message.ts === item.messageTs));
-        if (rec.memoryAttempt?.state === "cancelled") {
-          rec.memoryCreations = rec.memoryCreations?.map(item => item.attemptId === rec.memoryAttempt!.id
-            ? { ...item, status: "cancelled" } : item);
-        }
-      }
       rec.workspaceRoot = this.workspaceRoot;
       rec.updatedAt = Date.now();
       await this.writeRecord(rec);
-    });
-  }
-
-  async updateMemory(id: string, update: (rec: ChatRecord) => ChatMemory | undefined, messageTs?: number): Promise<boolean> {
-    if (!isValidChatId(id)) return false;
-    return this.serialize(id, async () => {
-      const rec = await this.load(id);
-      if (!rec) return false;
-      const memory = update(rec);
-      if (!memory) return false;
-      const operation = rec.memory?.text.trim() ? "update" : "create";
-      rec.memory = memory;
-      if (pendingMemory(rec.memoryAttempt) && (memory.manual || !memory.enabled)) {
-        rec.memoryAttempt = { ...rec.memoryAttempt, state: "cancelled", checkpoint: undefined, startedAt: undefined };
-        const creation = memoryCreation(rec.memoryAttempt);
-        if (creation) rec.memoryCreations = [...(rec.memoryCreations ?? []).filter(item => item.messageTs !== creation.messageTs), creation];
-      }
-      if (messageTs !== undefined && rec.messages.some(message => message.role === "assistant" && message.ts === messageTs)) {
-        const creation: MemoryCreation = memory.error
-          ? { messageTs, operation, status: "failed", error: memory.error }
-          : { messageTs, operation, status: "created", text: memory.text, generatedAt: memory.generatedAt };
-        rec.memoryCreations = [...(rec.memoryCreations ?? []).filter(item => item.messageTs !== messageTs), creation];
-      }
-      await this.writeRecord(rec);
-      return true;
-    });
-  }
-
-  /** Serialize the job, history and successful summary in a single atomic record write. */
-  async maintainMemory(id: string, update: (rec: ChatRecord) => boolean): Promise<boolean> {
-    if (!isValidChatId(id)) return false;
-    return this.serialize(id, async () => {
-      const rec = await this.load(id, true);
-      if (!rec || !update(rec)) return false;
-      const attempt = rec.memoryAttempt;
-      const creation = attempt && memoryCreation(attempt);
-      if (creation && rec.messages.some(message => message.role === "assistant" && message.ts === creation.messageTs)) {
-        if (attempt!.state === "succeeded") {
-          creation.text = rec.memory?.text; creation.generatedAt = rec.memory?.generatedAt;
-        }
-        rec.memoryCreations = [...(rec.memoryCreations ?? []).filter(item => item.messageTs !== creation.messageTs), creation];
-      }
-      await this.writeRecord(rec);
-      return true;
     });
   }
 
@@ -298,6 +238,7 @@ export class ChatStorage {
     forked.mode = rec.mode;
     forked.reasoningEffort = normalizeReasoningEffort(rec.reasoningEffort);
     forked.messages = structuredClone(rec.messages.slice(0, end));
+    forked.memorySelections = rec.memorySelections?.filter(selection => forked.messages.some(message => message.role === "user" && message.ts === selection.messageTs)).map(selection => structuredClone(selection));
     forked.memorySources = rec.memorySources && { ...rec.memorySources };
     if (forked.messages.some(message => message.role === "assistant" && message.ts === rec.pendingPlanMessageTs)) {
       forked.pendingPlanMessageTs = rec.pendingPlanMessageTs;
@@ -308,12 +249,14 @@ export class ChatStorage {
       forked.contextMessages = structuredClone(rec.contextMessages);
       forked.initialMemories = rec.initialMemories && structuredClone(rec.initialMemories);
       forked.tokenizerModel = rec.tokenizerModel;
+      forked.tokenizerIdentity = rec.tokenizerIdentity;
     } else if (rec.contextMessages) {
       // Transcript token caches can predate the model used by the compacted
       // context. Historical forks must count their rebuilt context afresh.
       for (const message of forked.messages) delete message.tokens;
     } else {
       forked.tokenizerModel = rec.tokenizerModel;
+      forked.tokenizerIdentity = rec.tokenizerIdentity;
     }
     forked.totalTokens = modelMessages(forked).reduce(
       (total, message) => total + (message.tokens ?? 0),
@@ -385,6 +328,8 @@ export class ChatStorage {
       mode: normalizeChatMode(rec.mode),
       reasoningEffort: normalizeReasoningEffort(rec.reasoningEffort),
       messages,
+      memorySelections: Array.isArray(rec.memorySelections) ? rec.memorySelections.filter(selection => selection && Number.isFinite(selection.messageTs) && messages.some(message => message.role === "user" && message.ts === selection.messageTs))
+        .map(selection => ({ messageTs: selection.messageTs, memories: Array.isArray(selection.memories) ? selection.memories.filter(validWorkspaceNote).slice(0, MAX_MEMORY_COUNT) : [] })) : undefined,
       memory: validMemory(rec.memory) ? rec.memory : undefined,
       memoryAttempt: validMemoryAttempt(rec.memoryAttempt) ? rec.memoryAttempt : undefined,
       memoryCreations: Array.isArray(rec.memoryCreations) ? rec.memoryCreations.filter(validMemoryCreation) : undefined,

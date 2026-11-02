@@ -17,20 +17,20 @@
   <a href="docs/user-guide.md">User guide</a>
 </p>
 
-Locality connects VS Code to a **llama.cpp server on your computer or local
+Locality connects VS Code to a **llama.cpp or vLLM server on your computer or local
 network**. Chat about your code, plan changes, review diffs, and let the assistant
 edit workspace files with your approval. Choose from four editions to control
 whether it can also run commands or search the web.
 
 ## Features
 
-- **[Local model connection](docs/user-guide.md#first-time-setup)** — Use a llama.cpp server on your computer or local network, with model-specific tool-calling profiles.
+- **[Local model connection](docs/user-guide.md#first-time-setup)** — Use a llama.cpp or vLLM server on your computer or local network, with model-specific tool-calling profiles.
 - **[Act, Plan, and Review modes](docs/user-guide.md#chat-modes)** — Make changes, prepare an implementation plan, or inspect your code.
 - **[Saved chats and parallel conversations](docs/user-guide.md#starting-a-chat)** — Switch between chat tabs while work continues and reopen conversations later.
 - **[File and image attachments](docs/user-guide.md#file-attachments)** — Add code, pasted text, or images to your messages; image input requires a vision model.
 - **[Workspace editing](docs/tools.md#edit-tools)** — Create and edit files with approval controls and diff previews.
 - **[Project instructions](docs/user-guide.md#project-instructions-agentsmd)** — Apply your project's conventions through AGENTS.md.
-- **[Workspace memory](docs/user-guide.md#workspace-memory)** — Optionally search and recall useful summaries from earlier chats in the same project.
+- **[Workspace memory](docs/user-guide.md#workspace-memory)** — Save specific workspace notes and retrieve relevant context for later queries.
 - **[Context management](docs/user-guide.md#managing-context)** — Track context usage and compact longer conversations automatically or on demand.
 - **[Git commit messages](docs/user-guide.md#commit-message-generation)** — Draft a commit message from your staged changes using your local model.
 
@@ -39,7 +39,7 @@ Command execution and web research are available in selected editions; see the
 
 ## Install
 
-You need **VS Code 1.90 or newer** and a running **llama.cpp server** with a
+You need **VS Code 1.90 or newer** and a running **llama.cpp or vLLM server** with a
 model that supports tool calling. The server can run on the same computer or
 another machine on your local network. Installing the extension does not install
 a model or server, and does not require Node.js.
@@ -111,7 +111,7 @@ its arguments, output, or proposed file diff before approving a change.
 | Workspace files | List and find files, read code, create files, and apply edits with diff previews | All editions |
 | Images | Inspect workspace images with `view_image` | All editions, with a vision model and native tool calling |
 | Questions and task progress | Ask for a decision and track a task checklist | All editions; checklists in Act mode |
-| Workspace memory | Search and recall summaries from earlier chats in the same workspace | All editions, when enabled in workspace settings |
+| Workspace memory | Create, search, and recall independent workspace notes | All editions, when enabled in workspace settings |
 | Commands | Start a process, read its output, and stop it | Safe list, Commands, and Advanced; Act mode |
 | Web research | Search through Brave or SearXNG and read public webpages | Advanced, after configuring and verifying a search connection |
 

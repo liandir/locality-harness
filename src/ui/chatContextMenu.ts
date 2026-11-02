@@ -1,5 +1,5 @@
-import { historyIcon, pencilIcon, readFileIcon, memoryIcon, trashIcon } from "./icons.js";
-import type { ChatContextMessage, ChatMenuMemory } from "./messaging.js";
+import { historyIcon, pencilIcon, trashIcon } from "./icons.js";
+import type { ChatContextMessage } from "./messaging.js";
 
 export interface ChatContextAction {
   label: string;
@@ -10,14 +10,10 @@ export interface ChatContextAction {
   separatorBefore?: boolean;
 }
 
-export function chatContextActions(memory: ChatMenuMemory | undefined, send: (message: ChatContextMessage) => void): ChatContextAction[] {
+export function chatContextActions(send: (message: ChatContextMessage) => void): ChatContextAction[] {
   return [
     { label: "Open chat", icon: historyIcon, run: id => send({ type: "openChat", id }) },
     { label: "Rename chat", icon: pencilIcon, run: id => send({ type: "renameChat", id }) },
-    { label: "Edit memory", icon: pencilIcon, separatorBefore: true, run: id => send({ type: "openMemory", id, readonly: false }) },
-    { label: "View memory", icon: readFileIcon, run: id => send({ type: "openMemory", id, readonly: true }), disabled: !memory?.hasMemory },
-    { label: memory?.hasMemory ? "Regenerate memory" : "Generate memory", icon: memoryIcon,
-      run: id => send({ type: "regenerateMemory", id }), disabled: memory?.status === "queued" || memory?.status === "generating" },
     { label: "Delete chat", icon: trashIcon, destructive: true, separatorBefore: true, run: id => send({ type: "deleteChat", id }) }
   ];
 }

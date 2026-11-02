@@ -12,6 +12,7 @@ export async function generateChatTitle(
       settings.endpoint,
       {
         model: settings.model,
+        purpose: "auxiliary", max_tokens: 256,
         temperature: 0.1,
         top_k: settings.topK,
         top_p: settings.topP,

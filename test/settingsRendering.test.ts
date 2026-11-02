@@ -25,9 +25,9 @@ describe("settings rendering", () => {
     ]);
   });
 
-  it.each(["memoryEnabled", "memoryLoadOnStart", "autoGenerateMemories"])("keeps %s independent of other memory switches", enabled => {
+  it.each(["memoryEnabled", "memoryAutoLoad"])("keeps %s independent of other memory switches", enabled => {
     const html = renderSettings(state({ [enabled]: true }), new Set());
-    for (const key of ["memoryEnabled", "memoryLoadOnStart", "autoGenerateMemories"]) {
+    for (const key of ["memoryEnabled", "memoryAutoLoad"]) {
       expect(input(html, key).includes("checked")).toBe(key === enabled);
     }
   });
