@@ -79,8 +79,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .msg.assistant .bubble { padding: 4px 0; }
 .msg.assistant .steering-part .bubble { padding: 0; color: var(--vscode-foreground); }
 .assistant-markdown { color: var(--vscode-foreground); line-height: 1.55; padding: 2px 0; }
-/* Align action centers with the 14px activity-icon column. The chat gutter
-   leaves space for the full square hover targets on both message edges. */
+/* Assistant action centers align with the 14px activity-icon column;
+   user action backgrounds align with the outer edge of their bubble. */
 .message-actions { --message-action-outset: calc((var(--icon-action-size) - 14px) / 2); display: flex; align-items: center; gap: 1px; min-height: var(--icon-action-size); margin-top: -2px; }
 .message-action-buttons { display: inline-flex; flex: 0 0 auto; gap: 1px; }
 @media (hover: hover) {
@@ -88,7 +88,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   .msg > .message-actions { opacity: 0; pointer-events: none; }
   .msg:is(:hover, :focus-within) > .message-actions { opacity: 1; pointer-events: auto; }
 }
-.msg.user > .message-actions { align-self: flex-end; flex-direction: row-reverse; gap: 15px; max-width: 90%; margin-inline-end: calc(-1 * var(--message-action-outset)); }
+.msg.user > .message-actions { align-self: flex-end; flex-direction: row-reverse; gap: 15px; max-width: 90%; }
 .msg.assistant > .message-actions { align-self: flex-start; margin-inline-start: calc(-1 * var(--message-action-outset)); }
 .msg > .message-actions.recovery-actions { opacity: 1; pointer-events: auto; }
 .message-actions .message-mode { margin-inline-start: 7px; margin-inline-end: 4px; }
