@@ -1180,7 +1180,7 @@ function renderFileChangeRow(m: Message, change: FileChangeSummary, index: numbe
     <div class="tool-output-header tool-change-head change-file-row">
       <div class="tool-header-scroll">
         <div class="tool-header-content">
-          <span class="tool-label-main change-file-path">${renderFilePathLink(change.path)}</span>
+          <span class="tool-label-main change-file-path">${renderFilePathLink(change.path, workspaceFileName(change.path))}</span>
           <button class="disclosure-trigger change-file-toggle" type="button" data-file-change-toggle="${m.id}|${key}" aria-expanded="${expanded}" aria-label="${escapeHtml(`${expanded ? "Hide" : "Show"} diff for ${change.path}`)}">
             ${diffStatHtml(change)}
             ${chevronIcon()}
