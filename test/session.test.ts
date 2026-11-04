@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { ChatRecord } from "../src/chat/storage.js";
+import { ChatStorage, type ChatRecord } from "../src/chat/storage.js";
 import type { ChatSession, UiEvent } from "../src/chat/session.js";
 import { editDiffCases } from "./fixtures/editDiff.js";
 
@@ -140,6 +140,64 @@ beforeEach(() => {
   mocks.settings.toolCallingMode = "compat-gemma4";
   mocks.settings.reasoningBudget = 16384;
   mocks.settings.reasoningEfforts = { Low: "low", Medium: "medium", High: "high" };
+});
+
+describe("unsent chat persistence", () => {
+  let root: string, storage: ChatStorage, record: ChatRecord, session: ChatSession;
+  beforeEach(async () => {
+    root = await fs.mkdtemp(path.join(os.tmpdir(), "locality-unsent-chat-"));
+    storage = new ChatStorage(root, path.join(root, "chats"));
+    record = storage.newRecord("native");
+    const { ChatSession } = await import("../src/chat/session.js");
+    session = new ChatSession({ storage, workspaceRoot: root, record, transient: true, emit: vi.fn() });
+  });
+  afterEach(async () => { await session.shutdown(); await fs.rm(root, { recursive: true, force: true }); });
+
+  it("keeps settings and renames in memory without creating a transcript or recent-chat entry", async () => {
+    session.emitLoaded(); session.setMode("plan"); session.setReasoningEffort("none");
+    await session.renameTitle("Unsent draft");
+    expect(record).toMatchObject({ title: "Unsent draft", mode: "plan", reasoningEffort: "none" });
+    await expect(fs.stat(path.join(root, "chats", record.id + ".json"))).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await storage.list()).toEqual([]);
+    await session.shutdown();
+    expect(await new ChatStorage(root, path.join(root, "chats")).list()).toEqual([]);
+    expect(await storage.load(record.id, true)).toBeUndefined();
+  });
+
+  it("saves the first prompt before the model finishes and keeps later transcript deletions persistent", async () => {
+    let finish!: () => void;
+    const waiting = new Promise<void>(resolve => { finish = resolve; });
+    mocks.streamChat.mockImplementation(async function* () { yield { kind: "text", text: "Working" }; await waiting; });
+    session.setMode("review"); session.setReasoningEffort("none");
+    const turn = session.sendUserMessage("First prompt");
+    try {
+      await vi.waitFor(() => expect(mocks.streamChat).toHaveBeenCalled());
+      expect(await storage.load(record.id, true)).toMatchObject({ mode: "review", reasoningEffort: "none", messages: [expect.objectContaining({ role: "user", content: "First prompt" })] });
+      expect(await storage.list()).toEqual([expect.objectContaining({ id: record.id })]);
+    } finally { finish(); await turn; }
+    expect(await session.deleteUserMessage(record.messages[0].ts)).toBe(true);
+    await session.renameTitle("History removed");
+    expect(await storage.load(record.id, true)).toMatchObject({ title: "History removed", messages: [] });
+  });
+
+  it("preserves the initial prompt when the model server is unavailable", async () => {
+    mocks.fetchServerContextSize.mockRejectedValue(new Error("Server unavailable"));
+    await session.sendUserMessage("Keep my request");
+    const loaded = await storage.load(record.id, true);
+    expect(loaded?.messages[0]).toMatchObject({ role: "user", content: "Keep my request" });
+    expect(await storage.list()).toEqual([expect.objectContaining({ id: record.id })]);
+    expect(mocks.streamChat).not.toHaveBeenCalled();
+  });
+
+  it("saves an attachment-only initial prompt while staging alone creates no chat", async () => {
+    const attachment = await storage.importAttachmentBytes(record.id, "notes.txt", Buffer.from("Project notes"));
+    expect(await storage.list()).toEqual([]);
+    expect(await storage.load(record.id, true)).toBeUndefined();
+    mocks.streamChat.mockImplementation(async function* () { yield { kind: "text", text: "Read the notes." }; });
+    await session.sendUserMessage("", [attachment]);
+    expect((await storage.load(record.id, true))?.messages[0]).toMatchObject({ role: "user", content: "", attachments: [attachment] });
+    expect(await storage.list()).toHaveLength(1);
+  });
 });
 
 describe("vLLM session lifecycle", () => {

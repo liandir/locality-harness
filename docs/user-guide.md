@@ -133,6 +133,10 @@ Type your question in the composer at the bottom of the chat panel and press
 responding, the send button turns into a stop button — click it (or the
 cancel icon) to interrupt the current turn.
 
+A new chat is saved and appears in Recent Chats only after its first prompt is
+sent. Typing a draft, attaching files, renaming the tab, or changing its mode
+does not save it. Closing an unused tab discards its draft and staged attachments.
+
 Chats open in tabs at the top of the chat panel. Switching tabs or reopening the
 current chat preserves its running response, tool approvals, queued messages,
 and attachments. Multiple chats can run at once; the local server determines

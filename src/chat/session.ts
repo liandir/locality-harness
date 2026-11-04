@@ -227,6 +227,8 @@ export class ChatSession {
   private acceptingSteering = false;
   /** Cancels only generation; the current tool keeps the turn's signal. */
   private responseAbort?: AbortController;
+  /** New tabs remain in memory until their first user prompt is saved. */
+  private transient: boolean;
 
   constructor(args: {
     storage: ChatStorage;
@@ -235,10 +237,12 @@ export class ChatSession {
     emit: (e: UiEvent) => void;
     memory?: WorkspaceMemory;
     secrets?: SecretStorage;
+    transient?: boolean;
   }) {
     this.storage = args.storage;
     this.workspaceRoot = args.workspaceRoot;
     this.record = args.record;
+    this.transient = args.transient ?? false;
     this.record.pendingPlanMessageTs = pendingPlanTimestamp(this.record);
     this.emit = event => {
       // Publish terminal errors only after tool cleanup and persistence. This
@@ -598,7 +602,11 @@ export class ChatSession {
   }
 
   private saveRecord(): Promise<void> {
-    const save = this.saveChain.then(() => this.storage.save(this.record));
+    const save = this.saveChain.then(async () => {
+      if (this.transient && !this.record.messages.some(message => message.role === "user")) return;
+      await this.storage.save(this.record);
+      this.transient = false;
+    });
     this.saveChain = save.catch(() => undefined);
     return save;
   }

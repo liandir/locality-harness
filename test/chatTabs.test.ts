@@ -187,6 +187,61 @@ beforeEach(() => {
 });
 
 describe("composer drafts", () => {
+  it("discards an unused tab and its staged files after preserving its draft across sidebar reloads", async () => {
+    const { provider, send, snapshot, storage, posted } = setup();
+    provider.openChat(record("unused"), { transient: true });
+    await send({ type: "saveDraft", text: "Not sent", chatId: "unused" });
+    await send({ type: "ready" }); expect(snapshot().draft).toBe("Not sent");
+    const attachment: ChatAttachment = { id: "staged", fileName: "notes.txt", mimeType: "text/plain", extension: "txt", byteLength: 5 };
+    storage.importAttachmentBytes.mockResolvedValueOnce(attachment);
+    await send({ type: "pasteText", chatId: "unused", text: "notes" });
+    const session = mocks.sessions.get("unused")!;
+    await send({ type: "closeChatTab", id: "unused" });
+    expect(session.shutdown).toHaveBeenCalledOnce();
+    expect(storage.deleteAttachment).toHaveBeenCalledWith("unused", attachment);
+    expect(storage.save).not.toHaveBeenCalled(); expect(storage.delete).not.toHaveBeenCalled();
+    expect(provider.getCurrentRecord()).toBeUndefined(); expect(provider.getTabs()).toEqual([]);
+    posted.length = 0; session.emit({ kind: "titleChanged", title: "Late", animate: false });
+    expect(posted).toEqual([]);
+    await provider.openChatById("unused");
+    expect(storage.load).toHaveBeenCalledWith("unused"); // The discarded runtime cannot be reopened.
+    expect(provider.getCurrentRecord()).toBeUndefined();
+  });
+
+  it("cleans up an attachment that finishes importing after its unused tab closes", async () => {
+    const { provider, send, storage } = setup();
+    provider.openChat(record("unused"), { transient: true });
+    let finishImport!: (attachment: ChatAttachment) => void;
+    storage.importAttachmentBytes.mockReturnValueOnce(new Promise(resolve => { finishImport = resolve; }));
+    const importing = send({ type: "pasteText", chatId: "unused", text: "notes" });
+    await vi.waitFor(() => expect(storage.importAttachmentBytes).toHaveBeenCalled());
+    await provider.closeTab("unused");
+    const attachment: ChatAttachment = { id: "late", fileName: "notes.txt", mimeType: "text/plain", extension: "txt", byteLength: 5 };
+    finishImport(attachment); await importing;
+    expect(storage.deleteAttachment).toHaveBeenCalledWith("unused", attachment);
+    expect(storage.save).not.toHaveBeenCalled(); expect(provider.getTabs()).toEqual([]);
+  });
+
+  it("keeps a new tab alive once sending begins and refreshes recent chats on its first saved prompt", async () => {
+    const { provider, send, storage, onChatListChanged } = setup();
+    const chat = record("new"); provider.openChat(chat, { transient: true });
+    const turn = send({ type: "send", mode: "act", text: "First prompt", chatId: "new" });
+    const session = mocks.sessions.get("new")!;
+    await provider.closeTab("new");
+    expect(session.shutdown).not.toHaveBeenCalled();
+    chat.messages.push({ role: "user", content: "First prompt", ts: 1 });
+    onChatListChanged.mockClear();
+    session.emit({ kind: "userMessage", messageId: "u_1", messageTs: 1, text: "First prompt", mode: "act" });
+    expect(onChatListChanged).toHaveBeenCalledOnce();
+    session.finish(); await turn;
+    await provider.openChatById("new");
+    chat.messages = []; // Removing sent history must not turn an established chat back into a disposable tab.
+    await provider.closeTab("new"); await provider.openChatById("new");
+    expect(storage.load).not.toHaveBeenCalled(); expect(provider.getCurrentRecord()).toBe(chat);
+    expect(session.shutdown).not.toHaveBeenCalled();
+    await provider.closeAll();
+  });
+
   it.each(["review", "plan"] as const)("preserves the latest draft when selecting %s creates the first chat", async mode => {
     const { provider, send, snapshot, createChat } = setup();
     let finishCreation!: () => void;

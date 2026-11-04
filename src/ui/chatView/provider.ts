@@ -43,6 +43,7 @@ interface ChatRuntime {
   draft: string;
   open: boolean;
   removed: boolean;
+  transient: boolean;
   running: boolean;
   compacting: boolean;
   runningProcesses: Set<string>;
@@ -51,7 +52,7 @@ interface ChatRuntime {
 function newRuntime(): ChatRuntime {
   return { queuedMessages: [], stagedAttachmentIds: new Set(), pendingAttachments: new Map(),
     messageLoopRunning: false, sessionCreationPending: false, attachmentSelectionPending: false,
-    events: [], draft: "", open: true, removed: false, running: false, compacting: false, runningProcesses: new Set() };
+    events: [], draft: "", open: true, removed: false, transient: false, running: false, compacting: false, runningProcesses: new Set() };
 }
 
 export class ChatViewProvider implements vscode.WebviewViewProvider {
@@ -256,17 +257,25 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.onChatListChanged();
   }
 
-  closeTab(id: string): void {
+  async closeTab(id: string): Promise<void> {
     this.navigationGeneration++;
     const runtime = this.runtimes.get(id);
     if (!runtime) return;
     runtime.open = false;
+    const discard = runtime.transient && !runtime.running && !runtime.compacting && !runtime.messageLoopRunning
+      && !runtime.session?.getRecord().messages.some(message => message.role === "user");
+    if (discard) {
+      runtime.removed = true;
+      this.runtimes.delete(id);
+      this.clearMessageQueue(runtime);
+    }
     if (this.active === runtime) {
       const next = [...this.runtimes.values()].filter(item => item.open).at(-1);
       if (next) this.activateRuntime(next);
       else { this.active = newRuntime(); this.post({ kind: "chatClosed" }); }
     }
     this.pushTabs();
+    if (discard) await runtime.session?.shutdown();
   }
 
   async removeChat(id: string): Promise<void> {
@@ -276,11 +285,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.deleting.set(id, storage);
     try {
       if (runtime) {
-        this.closeTab(id);
-        runtime.removed = true;
-        this.runtimes.delete(id);
-        this.clearMessageQueue(runtime);
-        await runtime.session?.shutdown();
+        await this.closeTab(id);
+        if (!runtime.removed) {
+          runtime.removed = true;
+          this.runtimes.delete(id);
+          this.clearMessageQueue(runtime);
+          await runtime.session?.shutdown();
+        }
       }
       await storage.delete(id);
     } finally {
@@ -327,7 +338,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  openChat(rec: ChatRecord, options: { preserveDraft?: boolean } = {}): void {
+  openChat(rec: ChatRecord, options: { preserveDraft?: boolean; transient?: boolean } = {}): void {
     if (this.isClearingWorkspace() || this.deleting.has(rec.id)) return;
     this.navigationGeneration++;
     const existing = this.runtimes.get(rec.id);
@@ -339,15 +350,20 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       return;
     }
     const runtime = newRuntime();
+    runtime.transient = options.transient ?? false;
     // Creating the first chat (for example, by changing mode) adopts the
     // initial composer's draft before publishing its first snapshot.
     // Existing chats keep their own drafts when another chat is opened.
     if (options.preserveDraft && !this.session) runtime.draft = this.active.draft;
     runtime.storage = storage;
     const session = new ChatSession({
-      storage, workspaceRoot: ws, record: rec, memory: this.memory, secrets: this.context.secrets,
+      storage, workspaceRoot: ws, record: rec, memory: this.memory, secrets: this.context.secrets, transient: runtime.transient,
       emit: event => {
         if (runtime.removed) return;
+        if (event.kind === "userMessage" && runtime.transient) {
+          runtime.transient = false;
+          this.onChatListChanged();
+        }
         if (event.kind === "visionCapability") {
           const current = readSettings();
           if (event.endpoint === current.endpoint && event.model === current.model && event.serverType === current.serverType) this.post(event);
@@ -504,7 +520,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         await this.pushRecentChats();
         break;
       case "saveDraft": this.active.draft = m.text; break;
-      case "closeChatTab": this.closeTab(m.id); break;
+      case "closeChatTab": await this.closeTab(m.id); break;
       case "send":
       case "steerMessage":
         this.active.draft = "";
@@ -668,7 +684,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       case "forkChat": {
         const storage = this.getStorage();
         const record = this.session?.getRecord();
-        if (!storage || !record) break;
+        if (!storage || !record || !record.messages.some(message => message.role === "user")) break;
         const forked = await storage.fork(record, m.throughUserMessageTs);
         if (storage === this.getStorage()) this.openChat(forked);
         this.onChatListChanged();
