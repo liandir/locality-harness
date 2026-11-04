@@ -3,6 +3,10 @@
   --control-radius: 10px;
   --icon-action-size: 28px;
   --icon-action-compact-size: 20px;
+  /* Share muted content across both webviews. An opaque mix also keeps the
+     shimmer's overlapping paint layers consistent in light and dark themes. */
+  --tool-idle-weight: 60%;
+  --tool-idle: color-mix(in srgb, var(--vscode-foreground) var(--tool-idle-weight), var(--vscode-sideBar-background, var(--vscode-editor-background)));
   --surface-fill: color-mix(in srgb, var(--vscode-foreground) 7%, transparent);
   --surface-fill-strong: color-mix(in srgb, var(--vscode-foreground) 16%, transparent);
   --surface-stroke: color-mix(in srgb, var(--vscode-foreground) 9%, transparent);
