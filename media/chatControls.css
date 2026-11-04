@@ -116,7 +116,7 @@ pre, textarea { scrollbar-gutter: stable; }
 .tab-btn { flex: 1 1 0; min-width: 0; display: inline-flex; align-items: center; justify-content: center; gap: 6px; background: transparent; color: var(--vscode-descriptionForeground); border: 1px solid transparent; min-height: 28px; box-sizing: border-box; padding: 4px 8px; font: inherit; font-weight: normal; cursor: pointer; border-radius: var(--control-radius); transition: background 0.12s, color 0.12s; }
 .tab-btn svg { flex: 0 0 auto; }
 .tab-btn span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.tab-btn:is(:hover, :focus-visible) { background: var(--surface-fill-hover); color: var(--vscode-foreground); }
+.tab-btn:is(:hover, :focus-visible, :has(:focus-visible)) { background: var(--surface-fill-hover); color: var(--vscode-foreground); }
 .tab-btn.active { background: var(--surface-fill-strong); color: var(--vscode-foreground); }
 /* Mode selectors and chat context menus share all appearance and row geometry.
    Their component rules only position the popup. Actions use the shared quiet-btn

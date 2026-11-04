@@ -747,13 +747,10 @@ body.image-preview-open .chat-body { overflow: hidden; }
 .tool-memory-name { white-space: normal; }
 
 .chat-tabs { display: flex; flex: 1; min-width: 0; gap: 2px; overflow-x: auto; overflow-y: hidden; font-size: var(--vscode-font-size); font-weight: normal; }
-.chat-tabs .chat-tab { flex: 0 0 auto; width: max-content; min-width: 75px; max-width: 240px; height: 28px; padding: 0 4px 0 0; gap: 0; background: var(--vscode-tab-inactiveBackground, transparent); color: var(--vscode-tab-inactiveForeground, var(--vscode-descriptionForeground)); }
-.chat-tabs .chat-tab.active { background: var(--vscode-tab-activeBackground, var(--surface-fill-strong)); color: var(--vscode-tab-activeForeground, var(--vscode-foreground)); }
-.chat-tabs .chat-tab:hover { background: var(--vscode-list-hoverBackground, var(--surface-fill)); color: var(--vscode-foreground); }
+.chat-tabs .chat-tab { flex: 0 0 auto; width: max-content; min-width: 75px; max-width: 240px; height: 28px; padding: 0 4px 0 0; gap: 0; }
 .chat-tab-label { display: flex; align-items: center; gap: 6px; min-width: 0; flex: 1; height: 100%; padding: 0 6px 0 8px; }
 .chat-tab-label { background: transparent; border: 1px solid transparent; color: inherit; font: inherit; font-weight: normal; cursor: pointer; border-radius: var(--control-radius); outline: none; }
 .chat-tab-label > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chat-tab-close svg { width: 16px; height: 16px; display: block; }
-.chat-tab-label:focus-visible { background: var(--surface-fill-hover); color: var(--vscode-foreground); }
 
 #incompletePlanning { align-self: flex-end; margin-bottom: 6px; }

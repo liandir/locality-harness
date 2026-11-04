@@ -2,7 +2,7 @@
   "name": "locality",
   "displayName": "Locality",
   "description": "Drive a LAN-hosted llama.cpp or vLLM server from VS Code with hard network isolation, workspace-scoped tools, and an approval-gated terminal.",
-  "version": "2.2.0",
+  "version": "2.2.1",
   "repository": {
     "type": "git",
     "url": "https://github.com/liandir/locality.git"
@@ -361,6 +361,12 @@
   "overrides": {
     "@azure/identity": {
       "@azure/msal-node": "^7.1.1"
+    },
+    "@typescript-eslint/typescript-estree": {
+      "minimatch": "^11.0.1"
+    },
+    "@vscode/vsce": {
+      "minimatch": "^11.0.1"
     },
     "katex": "$katex",
     "undici": "$undici"

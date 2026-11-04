@@ -84,6 +84,13 @@ export function renderSettings(state: SideViewState, expandedSettings: ReadonlyS
         ${state.reasoningBudgetError ? `<p class="validation err" role="alert">${esc(state.reasoningBudgetError)}</p>` : ""}
       `)}
 
+      ${section("chat", "Chat", `
+        ${switchControl("showThinking", "Show thoughts", showThinking)}
+        ${switchControl("steerWithEnter", "Steer/Queue messages", s.steerWithEnter === true)}
+        <p class="setting-help">${s.steerWithEnter === true ? "Enter steers; Ctrl+Enter queues." : "Enter queues; Ctrl+Enter steers."}</p>
+        ${renderMemorySettings(s)}
+      `)}
+
       ${section("tools", "Tools", `
         <label class="field-label" for="toolCallingMode">Tool calling</label>
         <select id="toolCallingMode">
@@ -103,15 +110,7 @@ export function renderSettings(state: SideViewState, expandedSettings: ReadonlyS
         ${sideFeature.renderSection?.(s, switchControl, esc) ?? ""}
       `)}
 
-      ${section("chat", "Chat", `
-        ${switchControl("showThinking", "Show thoughts", showThinking)}
-        ${switchControl("steerWithEnter", "Steer/Queue messages", s.steerWithEnter === true)}
-        <p class="setting-help">${s.steerWithEnter === true ? "Enter steers; Ctrl+Enter queues." : "Enter queues; Ctrl+Enter steers."}</p>
-        ${renderMemorySettings(s)}
-      `)}
-
       ${section("automation", "Automation", `
-        <div id="toolAutoApprovals">${renderToolAutoApprovals(s)}</div>
         ${switchControl("autoCompact", "Auto-compact context", autoCompact)}
         <label class="range-setting" for="autoCompactThresholdPercent">
           <span class="range-setting-head">
@@ -120,7 +119,7 @@ export function renderSettings(state: SideViewState, expandedSettings: ReadonlyS
           </span>
           <input id="autoCompactThresholdPercent" type="range" min="50" max="95" step="1" value="${autoCompactPct}" />
         </label>
-
+        <div id="toolAutoApprovals">${renderToolAutoApprovals(s)}</div>
       `)}
 
       ${section("user", "User", `
