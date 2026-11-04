@@ -21,7 +21,8 @@ export function chatContextActions(send: (message: ChatContextMessage) => void):
 /** Identical menu geometry and keyboard navigation in both webviews. */
 export function installChatContextMenu(
   root: HTMLElement,
-  actionsForChat: (id: string) => ChatContextAction[]
+  actionsForChat: (id: string) => ChatContextAction[],
+  attribute = "data-chat-context"
 ): void {
   let menu: HTMLDivElement | undefined;
   let owner: HTMLElement | undefined;
@@ -33,7 +34,7 @@ export function installChatContextMenu(
   const open = (target: HTMLElement, x: number, y: number): void => {
     close();
     owner = target;
-    const id = target.dataset.chatContext;
+    const id = target.getAttribute(attribute);
     if (!id) return;
     menu = document.createElement("div");
     menu.className = "context-menu chat-context-menu";
@@ -74,14 +75,14 @@ export function installChatContextMenu(
     menu.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus();
   };
   root.addEventListener("contextmenu", event => {
-    const target = (event.target as HTMLElement).closest<HTMLElement>("[data-chat-context]");
+    const target = (event.target as HTMLElement).closest<HTMLElement>(`[${attribute}]`);
     if (!target) return;
     event.preventDefault();
     open(target, event.clientX, event.clientY);
   });
   root.addEventListener("keydown", event => {
     if (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")) return;
-    const target = (event.target as HTMLElement).closest<HTMLElement>("[data-chat-context]");
+    const target = (event.target as HTMLElement).closest<HTMLElement>(`[${attribute}]`);
     if (!target) return;
     event.preventDefault();
     const rect = target.getBoundingClientRect();

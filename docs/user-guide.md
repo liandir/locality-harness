@@ -516,10 +516,18 @@ Markdown contents. Search-result links open notes, rather than chats. Memories
 are historical reference data: current user instructions, project instructions,
 and inspected workspace evidence take precedence.
 
-The **Memories** sidebar tab provides search, Markdown preview/editing, rename,
-enable/disable, and individual deletion with confirmation. Markdown edits use
-normal Save; if another window or external editor changed the note, reopen it
-and apply your changes to the current version. Disabling/deleting a note affects
+The **Memories** sidebar uses the same compact rows and context menu as Chats.
+An active note has a foreground-colored dot. Click a row to expand its Markdown
+contents in place; the context menu offers View, Edit, Enable/Disable, Rename,
+and Delete. Deleting a saved note requires confirmation.
+
+**Create new memory** adds a draft row: confirm its name first, then enter its
+contents. The checkmark saves and the cross cancels editing. The Edit button
+under an expanded note opens the same inline editor. Named drafts remain in the
+list until saved or discarded, and in-progress edits survive sidebar reloads.
+A new note is written when its contents are saved. If another window or external
+editor changed a note, cancel and reopen the editor to use the current version.
+Disabling/deleting a note affects
 future automatic retrieval and search. Existing tool results and historical
 recall activities remain in the chat.
 

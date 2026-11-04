@@ -215,10 +215,16 @@ are stored in notes. Legacy chat-summary types exist only for history compatibil
 old jobs never resume and are not imported.
 
 All editions declare create/search/recall together. Creation updates require the
-host's revision from a successful live recall; Markdown editors retain the opened
+host's revision from a successful live recall; inline editors retain the opened
 revision. Saving and deletion check the live record under the same lock. Invalid
 files produce individual warnings and remain untouched. Switching workspaces
 invalidates editor access and stale sidebar responses.
+
+`ui/memoryPanel.ts` owns sidebar selection, name-first creation, and unsaved drafts.
+The webview renders these through chat rows and the shared context menu, with
+Markdown directly below the selected title and shared icon controls for editing.
+Draft keys reject actions from replaced editors; new notes reach storage only
+after their contents are confirmed. Failed and stale writes retain the draft.
 
 Automatic selection occurs for each user message, stays stable through tools,
 and enters the shared system-prompt builder and normal backend token counting.
