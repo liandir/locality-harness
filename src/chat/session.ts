@@ -20,7 +20,7 @@ import type { UiEvent, ToolCategory } from "./events.js";
 export type { UiEvent, ToolCategory } from "./events.js";
 import type { Disposable, SecretStorage } from "vscode";
 import { beginForeground } from "../llm/activity.js";
-import { rankWorkspaceNotes, searchWorkspaceNotes, noteResult, type WorkspaceNote } from "./workspaceNotes.js";
+import { rankWorkspaceNotes, searchWorkspaceNotes, noteResult, type MemorySelection, type WorkspaceNote } from "./workspaceNotes.js";
 import { MemoryStore, noteRevision } from "./memoryStore.js";
 import type { WorkspaceMemory } from "./workspaceMemory.js";
 import { initialMemoryContext } from "./initialMemoryContext.js";
@@ -220,7 +220,7 @@ export class ChatSession {
   private activeTurnModes?: { mode: ChatMode; reasoningEffort: ReasoningEffort };
   private pendingInterruption?: ChatMessage;
   private stagedToolCalls?: Extract<ParsedEvent, { kind: "toolCall" }>[];
-  private pendingMemoryFitTs?: number;
+  private pendingMemorySelection?: MemorySelection;
   private planResponse?: PlanResponse;
   private lastInterruptionTs = 0;
   private pendingSteering: ChatMessage[] = [];
@@ -350,14 +350,14 @@ export class ChatSession {
    * every request but never stored as a message, so recomputeTokens cannot see
    * it — without this the ring undercounts by a fixed chunk.
    */
-  private async systemPromptTokens(s: HarnessSettings): Promise<number> {
+  private async systemPromptTokens(s: HarnessSettings, refreshAgentsMd = true): Promise<number> {
     const nativeTools = this.toolProtocol === "native";
     const text = buildSystemPrompt({
       featureSettings: readSettings(),
       family: this.compatibilityFamily(),
       mode: this.turnMode(),
       workspaceRoot: this.workspaceRoot,
-      agentsMd: await this.currentAgentsMd(),
+      agentsMd: refreshAgentsMd ? await this.currentAgentsMd() : this.cachedAgentsMd(),
       userMessageTs: this.latestUserMessageTs(),
       memoryEnabled: readSettings().memoryEnabled,
       memories: this.selectedNotes(),
@@ -385,8 +385,8 @@ export class ChatSession {
 
   /**
    * Load (mtime-cached) the project's root AGENTS.md and remember it for the
-   * sync buildPromptMessages. Called ahead of every prompt build via
-   * systemPromptTokens, so the cached value matches what is actually sent.
+   * sync buildPromptMessages. Refresh before fitting optional memories so the
+   * budget and request both use the same project instructions.
    */
   private async currentAgentsMd(): Promise<string | undefined> {
     this.agentsMdCache = await loadRootAgentsMd(this.workspaceRoot);
@@ -680,12 +680,14 @@ export class ChatSession {
     for (const message of messages) appendChatMessage(this.record, message);
     await this.saveRecord();
     for (const message of messages) {
-      await this.loadQueryMemories(message.content, message.ts);
       this.emit({
         kind: "userMessage", messageId: `u_${message.ts}`, messageTs: message.ts,
         text: message.content, mode: this.turnMode(), steering: true, attachments: message.attachments
       });
     }
+    // Only the latest query selects the system notes for the next request.
+    const latest = messages[messages.length - 1];
+    await this.loadQueryMemories(latest.content, latest.ts);
   }
 
   async sendUserMessage(text: string, attachments: ChatAttachment[] = [], mode: ChatMode = this.record.mode): Promise<void> {
@@ -1058,8 +1060,9 @@ export class ChatSession {
   }
 
   private selectedNotes(): WorkspaceNote[] {
-    const latest = [...this.record.messages].reverse().find(message => message.role === "user");
-    return this.record.memorySelections?.find(selection => selection.messageTs === latest?.ts)?.memories ?? [];
+    const messageTs = this.latestUserMessageTs();
+    if (this.pendingMemorySelection && this.pendingMemorySelection.messageTs === messageTs) return this.pendingMemorySelection.memories;
+    return this.record.memorySelections?.find(selection => selection.messageTs === messageTs)?.memories ?? [];
   }
 
   private async loadQueryMemories(query: string, messageTs: number): Promise<void> {
@@ -1072,23 +1075,26 @@ export class ChatSession {
         if (readSettings().memoryAutoLoad && !this.disposed) memories = rankWorkspaceNotes(query, listing.memories).slice(0, settings.memoryMaxCount);
       }
     } catch { this.emit({ kind: "notice", text: "Could not load workspace memories for this query." }); }
-    this.record.memorySelections = [...(this.record.memorySelections ?? []).filter(selection => selection.messageTs !== messageTs), { messageTs, memories }];
-    this.pendingMemoryFitTs = messageTs;
-    this.refreshMemoryVisibility();
-    await this.saveRecord();
+    // Candidates stay private until the server accepts the fitted request.
+    this.pendingMemorySelection = { messageTs, memories };
   }
 
   private async fitQueryMemories(s: HarnessSettings): Promise<void> {
-    if (this.pendingMemoryFitTs === undefined || this.pendingMemoryFitTs !== this.latestUserMessageTs()) return;
+    if (!this.pendingMemorySelection || this.pendingMemorySelection.messageTs !== this.latestUserMessageTs()) return;
     const selected = this.selectedNotes();
-    if (!selected.length) { this.pendingMemoryFitTs = undefined; return; }
     const limit = this.contextLimit() - outputTokenReserve(this.contextLimit());
-    let changed = false;
     while (selected.length && await this.countRequestPrompt(s, await this.buildPromptMessages()) >= limit) {
-      selected.pop(); changed = true;
+      selected.pop();
     }
-    if (changed) { this.refreshMemoryVisibility(); await this.saveRecord(); }
-    this.pendingMemoryFitTs = undefined;
+  }
+
+  private commitQueryMemories(): void {
+    const selection = this.pendingMemorySelection;
+    if (!selection || selection.messageTs !== this.latestUserMessageTs()) return;
+    this.pendingMemorySelection = undefined;
+    this.record.memorySelections = [...(this.record.memorySelections ?? []).filter(previous => previous.messageTs !== selection.messageTs), selection];
+    this.refreshMemoryVisibility();
+    void this.saveRecord().catch(() => this.emit({ kind: "notice", text: "Could not save the loaded memory history." }));
   }
 
   refreshMemoryVisibility(): void {
@@ -1141,8 +1147,16 @@ export class ChatSession {
       return false;
     }
     await recomputeTokens(s.endpoint, this.record, s.model);
+    const latestUser = [...this.record.messages].reverse().find(message => message.role === "user");
+    if (latestUser && this.pendingMemorySelection?.messageTs !== latestUser.ts
+      && !this.record.memorySelections?.some(selection => selection.messageTs === latestUser.ts)) {
+      // Continue after a reload may resume a query that never reached the server.
+      await this.loadQueryMemories(latestUser.content, latestUser.ts);
+    }
+    // Fit optional notes against the same fresh project instructions as the request.
+    await this.currentAgentsMd();
     await this.fitQueryMemories(s);
-    const sysTokens = await this.systemPromptTokens(s);
+    const sysTokens = await this.systemPromptTokens(s, false);
     const limit = this.contextLimit();
     this.emit({ kind: "tokens", total: this.record.totalTokens + sysTokens, limit });
     this.emitCompactStatus();
@@ -1565,6 +1579,7 @@ export class ChatSession {
           {
             ...this.generationRequest(s, messages),
             onResponseAccepted: () => {
+              this.commitQueryMemories();
               // HTTP headers can arrive while this request is still queued.
               // Keep a title wait until prompt progress or model output proves
               // the continuation has started using the server.
@@ -1573,6 +1588,8 @@ export class ChatSession {
           },
           AbortSignal.any([this.abort.signal, responseAbort.signal])
         )) {
+          // Stream output also proves acceptance for transports without a callback.
+          this.commitQueryMemories();
           if (this.pendingSteering.length) break;
           if (chunk.kind === "promptProgress") {
             if (promptTokenCount !== chunk.totalTokens) {

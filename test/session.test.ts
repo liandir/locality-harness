@@ -5421,3 +5421,110 @@ describe("automatic note budgeting and steering", () => {
     } finally { await session.shutdown(); await fs.rm(root, { recursive: true, force: true }); }
   });
 });
+
+describe("committed automatic memory selections", () => {
+  it.each([
+    ["llama.cpp", false], ["vllm", false], ["llama.cpp", true], ["vllm", true]
+  ] as const)("fits notes with fresh project instructions on %s (previously cached: %s)", async (backend, cached) => {
+    const { MemoryStore } = await import("../src/chat/memoryStore.js");
+    const { ChatSession } = await import("../src/chat/session.js");
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "locality-memory-agents-"));
+    await new MemoryStore(root).save({ name: "Parser", contents: "OPTIONAL_NOTE_SENTINEL" });
+    mocks.settings.memoryAutoLoad = true; mocks.backend = backend;
+    mocks.fetchServerContextSize.mockResolvedValue(4096);
+    const count = (text: string) => text.includes("OPTIONAL_NOTE_SENTINEL") && text.includes("PROJECT_INSTRUCTIONS_SENTINEL") ? 5000 : 20;
+    mocks.tokenize.mockImplementation(async (_endpoint, text: string) => count(text));
+    mocks.countPrompt.mockImplementation(async (_endpoint, request) => count(JSON.stringify(request)));
+    const prompts: string[] = [], events: UiEvent[] = [], record = newRecord();
+    mocks.streamChat.mockImplementation(async function* (_endpoint, request) {
+      prompts.push(request.messages[0].content);
+      yield { kind: "text", text: "Done." };
+    });
+    const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: root, record, emit: e => events.push(e) });
+    try {
+      if (cached) {
+        await fs.writeFile(path.join(root, "AGENTS.md"), "Previous instructions.");
+        await session.sendUserMessage("Hello");
+      }
+      await fs.writeFile(path.join(root, "AGENTS.md"), "PROJECT_INSTRUCTIONS_SENTINEL");
+      await session.sendUserMessage("Parser");
+      expect(prompts).toHaveLength(cached ? 2 : 1);
+      expect(prompts.at(-1)).toContain("PROJECT_INSTRUCTIONS_SENTINEL");
+      expect(prompts.at(-1)).not.toContain("OPTIONAL_NOTE_SENTINEL");
+      expect(record.memorySelections?.at(-1)?.memories).toEqual([]);
+      expect(events.filter(e => e.kind === "memorySelections").flatMap(e => e.selections.flatMap(s => s.memories))).toEqual([]);
+      expect(events.some(e => e.kind === "abort")).toBe(false);
+    } finally { await session.shutdown(); await fs.rm(root, { recursive: true, force: true }); }
+  });
+
+  it("publishes only the selection used by a batch of steering messages", async () => {
+    const { MemoryStore } = await import("../src/chat/memoryStore.js");
+    const { ChatSession } = await import("../src/chat/session.js");
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "locality-memory-batched-steer-"));
+    const store = new MemoryStore(root);
+    await store.save({ name: "Parser", contents: "UNUSED_PARSER_SENTINEL" });
+    const colors = (await store.save({ name: "Colors", contents: "USED_COLORS_SENTINEL" })).note;
+    mocks.settings.memoryAutoLoad = true;
+    const record = newRecord(), events: UiEvent[] = [], prompts: string[] = [];
+    const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: root, record, emit: e => events.push(e) });
+    mocks.streamChat.mockImplementation(async function* (_endpoint, request) {
+      prompts.push(request.messages[0].content);
+      if (prompts.length === 1) {
+        yield { kind: "text", text: "Starting." };
+        expect(session.steerUserMessage("Parser")).toBe(true);
+        expect(session.steerUserMessage("Colors")).toBe(true);
+      } else yield { kind: "text", text: "Done." };
+    });
+    try {
+      await session.sendUserMessage("Begin");
+      expect(prompts).toHaveLength(2);
+      expect(prompts[1]).toContain("USED_COLORS_SENTINEL");
+      expect(prompts.join("\n")).not.toContain("UNUSED_PARSER_SENTINEL");
+      expect(record.messages.filter(m => m.role === "user").map(m => m.content)).toEqual(["Begin", "Parser", "Colors"]);
+      expect(record.memorySelections).toHaveLength(2);
+      expect(record.memorySelections?.at(-1)?.memories).toEqual([colors]);
+      expect(events.filter(e => e.kind === "memorySelections").flatMap(e => e.selections.flatMap(s => s.memories)).every(note => note.id === colors.id)).toBe(true);
+      const userIndex = events.findIndex(e => e.kind === "userMessage" && e.text === "Colors");
+      const selectionIndex = events.findIndex(e => e.kind === "memorySelections" && e.selections.some(s => s.memories.length));
+      expect(selectionIndex).toBeGreaterThan(userIndex);
+      expect(record.messages.filter(m => m.role === "tool")).toEqual([]);
+    } finally { await session.shutdown(); await fs.rm(root, { recursive: true, force: true }); }
+  });
+
+  it.each([false, true])("records recalled notes on a failing request only after acceptance (%s)", async accepted => {
+    const { MemoryStore, noteRevision } = await import("../src/chat/memoryStore.js");
+    const { ChatStorage } = await import("../src/chat/storage.js");
+    const { ChatSession } = await import("../src/chat/session.js");
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "locality-memory-accept-"));
+    const store = new MemoryStore(root), storage = new ChatStorage(root, path.join(root, "chats"));
+    const note = (await store.save({ name: "Parser", contents: "ORIGINAL_RULES_SENTINEL" })).note;
+    mocks.settings.memoryAutoLoad = true;
+    const record = storage.newRecord("native"), events: UiEvent[] = [];
+    mocks.streamChat.mockImplementation(async function* (_endpoint, request) {
+      expect(record.memorySelections).toBeUndefined();
+      expect(events.some(e => e.kind === "memorySelections" && e.selections.some(s => s.memories.length))).toBe(false);
+      if (accepted) request.onResponseAccepted();
+      yield* [];
+      throw new Error("Server disconnected");
+    });
+    let session = new ChatSession({ storage, workspaceRoot: root, record, emit: e => events.push(e) });
+    try {
+      await session.sendUserMessage("Parser");
+      expect(record.memorySelections?.flatMap(s => s.memories) ?? []).toEqual(accepted ? [note] : []);
+      expect(record.messages.some(m => m.interruption)).toBe(true);
+      await session.shutdown();
+      const saved = (await storage.load(record.id))!;
+      expect(saved.memorySelections).toEqual(record.memorySelections);
+      const updated = (await store.save({ ...note, contents: "UPDATED_RULES_SENTINEL" }, noteRevision(note))).note;
+      session = new ChatSession({ storage, workspaceRoot: root, record: saved, emit: e => events.push(e) });
+      mocks.streamChat.mockImplementation(async function* (_endpoint, request) {
+        expect(request.messages[0].content).toContain(accepted ? "ORIGINAL_RULES_SENTINEL" : "UPDATED_RULES_SENTINEL");
+        expect(request.messages.some((m: { role: string }) => m.role === "tool")).toBe(false);
+        yield { kind: "text", text: "Resumed." };
+      });
+      expect(await session.continueTurn(saved.messages.at(-1)!.ts)).toBe(true);
+      expect(saved.memorySelections).toHaveLength(1);
+      expect(saved.memorySelections![0].memories).toEqual([accepted ? note : updated]);
+    } finally { await session.shutdown(); await fs.rm(root, { recursive: true, force: true }); }
+  });
+});

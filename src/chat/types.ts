@@ -111,7 +111,7 @@ export interface ChatRecord {
   messages: ChatMessage[];
   /** Model-only history after compaction, memory loading, or attachment expansion. */
   contextMessages?: ChatMessage[];
-  /** Per-query retrieval snapshots for historical inspection, never note ownership. */
+  /** Accepted per-query retrieval snapshots; rendered as work activities, never note ownership. */
   memorySelections?: MemorySelection[];
   /** Legacy chat summary fields: read-only compatibility. */
   memory?: ChatMemory;

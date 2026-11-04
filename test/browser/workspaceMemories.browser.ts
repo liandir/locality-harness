@@ -56,24 +56,87 @@ for (const theme of ["light", "dark"] as const) {
     expect(await posted(page)).toContainEqual({ type: "saveSetting", key: "memoryAutoLoad", value: true });
     await expect(page.locator("#autoGenerateMemories")).toHaveCount(0);
   });
-  test(theme + ": per-message loaded memories share disclosure behavior and survive rerenders", async ({ page }) => {
+  for (const outcome of ["completed", "failed"] as const) {
+    test(theme + ": auto recalls join " + outcome + " work and retain shared disclosure behavior", async ({ page }) => {
+      await webview(page, theme);
+      const second = { ...note, id: "123e4567-e89b-42d3-a456-426614174002", name: "Grammar" };
+      const record: ChatRecord = { id: "chat", workspaceRoot: "/workspace", title: "Notes", mode: "act", toolCallingMode: "native", reasoningEffort: "default", totalTokens: 0, createdAt: 1, updatedAt: 3,
+        messages: [{ role: "user", content: "Parser details?", ts: 1 }, { role: "assistant", content: outcome === "completed" ? "Parser checked." : "", ts: 3,
+          interruption: outcome === "failed" ? { reason: "Server disconnected", mode: "act", reasoningEffort: "default" } : undefined }],
+        memorySelections: [{ messageTs: 1, memories: [note, second] }] };
+      await hostMessage(page, { kind: "chatLoaded", record });
+      await expect(page.locator("[data-loaded-memories]")).toHaveCount(0);
+      await expect(page.locator(".msg.user .tool-card")).toHaveCount(0);
+      const work = page.locator(".work-section.conglomerate");
+      await expect(work.locator(":scope > .work-head")).toContainText("Worked");
+      await expect(work.locator(":scope > .work-head")).toHaveAttribute("aria-expanded", "false");
+      for (let depth = 0; depth < 3 && !await page.locator(".tool-card").count(); depth++) {
+        await page.locator('.work-head[aria-expanded="false"]:visible').first().click();
+      }
+      const cards = work.locator(".tool-card");
+      await expect(cards).toHaveCount(2);
+      await expect(cards.locator(".tool-name")).toHaveText(["Recalled", "Recalled"]);
+      await expect(cards.locator(".tool-label")).toHaveText(["Parser", "Grammar"]);
+      const card = cards.first(), heading = card.locator(":scope > .tool-head");
+      await expect(heading).toHaveClass(/disclosure-trigger/);
+      await page.mouse.move(990, 5);
+      const resting = await heading.evaluate(el => getComputedStyle(el).color);
+      await heading.hover();
+      await expect(heading).not.toHaveCSS("color", resting);
+      await heading.locator(".tool-name").click(); await page.mouse.move(990, 5);
+      await expect(heading).toHaveAttribute("aria-expanded", "true");
+      await expect(heading).toHaveCSS("color", resting);
+      await expect(card.locator(".tool-output-surface")).toHaveCount(1);
+      await expect(card.locator(".tool-output-surface strong")).toHaveText("grammar versions");
+      await heading.focus(); await page.keyboard.press("Space");
+      await expect(heading).toHaveAttribute("aria-expanded", "false");
+      await page.keyboard.press("Enter");
+      await expect(heading).toHaveAttribute("aria-expanded", "true");
+      await expect(heading).toBeFocused();
+      await hostMessage(page, { kind: "memorySelections", selections: record.memorySelections! });
+      await expect(cards).toHaveCount(2); await expect(heading).toBeFocused();
+      await expect(heading).toHaveAttribute("aria-expanded", "true");
+      await card.getByRole("button", { name: "Parser", exact: true }).click();
+      expect(await posted(page)).toContainEqual({ type: "openMemory", id: note.id, chatId: "chat" });
+      // Tab switches and host snapshots preserve the ordinary tool/work expansion state.
+      await hostMessage(page, { type: "chatSnapshot", id: "other", busy: false, draft: "", events: [] });
+      await hostMessage(page, { type: "chatSnapshot", id: "chat", busy: false, draft: "", events: [{ kind: "chatLoaded", record }] });
+      await expect(cards).toHaveCount(2);
+      await expect(heading).toHaveAttribute("aria-expanded", "true");
+      if (outcome === "failed") await expect(page.locator(".abort")).toContainText("Server disconnected");
+      else await expect(page.locator(".assistant-markdown").last()).toContainText("Parser checked.");
+    });
+  }
+
+  test(theme + ": live auto recalls follow steering and collapse with finished work", async ({ page }) => {
     await webview(page, theme);
-    const record: ChatRecord = { id: "chat", workspaceRoot: "/workspace", title: "Notes", mode: "act", toolCallingMode: "native", reasoningEffort: "default", totalTokens: 0, createdAt: 1, updatedAt: 2,
-      messages: [{ role: "user", content: "Parser details?", ts: 1 }], memorySelections: [{ messageTs: 1, memories: [note] }] };
+    const record: ChatRecord = { id: "chat", workspaceRoot: "/workspace", title: "Notes", mode: "act", toolCallingMode: "native", reasoningEffort: "default", totalTokens: 0, createdAt: 1, updatedAt: 1,
+      messages: [{ role: "user", content: "Parser details?", ts: 1 }] };
     await hostMessage(page, { kind: "chatLoaded", record });
-    const details = page.locator("[data-loaded-memories]"), heading = details.locator("summary");
-    await expect(heading).toHaveClass(/disclosure-trigger/);
-    await heading.click(); await page.mouse.move(990, 5);
-    await expect(heading).toBeFocused(); await expect(details).toHaveAttribute("open", "");
-    await expect(details.locator(".tool-output-surface")).toHaveCount(1);
-    await expect(details.locator("strong")).toContainText("grammar versions");
-    await hostMessage(page, { kind: "memorySelections", selections: record.memorySelections! });
-    await expect(heading).toBeFocused(); await expect(details).toHaveAttribute("open", "");
-    await heading.focus(); await page.keyboard.press("Space"); await expect(details).not.toHaveAttribute("open", "");
-    await page.keyboard.press("Enter"); await expect(details).toHaveAttribute("open", "");
-    await details.getByRole("button", { name: "Parser", exact: true }).click();
-    expect(await posted(page)).toContainEqual({ type: "openMemory", id: note.id, chatId: "chat" });
-    await hostMessage(page, { kind: "memorySelections", selections: [{ messageTs: 1, memories: [] }] });
-    await expect(details).toHaveCount(0);
+    await hostMessage(page, { kind: "turnWorkStarted", messageId: "response", startedAt: 2 });
+    await hostMessage(page, { kind: "memorySelections", selections: [{ messageTs: 1, memories: [note] }] });
+    await expect(page.locator(".tool-name")).toHaveText("Recalled");
+    await expect(page.locator(".tool-label")).toHaveText("Parser");
+    await expect(page.locator(".tool-head")).not.toHaveClass(/active-tool-head/);
+    await hostMessage(page, { kind: "text", messageId: "response", delta: "Checking parser." });
+    await hostMessage(page, { kind: "userMessage", messageId: "steer", messageTs: 4, text: "Colors", mode: "act", steering: true });
+    const colors = { ...note, name: "Colors", id: "123e4567-e89b-42d3-a456-426614174003" };
+    await hostMessage(page, { kind: "memorySelections", selections: [{ messageTs: 1, memories: [note] }, { messageTs: 4, memories: [colors] }] });
+    await expect(page.locator(".tool-label").last()).toHaveText("Colors");
+    await hostMessage(page, { kind: "text", messageId: "response", delta: "Colors checked." });
+    await hostMessage(page, { kind: "turnEnd", messageId: "response", mode: "act", messageTs: 6 });
+    const summary = page.locator(".work-section.conglomerate > .work-head");
+    await expect(summary).toHaveAttribute("aria-expanded", "false");
+    await expect(page.locator(".tool-card")).toHaveCount(0);
+    await summary.click();
+    for (let depth = 0; depth < 3 && await page.locator('.work-head[aria-expanded="false"]:visible').count(); depth++) {
+      await page.locator('.work-head[aria-expanded="false"]:visible').first().click();
+    }
+    await expect(page.locator(".work-section.conglomerate .tool-name")).toHaveText(["Recalled", "Recalled"]);
+    const timeline = await page.locator(".work-section.conglomerate > .work-body").innerText();
+    expect(timeline.indexOf("Parser")).toBeLessThan(timeline.indexOf("Checking parser."));
+    expect(timeline.indexOf("Checking parser.")).toBeLessThan(timeline.indexOf("Colors"));
+    expect(timeline.lastIndexOf("Recalled")).toBeGreaterThan(timeline.indexOf("Colors"));
+    await expect(page.locator("[data-loaded-memories]")).toHaveCount(0);
   });
 }

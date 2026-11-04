@@ -1,5 +1,5 @@
 import { completionDetailRows, renderActivityDetails } from "./activityDetails.js";
-import { validMemoryId, type WorkspaceNote } from "../../../chat/workspaceNotes.js";
+import { validMemoryId } from "../../../chat/workspaceNotes.js";
 import type MarkdownIt from "markdown-it";
 import { renderMemoryDate } from "../../memoryDate.js";
 import { memoryIcon } from "../../icons.js";
@@ -66,11 +66,4 @@ function isObject(value: unknown): value is Record<string, unknown> {
 function isMetadata(value: unknown): value is { name: string; id: string; date: string } {
   return isObject(value) && typeof value.name === "string" && typeof value.id === "string"
     && typeof value.date === "string" && Number.isFinite(Date.parse(value.date));
-}
-
-export function renderLoadedMemories(notes: WorkspaceNote[], md: MarkdownIt, disclosureIcon: string): string {
-  if (!notes.length) return "";
-  const esc = md.utils.escapeHtml;
-  const contents = notes.map(note => `<section class="loaded-memory"><button type="button" class="link-button" data-open-memory="${esc(note.id)}">${esc(note.name)}</button>${renderMemoryContents(note.contents, note.updatedAt, md)}</section>`).join("");
-  return `<summary class="tool-head disclosure-trigger"><span class="tool-icon" aria-hidden="true">${memoryIcon()}</span><span class="tool-name">Loaded ${notes.length} ${notes.length === 1 ? "memory" : "memories"}</span>${disclosureIcon}</summary><div class="tool-expanded">${renderToolOutputSurface(contents, false)}</div>`;
 }

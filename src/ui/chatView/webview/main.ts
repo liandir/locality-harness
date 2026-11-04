@@ -1,5 +1,4 @@
-import { preserveFormFocus } from "../../formFocus.js";
-import { validMemoryId, type MemorySelection } from "../../../chat/workspaceNotes.js";
+import { noteResult, validMemoryId, type MemorySelection } from "../../../chat/workspaceNotes.js";
 import { pendingPlanTimestamp } from "../../../chat/planning.js";
 import type { CompletionDiagnostics } from "../../../llm/completion.js";
 import { interruptionMessage } from "./interruption.js";
@@ -22,7 +21,7 @@ import { chatFeature } from "../../../build/chat.js";
 import { chevronIcon, memoryIcon, pawnIcon, scrollIcon, searchIcon, trashIcon, plusIcon, settingsIcon, historyIcon, pencilIcon, readFileIcon } from "../../icons.js";
 import { chatModeIcon, chatModeLabel, renderMessageMode } from "./messageMode.js";
 import { renderMessageDate } from "../../memoryDate.js";
-import { renderMemoryCreation, renderMemoryResult, renderLoadedMemories } from "./memoryResults.js";
+import { renderMemoryCreation, renderMemoryResult } from "./memoryResults.js";
 import { CARD_SEPARATOR_HTML, renderToolOutputSurface } from "./toolOutputSurface.js";
 import { parseQuestionPayload, renderQuestionResult } from "./questionResult.js";
 import { copyableAssistantText } from "./messageCopy.js";
@@ -281,7 +280,6 @@ interface ChatViewState {
   autoScroll: boolean;
   history: HistoryViewState;
   expandedMemoryCreations: Set<string>;
-  expandedLoadedMemories: Set<string>;
 }
 const viewDrafts = new Map<string, ChatViewState>();
 
@@ -290,7 +288,6 @@ function saveChatView(): void {
   viewDrafts.set(activeChatId, {
     question: state.questionDraft, scrollTop: chatBody()?.scrollTop ?? 0, autoScroll: state.autoScroll,
     history: captureHistoryView(state.messages),
-    expandedLoadedMemories: new Set(Array.from(root.querySelectorAll<HTMLElement>("[data-loaded-memories][open]"), entry => entry.dataset.loadedMemories!)),
     expandedMemoryCreations: new Set(Array.from(root.querySelectorAll<HTMLElement>("[data-memory-creation][open]"), entry => entry.dataset.memoryCreation!))
   });
 }
@@ -398,6 +395,12 @@ function watchThemeChanges(): void {
 
 function getOrCreateMsg(id: string, role: Message["role"]): Message {
   let m = state.messages.find(x => x.id === id);
+  const last = state.messages.at(-1);
+  if (!m && role === "assistant" && last?.id.startsWith("memories_")) {
+    // A restored selection can precede the first persisted assistant output.
+    m = last;
+    m.id = id;
+  }
   if (!m) {
     m = { id, role, parts: [], text: "", thought: "", toolCards: [] };
     state.messages.push(m);
@@ -590,7 +593,49 @@ function attachInitialMemoryCalls(): void {
   response.toolCards.unshift(...state.initialMemoryParts.map(part => part.card));
 }
 
+/** Project committed query snapshots into the ordinary work timeline, never model history. */
+function attachQueryMemoryCalls(): void {
+  const idFor = (messageTs: number, noteId: string): string => `auto_memory_${messageTs}_${noteId}`;
+  const wanted = new Set(state.memorySelections.flatMap(selection => selection.memories.map(note => idFor(selection.messageTs, note.id))));
+  const stale = (id: string): boolean => id.startsWith("auto_memory_") && !wanted.has(id);
+  for (const message of state.messages) {
+    message.toolCards = message.toolCards.filter(card => !stale(card.toolId));
+    message.parts = message.parts.filter(part => part.kind !== "tool" || !stale(part.card.toolId));
+  }
+  for (const selection of state.memorySelections) {
+    if (!selection.memories.length) continue;
+    const userIndex = state.messages.findIndex(message => message.role === "user" && message.recordTs === selection.messageTs);
+    let response: Message | undefined;
+    let insertAt = 0;
+    if (userIndex >= 0) {
+      response = state.messages[userIndex + 1];
+      if (response?.role !== "assistant") {
+        response = { id: `memories_${selection.messageTs}`, role: "assistant", responseToTs: selection.messageTs,
+          parts: [], toolCards: [], text: "", thought: "", workEndedAt: selection.messageTs };
+        state.messages.splice(userIndex + 1, 0, response);
+      }
+    } else {
+      response = state.messages.find(message => message.parts.some(part => part.kind === "steering" && part.message.recordTs === selection.messageTs));
+      if (!response) continue;
+      insertAt = response.parts.findIndex(part => part.kind === "steering" && part.message.recordTs === selection.messageTs) + 1;
+    }
+    if (response.workStartedAt === undefined && response.recordTs !== undefined) response.workEndedAt = response.recordTs;
+    response.workStartedAt = Math.min(response.workStartedAt ?? selection.messageTs, selection.messageTs);
+    response.hasTurnWorkSummary = true;
+    for (const note of selection.memories) {
+      const id = idFor(selection.messageTs, note.id);
+      const existing = response.parts.findIndex(part => part.id === id);
+      if (existing >= 0) { insertAt = existing + 1; continue; }
+      const card: ToolCard = { toolId: id, toolName: "recall_memory", category: "read", status: "executed",
+        argsJson: JSON.stringify({ name: note.name, id: note.id }), resultPreview: JSON.stringify(noteResult(note)), expanded: false };
+      response.parts.splice(insertAt++, 0, { id, kind: "tool", card, startedAt: selection.messageTs });
+      response.toolCards.push(card);
+    }
+  }
+}
+
 function render(immediate = true): void {
+  attachQueryMemoryCalls();
   attachInitialMemoryCalls();
   if (restoringChat) return;
   if (!immediate) {
@@ -994,16 +1039,7 @@ function renderUserMessage(el: HTMLElement, m: Message): void {
     return;
   }
   const html = `<div class="bubble"><div class="user-message-body">${m.text ? `<div class="user-message-text">${md.render(m.text)}</div>` : ""}${renderAttachmentsHtml(m.attachments ?? [])}</div></div>${renderMessageActionsHtml(m)}`;
-  const selection = state.memorySelections.find(selection => selection.messageTs === m.recordTs);
-  const open = el.querySelector<HTMLDetailsElement>("[data-loaded-memories]")?.open;
-  const disclosure = selection?.memories.length ? `<details class="tool-card output-surface-tool executed" data-loaded-memories="${m.recordTs}">${renderLoadedMemories(selection.memories, md, chevronIcon())}</details>` : "";
-  const restoreFocus = preserveFormFocus(el, false);
-  if (lastSetHtml.get(el) !== html + disclosure) {
-    setHtml(el, html + disclosure);
-    const details = el.querySelector<HTMLDetailsElement>("[data-loaded-memories]");
-    if (details) { details.open = open ?? false; details.querySelector("summary")!.id = `loaded-memory-heading-${m.recordTs}`; }
-    restoreFocus();
-  }
+  setHtml(el, html);
 }
 
 function renderAttachmentsHtml(attachments: UiAttachment[], removeAttribute = ""): string {
@@ -3905,9 +3941,6 @@ function handleHostMessage(msg: ExtToChat): void {
       const input = root.querySelector<HTMLTextAreaElement>("#input");
       if (input) input.value = state.draft;
       render();
-      root.querySelectorAll<HTMLDetailsElement>("[data-loaded-memories]").forEach(entry => {
-        entry.open = draft?.expandedLoadedMemories.has(entry.dataset.loadedMemories!) ?? false;
-      });
       root.querySelectorAll<HTMLDetailsElement>("[data-memory-creation]").forEach(entry => {
         entry.open = draft?.expandedMemoryCreations.has(entry.dataset.memoryCreation!) ?? false;
       });

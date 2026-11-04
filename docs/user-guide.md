@@ -495,8 +495,11 @@ automatic loading and search results: default 10, range 1-100. Local keyword
 ranking recognizes paths and camelCase/snake_case symbols, with name and phrase
 boosts. Unrelated notes are omitted. Loading uses no model or embedding service.
 Notes count toward the prompt budget; the lowest-ranked whole notes are removed
-if needed before normal compaction. A disclosure beside each user message shows
-the notes actually loaded. Historical snapshots remain readable after edits or deletion.
+if needed before normal compaction. Each loaded note appears as **Recalled <memory-name>**
+in the normal working session, with expandable contents. When the response finishes,
+these activities collapse inside **Worked for…** with the other tools. Only notes
+sent in an accepted model request appear; batched steering uses the latest query's
+selection. Historical snapshots remain readable after edits or deletion.
 
 Ask the agent to remember a specific durable fact or preference. The agent uses
 `create_memory({ name, contents, id? })`: omit the ID to create an enabled note,
@@ -518,7 +521,7 @@ enable/disable, and individual deletion with confirmation. Markdown edits use
 normal Save; if another window or external editor changed the note, reopen it
 and apply your changes to the current version. Disabling/deleting a note affects
 future automatic retrieval and search. Existing tool results and historical
-loaded-note disclosures remain in the chat.
+recall activities remain in the chat.
 
 There is no background memory generation, generation queue, or retry setting.
 Malformed memory files are excluded individually with a warning; repair or remove

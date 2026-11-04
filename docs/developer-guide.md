@@ -222,7 +222,11 @@ invalidates editor access and stale sidebar responses.
 
 Automatic selection occurs for each user message, stays stable through tools,
 and enters the shared system-prompt builder and normal backend token counting.
-Drop lowest-ranked whole notes before overflow/compaction. Persist only retrieval
-snapshots for per-message disclosures, never synthetic recall calls or ownership.
+Refresh project instructions before fitting notes and drop lowest-ranked whole notes
+before overflow/compaction. Keep candidates private until the server accepts the
+request; batched steering selects only for the latest query. Persist retrieval
+snapshots, never synthetic recall calls or ownership. The webview projects each
+snapshot into ordinary recall tool cards in the response's work timeline, including
+after steering, with stable IDs and the shared disclosure and output surfaces.
 The memory tool is the explicit write exception in Plan and Review; file tools
 retain their mode and approval rules. Native calls still require terminal evidence.
