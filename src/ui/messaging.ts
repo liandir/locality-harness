@@ -67,6 +67,7 @@ export type SideToExt =
   | { type: "restoreDefaultGeneratedPrompts" }
   | { type: "resetAllDefaults" }
   | { type: "listMemories" }
+  | { type: "clearMemories" }
   | { type: "newMemory" }
   | { type: "openMemoryDraft"; key: string; mode: MemoryEditor["mode"] }
   | { type: "discardMemoryDraft"; key: string }

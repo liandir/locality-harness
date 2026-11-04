@@ -25,6 +25,7 @@ export function renderMemories(state: SideViewState, ago: (ts: number) => string
       ${state.memoryError ? `<p class="memory-error" role="alert">${esc(state.memoryError)}</p>` : ""}
       ${(state.memoryWarnings ?? []).map(warning => `<p class="memory-error" role="alert">${esc(warning)}</p>`).join("")}
       ${rows.length ? `<ul class="chat-list">${rows.join("")}</ul>` : `<p class="empty-state">${query ? "No matching memories." : "No memories yet."}</p>`}
+      ${state.memories.length || drafts.length ? `<button id="clearMemories" class="action-btn wide-button destructive-btn icon-label clear-chats" ${state.memoryPanel.editors.some(editor => editor.busy) ? "disabled" : ""}>${trashIcon()}<span>Clear all memories</span></button>` : ""}
     </section>
   </div>`;
 }
@@ -81,6 +82,7 @@ export function memoryContextActions(state: SideViewState, send: (message: SideT
   ];
 }
 export function bindMemories(root: HTMLElement, state: SideViewState, send: (message: SideToExt) => void, render: () => void): void {
+  root.querySelector("#clearMemories")?.addEventListener("click", () => send({ type: "clearMemories" }));
   root.querySelector("#newMemory")?.addEventListener("click", () => { state.memorySearch = ""; send({ type: "newMemory" }); });
   root.querySelector<HTMLInputElement>("#memorySearch")?.addEventListener("input", event => {
     state.memorySearch = (event.target as HTMLInputElement).value; render();

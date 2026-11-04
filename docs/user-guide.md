@@ -519,7 +519,9 @@ and inspected workspace evidence take precedence.
 The **Memories** sidebar uses the same compact rows and context menu as Chats.
 An active note has a foreground-colored dot. Click a row to expand its Markdown
 contents in place; the context menu offers View, Edit, Enable/Disable, Rename,
-and Delete. Deleting a saved note requires confirmation.
+and Delete. Deleting a saved note requires confirmation. **Clear all memories**
+below the list clears saved notes and unsaved new drafts after confirmation,
+including memories hidden by the current search. Chats remain untouched.
 
 **Create new memory** adds a draft row: confirm its name first, then enter its
 contents. The checkmark saves and the cross cancels editing. The Edit button

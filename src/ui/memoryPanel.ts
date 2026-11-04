@@ -22,10 +22,11 @@ export class MemoryPanel {
     }
     return store;
   }
-  refresh(): void {
+  snapshot(): MemoryPanelState {
     this.current();
-    this.publish({ editors: [...this.editors.values()].map(editor => ({ ...editor })), activeKey: this.activeKey });
+    return { editors: [...this.editors.values()].map(editor => ({ ...editor })), activeKey: this.activeKey };
   }
+  refresh(): void { this.publish(this.snapshot()); }
   create(): void {
     if (!this.current()) throw new Error("Open a workspace before creating a memory.");
     this.openGeneration++;

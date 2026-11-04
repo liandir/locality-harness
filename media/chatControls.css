@@ -17,7 +17,6 @@
   --diff-removed-foreground: var(--vscode-gitDecoration-deletedResourceForeground, var(--vscode-editorGutter-deletedBackground, #c74e39));
   --surface-fill-hover: color-mix(in srgb, var(--vscode-foreground) 8%, transparent);
   --scrollbar-size: 4px;
-  --scrollbar-hover-size: calc(1.5 * var(--scrollbar-size));
   --scrollbar-hover-fill: color-mix(in srgb, var(--vscode-scrollbarSlider-hoverBackground, color-mix(in srgb, var(--vscode-foreground) 40%, transparent)) 85%, var(--vscode-foreground));
   --scrollbar-active-fill: var(--vscode-scrollbarSlider-activeBackground, color-mix(in srgb, var(--vscode-foreground) 55%, transparent));
   --error-foreground: var(--vscode-errorForeground);
@@ -55,7 +54,7 @@ details[open] > summary.disclosure-trigger > .disclosure-icon { transform: rotat
 :where(button):disabled { opacity: 0.55; cursor: default; }
 :where(.action-btn) { --button-hover-fill: var(--surface-fill-strong); background: var(--surface-fill); color: var(--button-foreground, var(--vscode-foreground)); padding: 5px 14px; text-align: center; }
 :where(.action-btn.icon-btn) { --button-foreground: var(--vscode-foreground); }
-.cancel-btn { --button-foreground: var(--error-foreground); --button-hover-fill: color-mix(in srgb, var(--vscode-errorForeground) 26%, transparent); background: color-mix(in srgb, var(--vscode-errorForeground) 16%, transparent); }
+.cancel-btn, .destructive-btn { --button-foreground: var(--error-foreground); --button-hover-fill: color-mix(in srgb, var(--vscode-errorForeground) 26%, transparent); background: color-mix(in srgb, var(--vscode-errorForeground) 16%, transparent); }
 .quiet-btn { color: var(--button-foreground, var(--vscode-descriptionForeground)); }
 .icon-btn { flex: 0 0 auto; width: var(--action-size, var(--icon-action-size)); height: var(--action-size, var(--icon-action-size)); min-height: 0; box-sizing: border-box; display: inline-flex; align-items: center; justify-content: center; color: var(--button-foreground, var(--vscode-descriptionForeground)); padding: 0; line-height: 1; }
 .icon-btn.icon-btn-compact { --action-size: var(--icon-action-compact-size); }
@@ -97,21 +96,17 @@ a:not(.workspace-file-link, .tool-path-link):is(:hover, :focus-visible),
 /* Use Chromium's scrollbar parts so native tracks and arrow buttons cannot
    override the shared VS Code styling, including on Linux. */
 * { scrollbar-width: auto; scrollbar-color: auto; }
-/* Reserve the full hit area so widening the thumb never moves content. The
-   transparent inner gap keeps the resting thumb against the outer edge. */
-::-webkit-scrollbar { width: var(--scrollbar-hover-size); height: var(--scrollbar-hover-size); background: transparent; }
+/* Keep the track and thumb equally narrow so rounded ends are never clipped
+   by an inset border. Hover and drag change only the fill. */
+::-webkit-scrollbar { width: var(--scrollbar-size); height: var(--scrollbar-size); background: transparent; }
 ::-webkit-scrollbar-track,
 ::-webkit-scrollbar-track-piece,
 ::-webkit-scrollbar-corner { background: transparent; border: 0; box-shadow: none; }
 ::-webkit-scrollbar-button { display: none; width: 0; height: 0; }
-::-webkit-scrollbar-thumb { min-width: 24px; min-height: 24px; border: 0 solid transparent; border-radius: var(--control-radius); --scrollbar-thumb-fill: var(--vscode-scrollbarSlider-background, color-mix(in srgb, var(--vscode-foreground) 25%, transparent)); background: linear-gradient(var(--scrollbar-thumb-fill), var(--scrollbar-thumb-fill)), var(--vscode-editor-background); background-clip: padding-box; }
-::-webkit-scrollbar-thumb:vertical { border-left-width: calc(var(--scrollbar-hover-size) - var(--scrollbar-size)); }
-::-webkit-scrollbar-thumb:horizontal { border-top-width: calc(var(--scrollbar-hover-size) - var(--scrollbar-size)); }
-:dir(rtl)::-webkit-scrollbar-thumb:vertical { border-left-width: 0; border-right-width: calc(var(--scrollbar-hover-size) - var(--scrollbar-size)); }
-/* Composite theme colors over an opaque base. Hover and drag paint the same
-   fill across the full width, including the extra inward space. */
-::-webkit-scrollbar-thumb:hover { --scrollbar-thumb-fill: var(--scrollbar-hover-fill); background-clip: border-box; }
-::-webkit-scrollbar-thumb:active { --scrollbar-thumb-fill: var(--scrollbar-active-fill); background-clip: border-box; }
+::-webkit-scrollbar-thumb { min-width: 24px; min-height: 24px; border: 0; border-radius: calc(var(--scrollbar-size) / 2); --scrollbar-thumb-fill: var(--vscode-scrollbarSlider-background, color-mix(in srgb, var(--vscode-foreground) 25%, transparent)); background: linear-gradient(var(--scrollbar-thumb-fill), var(--scrollbar-thumb-fill)), var(--vscode-editor-background); }
+/* Composite theme colors over an opaque base without changing geometry. */
+::-webkit-scrollbar-thumb:hover { --scrollbar-thumb-fill: var(--scrollbar-hover-fill); }
+::-webkit-scrollbar-thumb:active { --scrollbar-thumb-fill: var(--scrollbar-active-fill); }
 /* Keep text in place when content starts or stops overflowing. The reserved
    gutter uses the content background instead of a separate track fill. */
 .chat-body, .message-queue, .tool-filelist, .tool-error-result, .tool-change-error,

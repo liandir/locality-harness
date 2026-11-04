@@ -7,6 +7,42 @@ const note: WorkspaceNote = { version: 1, id: "123e4567-e89b-42d3-a456-426614174
 const managed = { ...note, revision: "current-version" };
 const posted = async (page: import("@playwright/test").Page) => page.evaluate(() => (window as unknown as { posted: unknown[] }).posted);
 for (const theme of ["light", "dark"] as const) {
+  test(theme + ": clear all memories matches chat controls, stays red, and waits for host confirmation", async ({ page }) => {
+    await webview(page, theme, "side");
+    await hostMessage(page, { type: "focusTab", tab: "chats" });
+    await hostMessage(page, { type: "chats", chats: [{ id: "chat", title: "Chat", updatedAt: 1 }] });
+    const geometry = (button: HTMLElement) => {
+      const style = getComputedStyle(button);
+      return { width: style.width, height: style.height, radius: style.borderRadius, padding: style.padding, font: style.font };
+    };
+    const chatGeometry = await page.getByRole("button", { name: "Clear all chats" }).evaluate(geometry);
+    await hostMessage(page, { type: "focusTab", tab: "memories" });
+    await hostMessage(page, { type: "memories", memories: [managed, { ...managed, id: "disabled", name: "Disabled", enabled: false }] });
+    const clear = page.getByRole("button", { name: "Clear all memories" });
+    expect(await clear.evaluate(geometry)).toEqual(chatGeometry);
+    const red = await clear.evaluate(button => {
+      const probe = document.createElement("span"); probe.style.color = "var(--error-foreground)"; button.append(probe);
+      const color = getComputedStyle(probe).color; probe.remove(); return color;
+    });
+    await expect(clear).toHaveCSS("color", red);
+    const restingFill = await clear.evaluate(button => getComputedStyle(button).backgroundColor);
+    await clear.hover(); await expect(clear).toHaveCSS("color", red);
+    expect(await clear.evaluate(button => getComputedStyle(button).backgroundColor)).not.toBe(restingFill);
+    await clear.click(); await page.mouse.move(990, 5);
+    expect(await posted(page)).toContainEqual({ type: "clearMemories" });
+    await expect(page.locator(".memory-entry")).toHaveCount(2);
+    await expect(clear).toHaveCSS("background-color", restingFill);
+    await page.getByRole("searchbox", { name: "Search memories" }).fill("no matches");
+    await expect(page.locator(".memory-entry")).toHaveCount(0); await expect(clear).toBeVisible();
+    await page.keyboard.press("Tab"); await expect(clear).toBeFocused();
+    await expect(clear).toHaveCSS("color", red); await page.keyboard.press("Enter");
+    await hostMessage(page, { type: "memories", memories: [managed] });
+    await hostMessage(page, { type: "memoryError", error: "Some memories could not be deleted." });
+    await expect(page.getByRole("alert")).toContainText("could not be deleted");
+    await expect(clear).toBeVisible();
+    await hostMessage(page, { type: "memories", memories: [] });
+    await expect(clear).toHaveCount(0);
+  });
   test(theme + ": memory rows match chats and support inline viewing, keyboard actions and the shared menu", async ({ page }) => {
     await webview(page, theme, "side");
     await page.getByRole("button", { name: "Memories", exact: true }).click();
