@@ -7,35 +7,46 @@ const note: WorkspaceNote = { version: 1, id: "123e4567-e89b-42d3-a456-426614174
 const managed = { ...note, revision: "current-version" };
 const posted = async (page: import("@playwright/test").Page) => page.evaluate(() => (window as unknown as { posted: unknown[] }).posted);
 for (const theme of ["light", "dark"] as const) {
-  test(theme + ": clear all memories matches chat controls, stays red, and waits for host confirmation", async ({ page }) => {
+  test(theme + ": clear all memories matches chat colors and geometry and waits for host confirmation", async ({ page }) => {
     await webview(page, theme, "side");
     await hostMessage(page, { type: "focusTab", tab: "chats" });
     await hostMessage(page, { type: "chats", chats: [{ id: "chat", title: "Chat", updatedAt: 1 }] });
-    const geometry = (button: HTMLElement) => {
+    const appearance = (button: HTMLElement) => {
       const style = getComputedStyle(button);
-      return { width: style.width, height: style.height, radius: style.borderRadius, padding: style.padding, font: style.font };
+      return { width: style.width, height: style.height, radius: style.borderRadius, padding: style.padding, font: style.font,
+        marginTop: style.marginTop, color: style.color, background: style.backgroundColor, border: style.borderColor, shadow: style.boxShadow };
     };
-    const chatGeometry = await page.getByRole("button", { name: "Clear all chats" }).evaluate(geometry);
+    const clearChats = page.getByRole("button", { name: "Clear all chats" });
+    const chatResting = await clearChats.evaluate(appearance);
+    await clearChats.hover();
+    const chatHover = await clearChats.evaluate(appearance);
+    await clearChats.click(); await page.mouse.move(990, 5);
+    await expect(clearChats).toBeFocused();
+    expect(await clearChats.evaluate(appearance)).toEqual(chatResting);
+    await page.keyboard.press("Shift+Tab"); await page.keyboard.press("Tab");
+    await expect(clearChats).toBeFocused();
+    const chatFocus = await clearChats.evaluate(appearance);
     await hostMessage(page, { type: "focusTab", tab: "memories" });
     await hostMessage(page, { type: "memories", memories: [managed, { ...managed, id: "disabled", name: "Disabled", enabled: false }] });
     const clear = page.getByRole("button", { name: "Clear all memories" });
-    expect(await clear.evaluate(geometry)).toEqual(chatGeometry);
+    expect(await clear.evaluate(appearance)).toEqual(chatResting);
     const red = await clear.evaluate(button => {
-      const probe = document.createElement("span"); probe.style.color = "var(--error-foreground)"; button.append(probe);
+      const probe = document.createElement("span"); probe.style.color = "var(--error-highlight-foreground)"; button.append(probe);
       const color = getComputedStyle(probe).color; probe.remove(); return color;
     });
-    await expect(clear).toHaveCSS("color", red);
-    const restingFill = await clear.evaluate(button => getComputedStyle(button).backgroundColor);
     await clear.hover(); await expect(clear).toHaveCSS("color", red);
-    expect(await clear.evaluate(button => getComputedStyle(button).backgroundColor)).not.toBe(restingFill);
+    expect(await clear.evaluate(appearance)).toEqual(chatHover);
+    expect(chatHover.background).not.toBe(chatResting.background);
     await clear.click(); await page.mouse.move(990, 5);
     expect(await posted(page)).toContainEqual({ type: "clearMemories" });
     await expect(page.locator(".memory-entry")).toHaveCount(2);
-    await expect(clear).toHaveCSS("background-color", restingFill);
+    await expect(clear).toBeFocused();
+    expect(await clear.evaluate(appearance)).toEqual(chatResting);
     await page.getByRole("searchbox", { name: "Search memories" }).fill("no matches");
     await expect(page.locator(".memory-entry")).toHaveCount(0); await expect(clear).toBeVisible();
     await page.keyboard.press("Tab"); await expect(clear).toBeFocused();
-    await expect(clear).toHaveCSS("color", red); await page.keyboard.press("Enter");
+    expect(await clear.evaluate(appearance)).toEqual(chatFocus);
+    await expect(clear).toHaveCSS("color", red); await page.keyboard.press("Enter"); await page.keyboard.press("Space");
     await hostMessage(page, { type: "memories", memories: [managed] });
     await hostMessage(page, { type: "memoryError", error: "Some memories could not be deleted." });
     await expect(page.getByRole("alert")).toContainText("could not be deleted");

@@ -54,7 +54,7 @@ details[open] > summary.disclosure-trigger > .disclosure-icon { transform: rotat
 :where(button):disabled { opacity: 0.55; cursor: default; }
 :where(.action-btn) { --button-hover-fill: var(--surface-fill-strong); background: var(--surface-fill); color: var(--button-foreground, var(--vscode-foreground)); padding: 5px 14px; text-align: center; }
 :where(.action-btn.icon-btn) { --button-foreground: var(--vscode-foreground); }
-.cancel-btn, .destructive-btn { --button-foreground: var(--error-foreground); --button-hover-fill: color-mix(in srgb, var(--vscode-errorForeground) 26%, transparent); background: color-mix(in srgb, var(--vscode-errorForeground) 16%, transparent); }
+.cancel-btn { --button-foreground: var(--error-foreground); --button-hover-fill: color-mix(in srgb, var(--vscode-errorForeground) 26%, transparent); background: color-mix(in srgb, var(--vscode-errorForeground) 16%, transparent); }
 .quiet-btn { color: var(--button-foreground, var(--vscode-descriptionForeground)); }
 .icon-btn { flex: 0 0 auto; width: var(--action-size, var(--icon-action-size)); height: var(--action-size, var(--icon-action-size)); min-height: 0; box-sizing: border-box; display: inline-flex; align-items: center; justify-content: center; color: var(--button-foreground, var(--vscode-descriptionForeground)); padding: 0; line-height: 1; }
 .icon-btn.icon-btn-compact { --action-size: var(--icon-action-compact-size); }

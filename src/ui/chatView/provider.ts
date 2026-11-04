@@ -506,7 +506,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       if (m.type === "undoResponseFiles") return;
       await this.fileUndoTask;
     }
-    const navigation = ["openChat", "closeChatTab", "openChats", "openSettings", "newChat", "openMemory", "deleteChat", "ready"].includes(m.type) || (m.type === "renameChat" && !!m.id);
+    const navigation = ["openChat", "closeChatTab", "openChats", "openMemories", "openSettings", "newChat", "openMemory", "deleteChat", "ready"].includes(m.type) || (m.type === "renameChat" && !!m.id);
     if (!navigation && m.chatId && m.chatId !== this.session?.getRecord().id) {
       if (m.type === "saveDraft") { const runtime = this.runtimes.get(m.chatId); if (runtime) runtime.draft = m.text; }
       return;
@@ -746,6 +746,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         break;
       case "openChats":
         this.onOpenSideTab("chats");
+        await vscode.commands.executeCommand("workbench.view.extension.locality");
+        break;
+      case "openMemories":
+        this.onOpenSideTab("memories");
         await vscode.commands.executeCommand("workbench.view.extension.locality");
         break;
       case "deleteCurrent":

@@ -748,6 +748,7 @@ function mountShell(): void {
       <div class="header-actions">
         <button id="plus" class="icon-btn header-action" aria-label="Start new chat" data-tip="Start new chat">${plusIcon()}</button>
         <button id="chats" class="icon-btn header-action" aria-label="Open recent chats" data-tip="Open recent chats">${historyIcon()}</button>
+        <button id="memories" class="icon-btn header-action" aria-label="Open memories" data-tip="Open memories">${memoryIcon()}</button>
         <button id="gear" class="icon-btn header-action" aria-label="Open settings" data-tip="Open settings">${settingsIcon()}</button>
       </div>
     </header>
@@ -3333,6 +3334,7 @@ function bindOnce(): void {
       send({ type: "openChat", id: target.closest<HTMLElement>("[data-chat-tab]")!.dataset.chatTab! });
     } else if (target.closest("#gear")) send({ type: "openSettings" });
     else if (target.closest("#chats")) send({ type: "openChats" });
+    else if (target.closest("#memories")) send({ type: "openMemories" });
     else if (target.closest("#plus")) send({ type: "newChat" });
     else if (target.closest("#chatMode")) {
       state.chatModeMenuOpen = !state.chatModeMenuOpen;

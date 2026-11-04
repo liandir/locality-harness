@@ -134,6 +134,7 @@ export type ChatToExt = (
   | { type: "compactInterruptAndRun" }
   | { type: "newChat" }
   | { type: "openChats" }
+  | { type: "openMemories" }
   | { type: "openSettings" }
   | { type: "acceptPlan"; messageTs: number }
   | { type: "revisePlan"; messageTs: number; text: string }

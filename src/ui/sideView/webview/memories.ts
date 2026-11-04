@@ -25,7 +25,7 @@ export function renderMemories(state: SideViewState, ago: (ts: number) => string
       ${state.memoryError ? `<p class="memory-error" role="alert">${esc(state.memoryError)}</p>` : ""}
       ${(state.memoryWarnings ?? []).map(warning => `<p class="memory-error" role="alert">${esc(warning)}</p>`).join("")}
       ${rows.length ? `<ul class="chat-list">${rows.join("")}</ul>` : `<p class="empty-state">${query ? "No matching memories." : "No memories yet."}</p>`}
-      ${state.memories.length || drafts.length ? `<button id="clearMemories" class="action-btn wide-button destructive-btn icon-label clear-chats" ${state.memoryPanel.editors.some(editor => editor.busy) ? "disabled" : ""}>${trashIcon()}<span>Clear all memories</span></button>` : ""}
+      ${state.memories.length || drafts.length ? `<button id="clearMemories" class="action-btn wide-button danger icon-label clear-chats" ${state.memoryPanel.editors.some(editor => editor.busy) ? "disabled" : ""}>${trashIcon()}<span>Clear all memories</span></button>` : ""}
     </section>
   </div>`;
 }
