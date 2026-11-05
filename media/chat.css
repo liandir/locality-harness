@@ -171,10 +171,11 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   font-size: inherit;
   line-height: 1.45;
 }
-.code-block-actions {
+/* Keep the action inset even when Markdown trims its first child's margin. */
+.copy-code-block > .code-block-actions {
   flex: 0 0 auto;
   order: 1;
-  margin: 6px 6px 0 0;
+  margin: 10px 10px 10px 0;
   display: inline-flex;
   align-items: center;
   gap: 2px;
