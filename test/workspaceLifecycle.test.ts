@@ -13,6 +13,9 @@ const mocks = vi.hoisted(() => ({
   rebuild: vi.fn().mockResolvedValue(3),
   commands: new Map<string, () => Promise<void>>(),
   refreshOpenTabs: vi.fn(),
+  openChat: vi.fn(),
+  save: vi.fn(),
+  newRecord: vi.fn(() => ({ id: "new", messages: [], title: "New chat" })),
   storageRoots: [] as string[]
 }));
 vi.mock("vscode", () => ({
@@ -34,6 +37,8 @@ vi.mock("../src/chat/storage.js", () => ({
     constructor(root: string) { mocks.storageRoots.push(root); }
     watch(onChange: () => void) { mocks.watchers.push(onChange); return { dispose: mocks.watcherDisposed }; }
     rebuildWorkspaceIndex = mocks.rebuild;
+    newRecord = mocks.newRecord;
+    save = mocks.save;
   }
 }));
 vi.mock("../src/ui/chatView/provider.js", () => ({
@@ -42,6 +47,9 @@ vi.mock("../src/ui/chatView/provider.js", () => ({
     pushSettings = mocks.pushSettings;
     pushRecentChats = mocks.pushRecentChats;
     refreshMemoryVisibility = vi.fn();
+    isClearingWorkspace = () => false;
+    getCurrentRecord = () => undefined;
+    openChat = mocks.openChat;
   }
 }));
 vi.mock("../src/ui/sideView/provider.js", () => ({
@@ -58,11 +66,17 @@ beforeEach(async () => {
   mocks.storageRoots = [];
   mocks.watchers = [];
   mocks.folders = [{ uri: { fsPath: "/workspace/a" } }, { uri: { fsPath: "/workspace/b" } }];
-  await activate({ subscriptions: [] } as unknown as vscode.ExtensionContext);
+  await activate({ subscriptions: [], workspaceState: { get: vi.fn() } } as unknown as vscode.ExtensionContext);
   mocks.watcherDisposed.mockClear();
 });
 
 describe("workspace folder lifecycle", () => {
+  it("opens new chats as transient tabs without saving them or adding them to recent chats", async () => {
+    await mocks.commands.get("locality.newChat")!();
+    expect(mocks.openChat).toHaveBeenCalledWith(expect.objectContaining({ id: "new", messages: [] }), { preserveDraft: true, transient: true });
+    expect(mocks.save).not.toHaveBeenCalled();
+    expect(mocks.pushChats).not.toHaveBeenCalled();
+  });
   it("rebuilds the active workspace index and refreshes both chat lists", async () => {
     await mocks.commands.get("locality.rebuildChatIndex")!();
     expect(mocks.rebuild).toHaveBeenCalledOnce();

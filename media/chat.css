@@ -13,10 +13,6 @@
   --code-fill: color-mix(in srgb, var(--vscode-foreground) 14%, transparent);
   --code-inline-fill: var(--code-fill);
   --hover-help-fill: color-mix(in srgb, var(--vscode-foreground) 18%, var(--vscode-sideBar-background, var(--vscode-editor-background)));
-  /* Reduce foreground contrast equally in every theme. Mix with the actual
-     background so the shimmer's overlapping paint layers stay opaque. */
-  --tool-idle-weight: 60%;
-  --tool-idle: color-mix(in srgb, var(--vscode-foreground) var(--tool-idle-weight), var(--vscode-sideBar-background, var(--vscode-editor-background)));
   --shimmer-edge: var(--tool-idle);
   --shimmer-peak: var(--vscode-foreground);
   --shimmer-band-width: 48px;
@@ -32,7 +28,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .header-actions { flex: 0 0 auto; display: flex; gap: 2px; align-items: center; justify-content: flex-end; margin-left: auto; min-width: 0; }
 .header-action { flex: 0 0 auto; }
 
-.chat-body { flex: 1; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: var(--chat-message-gap); }
+.chat-body { flex: 1; overflow-y: auto; padding: 12px 18px; display: flex; flex-direction: column; gap: var(--chat-message-gap); }
 
 #emptyState { width: min(100%, 620px); margin: 8px auto 0; }
 #emptyState[hidden] { display: none; }
@@ -83,15 +79,17 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .msg.assistant .bubble { padding: 4px 0; }
 .msg.assistant .steering-part .bubble { padding: 0; color: var(--vscode-foreground); }
 .assistant-markdown { color: var(--vscode-foreground); line-height: 1.55; padding: 2px 0; }
-.message-actions { display: flex; align-items: center; gap: 1px; min-height: var(--icon-action-size); margin-top: -2px; }
+/* Assistant action centers align with the 14px activity-icon column;
+   user action backgrounds align with the outer edge of their bubble. */
+.message-actions { --message-action-outset: calc((var(--icon-action-size) - 14px) / 2); display: flex; align-items: center; gap: 1px; min-height: var(--icon-action-size); margin-top: -2px; }
 .message-action-buttons { display: inline-flex; flex: 0 0 auto; gap: 1px; }
 @media (hover: hover) {
   /* Preserve spacing and keyboard access while revealing only this message's footer. */
   .msg > .message-actions { opacity: 0; pointer-events: none; }
   .msg:is(:hover, :focus-within) > .message-actions { opacity: 1; pointer-events: auto; }
 }
-.msg.user > .message-actions { align-self: flex-end; flex-direction: row-reverse; gap: 15px; max-width: 90%; padding-right: 2px; }
-.msg.assistant > .message-actions { align-self: flex-start; }
+.msg.user > .message-actions { align-self: flex-end; flex-direction: row-reverse; gap: 15px; max-width: 90%; }
+.msg.assistant > .message-actions { align-self: flex-start; margin-inline-start: calc(-1 * var(--message-action-outset)); }
 .msg > .message-actions.recovery-actions { opacity: 1; pointer-events: auto; }
 .message-actions .message-mode { margin-inline-start: 7px; margin-inline-end: 4px; }
 .message-date { flex: 0 0 auto; margin-inline: 7px; font-variant-numeric: tabular-nums; color: var(--vscode-descriptionForeground); font-size: 0.82em; line-height: 1.35; white-space: nowrap; }
@@ -173,10 +171,11 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   font-size: inherit;
   line-height: 1.45;
 }
-.code-block-actions {
+/* Keep the action inset even when Markdown trims its first child's margin. */
+.copy-code-block > .code-block-actions {
   flex: 0 0 auto;
   order: 1;
-  margin: 6px 6px 0 0;
+  margin: 10px 10px 10px 0;
   display: inline-flex;
   align-items: center;
   gap: 2px;
@@ -621,7 +620,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .question-cancel:is(:hover, :focus-visible):not(:disabled) .question-option-badge { color: inherit; }
 #sendSlot { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 4px; margin-left: auto; }
 /* Reserve the scrollbar below the shared control row without shifting its items. */
-.composer-attachment { display: flex; flex: 1 1 auto; align-self: flex-start; align-items: flex-start; gap: 4px; min-width: 0; height: calc(var(--icon-action-size) + 2px + var(--scrollbar-hover-size)); margin-bottom: calc(-2px - var(--scrollbar-hover-size)); overflow-x: auto; overflow-y: hidden; }
+.composer-attachment { display: flex; flex: 1 1 auto; align-self: flex-start; align-items: flex-start; gap: 4px; min-width: 0; height: calc(var(--icon-action-size) + 2px + var(--scrollbar-size)); margin-bottom: calc(-2px - var(--scrollbar-size)); overflow-x: auto; overflow-y: hidden; }
 .composer-attachment[hidden] { display: none; }
 .composer-attachment-item { display: inline-flex; align-items: center; gap: 4px; flex: 0 0 auto; max-width: min(220px, 100%); height: var(--icon-action-size); box-sizing: border-box; padding: 0; background: var(--surface-fill-strong); border: 1px solid transparent; border-radius: var(--control-radius); }
 .composer-attachment-preview { width: calc(var(--icon-action-size) - 2px); height: calc(var(--icon-action-size) - 2px); flex: 0 0 auto; box-sizing: border-box; padding: 0; background: transparent; border: 1px solid transparent; border-radius: var(--control-radius); cursor: zoom-in; overflow: hidden; }
@@ -747,13 +746,10 @@ body.image-preview-open .chat-body { overflow: hidden; }
 .tool-memory-name { white-space: normal; }
 
 .chat-tabs { display: flex; flex: 1; min-width: 0; gap: 2px; overflow-x: auto; overflow-y: hidden; font-size: var(--vscode-font-size); font-weight: normal; }
-.chat-tabs .chat-tab { flex: 0 0 auto; width: max-content; min-width: 75px; max-width: 240px; height: 28px; padding: 0 4px 0 0; gap: 0; background: var(--vscode-tab-inactiveBackground, transparent); color: var(--vscode-tab-inactiveForeground, var(--vscode-descriptionForeground)); }
-.chat-tabs .chat-tab.active { background: var(--vscode-tab-activeBackground, var(--surface-fill-strong)); color: var(--vscode-tab-activeForeground, var(--vscode-foreground)); }
-.chat-tabs .chat-tab:hover { background: var(--vscode-list-hoverBackground, var(--surface-fill)); color: var(--vscode-foreground); }
+.chat-tabs .chat-tab { flex: 0 0 auto; width: max-content; min-width: 75px; max-width: 240px; height: 28px; padding: 0 4px 0 0; gap: 0; }
 .chat-tab-label { display: flex; align-items: center; gap: 6px; min-width: 0; flex: 1; height: 100%; padding: 0 6px 0 8px; }
 .chat-tab-label { background: transparent; border: 1px solid transparent; color: inherit; font: inherit; font-weight: normal; cursor: pointer; border-radius: var(--control-radius); outline: none; }
 .chat-tab-label > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chat-tab-close svg { width: 16px; height: 16px; display: block; }
-.chat-tab-label:focus-visible { background: var(--surface-fill-hover); color: var(--vscode-foreground); }
 
 #incompletePlanning { align-self: flex-end; margin-bottom: 6px; }

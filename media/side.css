@@ -129,10 +129,27 @@ h3 { font-size: 0.82em; margin: 0 0 12px; color: var(--vscode-descriptionForegro
 .chats-panel .search-box input { padding: 3px 0; }
 .chats-panel .clear-chats { margin-top: 6px; }
 
-/* Workspace memory management uses shared controls; these rules only lay out rows. */
-.workspace-memory-list { list-style: none; padding: 0; margin: 12px 0; }
-.workspace-memory-row { padding: 12px 0; }
-.workspace-memory-row + .workspace-memory-row { border-top: 1px solid var(--vscode-widget-border, var(--surface-fill)); }
-.workspace-memory-title { text-align: left; overflow-wrap: anywhere; }
-.workspace-memory-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
-.workspace-memory-actions .switch-row { gap: 8px; margin: 0; }
+/* Memories reuse chat rows, sections, and menu controls. Contents expand inline. */
+.memory-enabled-dot.enabled { background: var(--vscode-foreground); }
+.memory-row { --disclosure-foreground: var(--vscode-foreground); width: 100%; }
+.memory-details { padding: 6px 4px 8px 16px; }
+.memory-markdown { color: var(--tool-idle); line-height: 1.55; overflow-wrap: anywhere; }
+.memory-markdown :is(h1, h2, h3, h4, h5, h6) { display: block; min-height: 0; margin: 1em 0 .5em; padding: 0; color: inherit; text-transform: none; letter-spacing: normal; line-height: 1.3; }
+.memory-markdown h1 { font-size: 1.5em; }
+.memory-markdown h2 { font-size: 1.25em; }
+.memory-markdown h3 { font-size: 1.1em; }
+.memory-markdown :is(h4, h5, h6) { font-size: 1em; }
+.memory-markdown > :first-child { margin-top: 0; }
+.memory-markdown > :last-child { margin-bottom: 0; }
+.memory-markdown pre { overflow-x: auto; padding: 8px 10px; background: var(--surface-fill); border-radius: var(--control-radius); }
+.memory-markdown code { font-family: var(--vscode-editor-font-family, monospace); }
+.memory-markdown img { max-width: 100%; }
+/* Start the field at the row edge; its border plus inset matches the title's 16px offset. */
+.memory-name-row { position: relative; display: flex; align-items: center; gap: 6px; height: 24px; padding: 0 4px 0 0; box-sizing: border-box; }
+.memory-name-row > .memory-enabled-dot { position: absolute; left: 4px; pointer-events: none; }
+.memory-name-row input[type=text] { min-width: 0; min-height: 0; height: 100%; flex: 1; padding: 0 6px 0 15px; }
+.memory-content-input { display: block; width: 100%; min-height: 120px; resize: vertical; padding: 8px 10px; box-sizing: border-box; background: var(--surface-fill); color: var(--vscode-input-foreground, var(--vscode-foreground)); border: 1px solid transparent; border-radius: var(--control-radius); font: inherit; line-height: 1.55; outline: none; }
+.memory-content-input:focus-visible { background: var(--surface-fill-strong); }
+.memory-edit-actions { display: flex; flex: 0 0 auto; justify-content: flex-end; gap: 4px; margin-top: 6px; }
+.memory-name-row .memory-edit-actions { margin-top: 0; }
+.memory-entry > .memory-error { margin: 4px 4px 8px 16px; }

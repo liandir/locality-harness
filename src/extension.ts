@@ -154,13 +154,8 @@ async function newChat(context: vscode.ExtensionContext): Promise<ChatRecord | u
   const reasoningEffort = availableReasoningEffort(normalizeReasoningEffort(
     context.workspaceState.get<unknown>(WORKSPACE_REASONING_EFFORT_KEY)
   ), settings.reasoningEfforts);
-  const targetStorage = storage;
-  const rec = targetStorage.newRecord(settings.toolCallingMode, reasoningEffort);
-  await targetStorage.save(rec);
-  if (targetStorage !== storage) return undefined;
-  await sideProvider.pushChats();
-  if (targetStorage !== storage) return undefined;
-  chatProvider.openChat(rec, { preserveDraft: true });
+  const rec = storage.newRecord(settings.toolCallingMode, reasoningEffort);
+  chatProvider.openChat(rec, { preserveDraft: true, transient: true });
   return rec;
 }
 

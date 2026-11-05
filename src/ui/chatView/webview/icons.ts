@@ -77,13 +77,10 @@ export function questionIcon(): string {
 }
 
 export function forkIcon(): string {
-  return `<svg viewBox="0 0 28 20" width="17" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
-    <g transform="translate(0 20) scale(1 -1)">
-      <path d="M2.5 14.5H6c4 0 5.45-1.75 6.8-5.3C14 6.05 16.7 4.5 20 4.5h5"/>
-      <path d="m22 1.5 3 3-3 3"/>
-      <path d="M13.5 15H25"/>
-      <path d="m22 12 3 3-3 3"/>
-    </g>
+  return `<svg viewBox="3 0 28 20" width="17" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+    <path d="M9 10h5c3 0 3 5.5 6 5.5h5"/>
+    <path d="M17 7.25C17.75 5.875 18.5 4.5 20 4.5h5"/>
+    <path d="m22 1.5 3 3-3 3m0 5 3 3-3 3"/>
   </svg>`;
 }
 
@@ -103,9 +100,8 @@ export function compactIcon(): string {
 }
 
 export function copyIcon(): string {
-  return `<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
-    <path d="M11 4h6a3 3 0 0 1 3 3v6a3 3 0 0 1-3 3h-1"/>
-    <path d="M8 4.2A3 3 0 0 1 10.8 4"/>
+  return `<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+    <path d="M8 8V7a3 3 0 0 1 3-3h6a3 3 0 0 1 3 3v6a3 3 0 0 1-3 3h-1"/>
     <rect x="4" y="8" width="12" height="12" rx="3"/>
   </svg>`;
 }

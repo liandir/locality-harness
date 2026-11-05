@@ -34,6 +34,19 @@ export type WorkspacePathType = "file" | "directory" | "other" | "missing";
 
 export interface ChatTab { id: string; title: string; running?: boolean; open?: boolean }
 export interface ManagedMemory extends WorkspaceNote { revision: string }
+export interface MemoryEditor {
+  key: string;
+  id?: string;
+  name: string;
+  contents: string;
+  revision?: string;
+  mode: "view" | "name" | "edit";
+  draftName: string;
+  draftContents: string;
+  busy?: boolean;
+  error?: string;
+}
+export interface MemoryPanelState { editors: MemoryEditor[]; activeKey?: string }
 
 export type SideToExt =
   | { type: "ready" }
@@ -54,6 +67,14 @@ export type SideToExt =
   | { type: "restoreDefaultGeneratedPrompts" }
   | { type: "resetAllDefaults" }
   | { type: "listMemories" }
+  | { type: "clearMemories" }
+  | { type: "newMemory" }
+  | { type: "openMemoryDraft"; key: string; mode: MemoryEditor["mode"] }
+  | { type: "discardMemoryDraft"; key: string }
+  | { type: "memoryDraft"; key: string; name?: string; contents?: string }
+  | { type: "saveMemoryEditor"; key: string }
+  | { type: "cancelMemoryEditor"; key: string }
+  | { type: "closeMemoryEditor"; key: string }
   | { type: "openMemory"; id: string; readonly: boolean }
   | { type: "setMemoryEnabled"; id: string; enabled: boolean; revision: string }
   | { type: "renameMemory"; id: string; revision: string }
@@ -62,6 +83,7 @@ export type SideToExt =
 export type ChatContextMessage = Extract<SideToExt, { type: "openChat" | "renameChat" | "deleteChat" }>;
 
 export type ExtToSide =
+  | { type: "memoryPanel"; panel: MemoryPanelState }
   | { type: "settingsSections"; expanded: SettingsSection[] }
   | { type: "memories"; memories: ManagedMemory[]; warnings?: string[] }
   | { type: "memoryError"; error: string }
@@ -112,6 +134,7 @@ export type ChatToExt = (
   | { type: "compactInterruptAndRun" }
   | { type: "newChat" }
   | { type: "openChats" }
+  | { type: "openMemories" }
   | { type: "openSettings" }
   | { type: "acceptPlan"; messageTs: number }
   | { type: "revisePlan"; messageTs: number; text: string }

@@ -5,7 +5,7 @@ import type { SideViewState } from "../src/ui/sideView/webview/types.js";
 function state(settings: Record<string, unknown> = {}): SideViewState {
   return {
     tab: "settings", search: "", chats: [], settings, reasoningEffort: "default",
-    serverModels: [], openTabs: [], version: "", memories: []
+    serverModels: [], openTabs: [], version: "", memories: [], memoryPanel: { editors: [] }
   };
 }
 
@@ -20,7 +20,7 @@ describe("settings rendering", () => {
     const html = renderSettings(state(), new Set(["tools", "automation"]));
     expect([...html.matchAll(/data-settings-section="([^"]+)" aria-expanded="([^"]+)"/g)]
       .map(([, section, expanded]) => [section, expanded])).toEqual([
-      ["model", "false"], ["tools", "true"], ["chat", "false"],
+      ["model", "false"], ["chat", "false"], ["tools", "true"],
       ["automation", "true"], ["user", "false"], ["reset", "false"]
     ]);
   });

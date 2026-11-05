@@ -133,6 +133,10 @@ Type your question in the composer at the bottom of the chat panel and press
 responding, the send button turns into a stop button — click it (or the
 cancel icon) to interrupt the current turn.
 
+A new chat is saved and appears in Recent Chats only after its first prompt is
+sent. Typing a draft, attaching files, renaming the tab, or changing its mode
+does not save it. Closing an unused tab discards its draft and staged attachments.
+
 Chats open in tabs at the top of the chat panel. Switching tabs or reopening the
 current chat preserves its running response, tool approvals, queued messages,
 and attachments. Multiple chats can run at once; the local server determines
@@ -495,8 +499,11 @@ automatic loading and search results: default 10, range 1-100. Local keyword
 ranking recognizes paths and camelCase/snake_case symbols, with name and phrase
 boosts. Unrelated notes are omitted. Loading uses no model or embedding service.
 Notes count toward the prompt budget; the lowest-ranked whole notes are removed
-if needed before normal compaction. A disclosure beside each user message shows
-the notes actually loaded. Historical snapshots remain readable after edits or deletion.
+if needed before normal compaction. Each loaded note appears as **Recalled <memory-name>**
+in the normal working session, with expandable contents. When the response finishes,
+these activities collapse inside **Worked for…** with the other tools. Only notes
+sent in an accepted model request appear; batched steering uses the latest query's
+selection. Historical snapshots remain readable after edits or deletion.
 
 Ask the agent to remember a specific durable fact or preference. The agent uses
 `create_memory({ name, contents, id? })`: omit the ID to create an enabled note,
@@ -513,12 +520,22 @@ Markdown contents. Search-result links open notes, rather than chats. Memories
 are historical reference data: current user instructions, project instructions,
 and inspected workspace evidence take precedence.
 
-The **Memories** sidebar tab provides search, Markdown preview/editing, rename,
-enable/disable, and individual deletion with confirmation. Markdown edits use
-normal Save; if another window or external editor changed the note, reopen it
-and apply your changes to the current version. Disabling/deleting a note affects
+The **Memories** sidebar uses the same compact rows and context menu as Chats.
+An active note has a foreground-colored dot. Click a row to expand its Markdown
+contents in place; the context menu offers View, Edit, Enable/Disable, Rename,
+and Delete. Deleting a saved note requires confirmation. **Clear all memories**
+below the list clears saved notes and unsaved new drafts after confirmation,
+including memories hidden by the current search. Chats remain untouched.
+
+**Create new memory** adds a draft row: confirm its name first, then enter its
+contents. The checkmark saves and the cross cancels editing. The Edit button
+under an expanded note opens the same inline editor. Named drafts remain in the
+list until saved or discarded, and in-progress edits survive sidebar reloads.
+A new note is written when its contents are saved. If another window or external
+editor changed a note, cancel and reopen the editor to use the current version.
+Disabling/deleting a note affects
 future automatic retrieval and search. Existing tool results and historical
-loaded-note disclosures remain in the chat.
+recall activities remain in the chat.
 
 There is no background memory generation, generation queue, or retry setting.
 Malformed memory files are excluded individually with a warning; repair or remove

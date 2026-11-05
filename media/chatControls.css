@@ -3,6 +3,10 @@
   --control-radius: 10px;
   --icon-action-size: 28px;
   --icon-action-compact-size: 20px;
+  /* Share muted content across both webviews. An opaque mix also keeps the
+     shimmer's overlapping paint layers consistent in light and dark themes. */
+  --tool-idle-weight: 60%;
+  --tool-idle: color-mix(in srgb, var(--vscode-foreground) var(--tool-idle-weight), var(--vscode-sideBar-background, var(--vscode-editor-background)));
   --surface-fill: color-mix(in srgb, var(--vscode-foreground) 7%, transparent);
   --surface-fill-strong: color-mix(in srgb, var(--vscode-foreground) 16%, transparent);
   --surface-stroke: color-mix(in srgb, var(--vscode-foreground) 9%, transparent);
@@ -13,7 +17,6 @@
   --diff-removed-foreground: var(--vscode-gitDecoration-deletedResourceForeground, var(--vscode-editorGutter-deletedBackground, #c74e39));
   --surface-fill-hover: color-mix(in srgb, var(--vscode-foreground) 8%, transparent);
   --scrollbar-size: 4px;
-  --scrollbar-hover-size: calc(1.5 * var(--scrollbar-size));
   --scrollbar-hover-fill: color-mix(in srgb, var(--vscode-scrollbarSlider-hoverBackground, color-mix(in srgb, var(--vscode-foreground) 40%, transparent)) 85%, var(--vscode-foreground));
   --scrollbar-active-fill: var(--vscode-scrollbarSlider-activeBackground, color-mix(in srgb, var(--vscode-foreground) 55%, transparent));
   --error-foreground: var(--vscode-errorForeground);
@@ -93,21 +96,17 @@ a:not(.workspace-file-link, .tool-path-link):is(:hover, :focus-visible),
 /* Use Chromium's scrollbar parts so native tracks and arrow buttons cannot
    override the shared VS Code styling, including on Linux. */
 * { scrollbar-width: auto; scrollbar-color: auto; }
-/* Reserve the full hit area so widening the thumb never moves content. The
-   transparent inner gap keeps the resting thumb against the outer edge. */
-::-webkit-scrollbar { width: var(--scrollbar-hover-size); height: var(--scrollbar-hover-size); background: transparent; }
+/* Keep the track and thumb equally narrow so rounded ends are never clipped
+   by an inset border. Hover and drag change only the fill. */
+::-webkit-scrollbar { width: var(--scrollbar-size); height: var(--scrollbar-size); background: transparent; }
 ::-webkit-scrollbar-track,
 ::-webkit-scrollbar-track-piece,
 ::-webkit-scrollbar-corner { background: transparent; border: 0; box-shadow: none; }
 ::-webkit-scrollbar-button { display: none; width: 0; height: 0; }
-::-webkit-scrollbar-thumb { min-width: 24px; min-height: 24px; border: 0 solid transparent; border-radius: var(--control-radius); --scrollbar-thumb-fill: var(--vscode-scrollbarSlider-background, color-mix(in srgb, var(--vscode-foreground) 25%, transparent)); background: linear-gradient(var(--scrollbar-thumb-fill), var(--scrollbar-thumb-fill)), var(--vscode-editor-background); background-clip: padding-box; }
-::-webkit-scrollbar-thumb:vertical { border-left-width: calc(var(--scrollbar-hover-size) - var(--scrollbar-size)); }
-::-webkit-scrollbar-thumb:horizontal { border-top-width: calc(var(--scrollbar-hover-size) - var(--scrollbar-size)); }
-:dir(rtl)::-webkit-scrollbar-thumb:vertical { border-left-width: 0; border-right-width: calc(var(--scrollbar-hover-size) - var(--scrollbar-size)); }
-/* Composite theme colors over an opaque base. Hover and drag paint the same
-   fill across the full width, including the extra inward space. */
-::-webkit-scrollbar-thumb:hover { --scrollbar-thumb-fill: var(--scrollbar-hover-fill); background-clip: border-box; }
-::-webkit-scrollbar-thumb:active { --scrollbar-thumb-fill: var(--scrollbar-active-fill); background-clip: border-box; }
+::-webkit-scrollbar-thumb { min-width: 24px; min-height: 24px; border: 0; border-radius: calc(var(--scrollbar-size) / 2); --scrollbar-thumb-fill: var(--vscode-scrollbarSlider-background, color-mix(in srgb, var(--vscode-foreground) 25%, transparent)); background: linear-gradient(var(--scrollbar-thumb-fill), var(--scrollbar-thumb-fill)), var(--vscode-editor-background); }
+/* Composite theme colors over an opaque base without changing geometry. */
+::-webkit-scrollbar-thumb:hover { --scrollbar-thumb-fill: var(--scrollbar-hover-fill); }
+::-webkit-scrollbar-thumb:active { --scrollbar-thumb-fill: var(--scrollbar-active-fill); }
 /* Keep text in place when content starts or stops overflowing. The reserved
    gutter uses the content background instead of a separate track fill. */
 .chat-body, .message-queue, .tool-filelist, .tool-error-result, .tool-change-error,
@@ -116,7 +115,7 @@ pre, textarea { scrollbar-gutter: stable; }
 .tab-btn { flex: 1 1 0; min-width: 0; display: inline-flex; align-items: center; justify-content: center; gap: 6px; background: transparent; color: var(--vscode-descriptionForeground); border: 1px solid transparent; min-height: 28px; box-sizing: border-box; padding: 4px 8px; font: inherit; font-weight: normal; cursor: pointer; border-radius: var(--control-radius); transition: background 0.12s, color 0.12s; }
 .tab-btn svg { flex: 0 0 auto; }
 .tab-btn span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.tab-btn:is(:hover, :focus-visible) { background: var(--surface-fill-hover); color: var(--vscode-foreground); }
+.tab-btn:is(:hover, :focus-visible, :has(:focus-visible)) { background: var(--surface-fill-hover); color: var(--vscode-foreground); }
 .tab-btn.active { background: var(--surface-fill-strong); color: var(--vscode-foreground); }
 /* Mode selectors and chat context menus share all appearance and row geometry.
    Their component rules only position the popup. Actions use the shared quiet-btn
@@ -158,6 +157,3 @@ pre, textarea { scrollbar-gutter: stable; }
 .activity-details { margin-top: 8px; }
 .activity-details > summary { display: flex; align-items: center; gap: 6px; width: fit-content; font-size: 0.86em; }
 .activity-details > .activity-detail-contents, .activity-details > .tool-output-surface { margin-top: 6px; padding: 8px 10px; }
-
-.loaded-memory + .loaded-memory { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--surface-fill-strong); }
-[data-loaded-memories] { margin-top: 8px; }

@@ -20,7 +20,7 @@ import { ChatStorage } from "../../chat/storage.js";
 import { DEFAULT_REASONING_EFFORT, type ReasoningEffort } from "../../chat/reasoningEffort.js";
 import type { ExtToSide, SideTab, SideToExt, ChatTab } from "../messaging.js";
 import { SETTINGS_SECTIONS, type SettingsSection } from "../messaging.js";
-import { MemoryDocuments } from "../memoryDocuments.js";
+import { MemoryPanel } from "../memoryPanel.js";
 
 export class SideViewProvider implements vscode.WebviewViewProvider {
   static readonly viewType = "locality.side";
@@ -34,7 +34,8 @@ export class SideViewProvider implements vscode.WebviewViewProvider {
   private expandedSettings: Set<SettingsSection>;
   private memoryListGeneration = 0;
   private chatListGeneration = 0;
-  private memoryDocuments?: MemoryDocuments;
+  private memoryPanel?: MemoryPanel;
+  private clearingMemories = false;
 
   constructor(
     private context: vscode.ExtensionContext,
@@ -49,6 +50,7 @@ export class SideViewProvider implements vscode.WebviewViewProvider {
       set: (effort: ReasoningEffort) => Promise<void>;
     }
   ) {
+    if (memory) this.memoryPanel = new MemoryPanel(memory, panel => this.post({ type: "memoryPanel", panel }));
     this.featureHost = createSideHost?.(context.secrets, message => this.post(message), context.globalState);
     const expanded = context.globalState?.get<SettingsSection[]>("settings.expandedSections") ?? [];
     this.expandedSettings = new Set(expanded.filter(section => SETTINGS_SECTIONS.includes(section)));
@@ -94,12 +96,17 @@ export class SideViewProvider implements vscode.WebviewViewProvider {
   }
 
   async pushMemories(): Promise<void> {
+    this.memoryPanel?.refresh();
     if (!this.view || this.activeTab !== "memories") return;
     const generation = ++this.memoryListGeneration;
     const storage = this.getStorage();
+    const store = this.memory?.current();
     try {
       const listing = await this.memory?.list() ?? { memories: [], warnings: [] };
-      if (generation === this.memoryListGeneration && storage === this.getStorage()) this.post({ type: "memories", memories: listing.memories.map(note => ({ ...note, revision: noteRevision(note) })), warnings: listing.warnings });
+      if (generation === this.memoryListGeneration && storage === this.getStorage() && store === this.memory?.current()) {
+        this.memoryPanel?.reconcile(listing.memories);
+        this.post({ type: "memories", memories: listing.memories.map(note => ({ ...note, revision: noteRevision(note) })), warnings: listing.warnings });
+      }
     } catch {
       if (generation === this.memoryListGeneration) this.post({ type: "memoryError", error: "Could not load workspace memories." });
     }
@@ -120,24 +127,59 @@ export class SideViewProvider implements vscode.WebviewViewProvider {
   }
 
   async revealMemory(id: string, readonly = true): Promise<void> {
+    await vscode.commands.executeCommand("locality.side.focus");
+    this.view?.show(true);
     await this.openMemory(id, readonly);
   }
 
   private async openMemory(id: string, readonly: boolean): Promise<void> {
-    if (!this.memory) return;
     try {
-      if (!this.memoryDocuments) {
-        this.memoryDocuments = new MemoryDocuments(this.memory);
-        this.context.subscriptions.push(this.memoryDocuments, vscode.workspace.registerFileSystemProvider(
-          MemoryDocuments.scheme, this.memoryDocuments, { isCaseSensitive: true }
-        ));
-      }
-      await this.memoryDocuments.open(id, readonly);
-    } catch (error) { void vscode.window.showErrorMessage((error as Error).message); }
+      this.focusTab("memories");
+      await this.memoryPanel?.open(id, readonly ? "view" : "edit");
+    } catch (error) { this.post({ type: "memoryError", error: (error as Error).message }); }
   }
 
   refreshOpenTabs(): void {
     this.post({ type: "openTabs", tabs: this.onOpenTabs() });
+  }
+
+  private async clearMemories(): Promise<void> {
+    const store = this.memory?.current();
+    if (!store || this.clearingMemories) return;
+    this.clearingMemories = true;
+    let error: string | undefined;
+    try {
+      const { memories } = await store.list();
+      if (store !== this.memory?.current()) return;
+      const editors = this.memoryPanel?.snapshot().editors ?? [];
+      if (editors.some(editor => editor.busy)) throw new Error("Wait for the current memory save to finish before clearing memories.");
+      const draftKeys = new Set(editors.filter(editor => !editor.id).map(editor => editor.key));
+      if (!memories.length && !draftKeys.size) return;
+      const choice = await vscode.window.showWarningMessage(
+        `Delete all ${memories.length} saved ${memories.length === 1 ? "memory" : "memories"} in this workspace?${draftKeys.size ? ` This also discards ${draftKeys.size} unsaved ${draftKeys.size === 1 ? "draft" : "drafts"}.` : ""} This cannot be undone.`,
+        { modal: true }, "Delete all");
+      if (choice !== "Delete all" || store !== this.memory?.current()) return;
+      const failures: string[] = [];
+      for (const note of memories) {
+        if (store !== this.memory?.current()) return;
+        try {
+          await store.delete(note.id, noteRevision(note));
+          if (store !== this.memory?.current()) return;
+          this.memoryPanel?.remove(note.id);
+        } catch (cause) { failures.push(`${note.name}: ${cause instanceof Error ? cause.message : "Could not delete memory."}`); }
+      }
+      if (store !== this.memory?.current()) return;
+      for (const editor of this.memoryPanel?.snapshot().editors ?? []) {
+        if (!editor.id && draftKeys.has(editor.key)) this.memoryPanel?.remove(editor.key);
+      }
+      if (failures.length) error = "Some memories could not be deleted. " + failures.join(" ");
+    } catch (cause) { error = cause instanceof Error ? cause.message : "Could not clear workspace memories."; }
+    finally {
+      this.clearingMemories = false;
+      this.memory?.changed();
+      await this.pushMemories();
+      if (error && store === this.memory?.current()) this.post({ type: "memoryError", error });
+    }
   }
 
   private async onMessage(m: SideToExt): Promise<void> {
@@ -154,9 +196,29 @@ export class SideViewProvider implements vscode.WebviewViewProvider {
         this.post({ type: "focusTab", tab: this.activeTab });
         break;
       case "listMemories": await this.pushMemories(); break;
+      case "clearMemories": await this.clearMemories(); break;
       case "openMemory": await this.openMemory(m.id, m.readonly); break;
-      case "setMemoryEnabled":
+      case "newMemory":
       case "renameMemory":
+      case "openMemoryDraft":
+      case "discardMemoryDraft":
+      case "memoryDraft":
+      case "saveMemoryEditor":
+      case "cancelMemoryEditor":
+      case "closeMemoryEditor": {
+        try {
+          if (m.type === "newMemory") this.memoryPanel?.create();
+          else if (m.type === "renameMemory") await this.memoryPanel?.open(m.id, "name");
+          else if (m.type === "openMemoryDraft") this.memoryPanel?.activateDraft(m.key, m.mode);
+          else if (m.type === "discardMemoryDraft") this.memoryPanel?.remove(m.key);
+          else if (m.type === "memoryDraft") this.memoryPanel?.update(m.key, m);
+          else if (m.type === "cancelMemoryEditor") this.memoryPanel?.cancel(m.key);
+          else if (m.type === "closeMemoryEditor") this.memoryPanel?.close(m.key);
+          else { await this.memoryPanel?.save(m.key); await this.pushMemories(); }
+        } catch (error) { this.post({ type: "memoryError", error: (error as Error).message }); }
+        break;
+      }
+      case "setMemoryEnabled":
       case "deleteMemory": {
         const store = this.memory?.current();
         if (!store) break;
@@ -165,16 +227,12 @@ export class SideViewProvider implements vscode.WebviewViewProvider {
           if (m.type === "setMemoryEnabled") {
             if (store !== this.memory?.current()) break;
             await store.setEnabled(m.id, m.enabled, m.revision);
-          } else if (m.type === "renameMemory") {
-            const name = await vscode.window.showInputBox({ title: "Rename memory", value: note.name,
-              validateInput: value => !value.trim() || value.length > 200 ? "Enter 1-200 characters." : undefined });
-            if (name === undefined || store !== this.memory?.current()) break;
-            await store.save({ id: note.id, name, contents: note.contents }, m.revision);
           } else {
             const choice = await vscode.window.showWarningMessage(
               'Delete memory "' + note.name + '"? This cannot be undone.', { modal: true }, "Delete");
             if (choice !== "Delete" || store !== this.memory?.current()) break;
             await store.delete(note.id, m.revision);
+            this.memoryPanel?.remove(note.id);
           }
           this.memory?.changed();
           await this.pushMemories();
