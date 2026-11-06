@@ -1095,7 +1095,6 @@ function renderMessageActions(parent: HTMLElement, m: Message): HTMLElement | un
     actions = document.createElement("div");
     actions.className = "message-actions";
   }
-  actions.classList.toggle("recovery-actions", isContinuableResponse(m));
   if (actions.dataset.messageActions !== m.id) actions.dataset.messageActions = m.id;
   setHtml(actions, inner);
   return actions;
@@ -1104,7 +1103,7 @@ function renderMessageActions(parent: HTMLElement, m: Message): HTMLElement | un
 function renderMessageActionsHtml(m: Message): string {
   const inner = renderMessageActionsInnerHtml(m);
   if (!inner) return "";
-  return `<div class="message-actions${isContinuableResponse(m) ? " recovery-actions" : ""}" data-message-actions="${m.id}">${inner}</div>`;
+  return `<div class="message-actions" data-message-actions="${m.id}">${inner}</div>`;
 }
 
 function renderMessageActionsInnerHtml(m: Message): string {
