@@ -3,6 +3,7 @@ import type { ChatRecord } from "../../src/chat/types.js";
 import type { MemoryEditor } from "../../src/ui/messaging.js";
 import type { WorkspaceNote } from "../../src/chat/workspaceNotes.js";
 import { hostMessage, webview } from "./harness.js";
+import { steeredConversation } from "../fixtures/steeredConversation.js";
 const note: WorkspaceNote = { version: 1, id: "123e4567-e89b-42d3-a456-426614174001", name: "Parser", contents: "### Reminder\n\nUse **grammar versions**.", createdAt: 1, updatedAt: 2, enabled: true };
 const managed = { ...note, revision: "current-version" };
 const posted = async (page: import("@playwright/test").Page) => page.evaluate(() => (window as unknown as { posted: unknown[] }).posted);
@@ -228,7 +229,54 @@ for (const theme of ["light", "dark"] as const) {
     });
   }
 
-  test(theme + ": live auto recalls follow steering and collapse with finished work", async ({ page }) => {
+  test(theme + ": memories stay after the original user and work stays chronological through steering and reload", async ({ page }) => {
+    await webview(page, theme);
+    await hostMessage(page, { type: "settings", mode: "act", showThinking: true, steerWithEnter: false, autoCompact: false, autoCompactThresholdPercent: 80 });
+    const messages = steeredConversation();
+    const selections = [{ messageTs: 1, memories: [{ ...note, name: "Grammar memory" }] }];
+    const record: ChatRecord = { id: "chat", workspaceRoot: "/workspace", title: "Notes", mode: "act", toolCallingMode: "native", reasoningEffort: "default", totalTokens: 0, createdAt: 1, updatedAt: 12,
+      messages, memorySelections: selections };
+    await hostMessage(page, { kind: "chatLoaded", record: { ...record, messages: messages.slice(0, 1), memorySelections: [] } });
+    await hostMessage(page, { kind: "turnWorkStarted", messageId: "response", startedAt: 2 });
+    await hostMessage(page, { kind: "memorySelections", selections });
+    for (const index of [3, 1, 2, 4, 6, 5, 7]) {
+      const message = messages[index];
+      if (message.role === "assistant") {
+        if (message.reasoningContent) await hostMessage(page, { kind: "thought", messageId: "response", delta: message.reasoningContent });
+        await hostMessage(page, { kind: "text", messageId: "response", delta: message.content });
+      } else if (message.role === "tool") {
+        const tool = message.toolCall!;
+        await hostMessage(page, { kind: "toolCallProposed", toolId: tool.id!, messageId: "response", toolName: tool.name,
+          argsJson: tool.argsJson, category: "read", approvalRequired: false });
+        await hostMessage(page, { kind: "toolCallResolved", toolId: tool.id!, status: tool.status!, resultPreview: message.content });
+      } else {
+        await hostMessage(page, { kind: "userMessage", messageId: "steer", messageTs: message.ts, text: message.content, mode: "act", steering: true });
+      }
+    }
+    const checkChronology = async () => {
+      for (let i = 0; i < 15 && await page.locator('.work-head[aria-expanded="false"]:visible').count(); i++) {
+        await page.locator('.work-head[aria-expanded="false"]:visible').first().click();
+      }
+      while (await page.locator('.thinking-head[aria-expanded="false"]').count()) {
+        await page.locator('.thinking-head[aria-expanded="false"]').first().click();
+      }
+      await expect(page.locator(".tool-name").filter({ hasText: "Recalled" })).toHaveCount(1);
+      const body = await page.locator(".chat-body").innerText();
+      const markers = ["Inspect the parser", "Grammar memory", "Inspect before editing.", "Checking the files.", "parser.ts", "missing.ts",
+        "Only inspect the tests", "Follow the guidance.", "Checking the tests.", "parser.test.ts", "Inspection complete."];
+      for (let i = 0; i < markers.length; i++) {
+        expect(body).toContain(markers[i]);
+        if (i) expect(body.indexOf(markers[i])).toBeGreaterThan(body.indexOf(markers[i - 1]));
+      }
+    };
+    await checkChronology();
+    await hostMessage(page, { kind: "turnEnd", messageId: "response", mode: "act", messageTs: 12 });
+    await checkChronology();
+    await hostMessage(page, { kind: "chatLoaded", record });
+    await checkChronology();
+  });
+
+  test(theme + ": historical steered memory snapshots remain in their original positions", async ({ page }) => {
     await webview(page, theme);
     const record: ChatRecord = { id: "chat", workspaceRoot: "/workspace", title: "Notes", mode: "act", toolCallingMode: "native", reasoningEffort: "default", totalTokens: 0, createdAt: 1, updatedAt: 1,
       messages: [{ role: "user", content: "Parser details?", ts: 1 }] };

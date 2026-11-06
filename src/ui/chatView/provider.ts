@@ -156,6 +156,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       delete transcript.recalledMemories;
       delete transcript.initialMemories;
       delete transcript.memorySources;
+      delete transcript.turnSystemPrompt;
       payload = {
         ...msg,
         contextMessageCount: contextMessages?.length ?? transcript.messages.length,

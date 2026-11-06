@@ -1,5 +1,6 @@
 import { noteResult, validMemoryId, type MemorySelection } from "../../../chat/workspaceNotes.js";
 import { pendingPlanTimestamp } from "../../../chat/planning.js";
+import { chronologicalMessages } from "../../../chat/messageOrder.js";
 import type { CompletionDiagnostics } from "../../../llm/completion.js";
 import { interruptionMessage } from "./interruption.js";
 import { startShiki, normalizeHighlightLanguage, highlightCode, highlightLanguageForPath } from "./highlighting.js";
@@ -3838,7 +3839,7 @@ function loadFromRecord(rec: ChatRecord): void {
   state.notices = [];
   const fileChanges = restoredToolFileChanges(rec);
   let currentUserTs: number | undefined;
-  for (const [index, m] of rec.messages.entries()) {
+  for (const { index, message: m } of chronologicalMessages(rec.messages)) {
     const id = restoredRecordMessageId(index, m.ts);
     if (m.role === "user") {
       if (!m.steering) currentUserTs = m.ts;

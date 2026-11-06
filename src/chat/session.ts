@@ -79,6 +79,7 @@ import { fileUndoPlan, turnFileEdits, undoFiles, type FileUndoSnapshot } from ".
 import { rememberFileWrite, summarizeFileChanges, type FileChangeSummary, type TrackedFileWrite } from "./fileChanges.js";
 import { generateChatTitle } from "./chatTitle.js";
 import { continuationContext } from "./continuation.js";
+import { chronologicalMessages, messageContainsToolCall } from "./messageOrder.js";
 import type { ChatMode } from "./mode.js";
 import { asOpenAiTools, toolsForMode, isMemoryToolName, validateToolArguments } from "../tools/toolDefinitions.js";
 import {
@@ -350,24 +351,14 @@ export class ChatSession {
   }
 
   /**
-   * Tokens of the system prompt (tool catalog included). It is rebuilt for
-   * every request but never stored as a message, so recomputeTokens cannot see
+   * Tokens of the system prompt (tool catalog included). It is separate from
+   * the message transcript, so recomputeTokens cannot see
    * it — without this the ring undercounts by a fixed chunk.
    */
   private async systemPromptTokens(s: HarnessSettings, refreshAgentsMd = true): Promise<number> {
     const nativeTools = this.toolProtocol === "native";
-    const text = buildSystemPrompt({
-      featureSettings: readSettings(),
-      family: this.compatibilityFamily(),
-      mode: this.turnMode(),
-      workspaceRoot: this.workspaceRoot,
-      agentsMd: refreshAgentsMd ? await this.currentAgentsMd() : this.cachedAgentsMd(),
-      userMessageTs: this.latestUserMessageTs(),
-      memoryEnabled: readSettings().memoryEnabled,
-      memories: this.selectedNotes(),
-      supportsVision: this.supportsVision,
-      nativeTools
-    });
+    if (refreshAgentsMd) await this.currentAgentsMd();
+    const text = this.systemPrompt();
     const catalog = nativeTools
       ? `\n<tools>${JSON.stringify(asOpenAiTools(toolsForMode(this.turnMode(), "native", readSettings().memoryEnabled, this.supportsVision, readSettings())))}</tools>`
       : "";
@@ -380,6 +371,23 @@ export class ChatSession {
       return tokens;
     }
     return this.systemPromptTokenCache.tokens;
+  }
+
+  private systemPrompt(): string {
+    const saved = this.record.turnSystemPrompt;
+    if (saved?.messageTs === this.turnUserMessage()?.ts && saved?.protocol === this.toolProtocol) return saved.content;
+    return buildSystemPrompt({
+      featureSettings: readSettings(),
+      family: this.compatibilityFamily(),
+      mode: this.turnMode(),
+      workspaceRoot: this.workspaceRoot,
+      agentsMd: this.cachedAgentsMd(),
+      userMessageTs: this.turnUserMessage()?.ts,
+      memoryEnabled: readSettings().memoryEnabled,
+      memories: this.selectedNotes(),
+      supportsVision: this.supportsVision,
+      nativeTools: this.toolProtocol === "native"
+    });
   }
 
   /** Sync best-effort variant for mid-stream estimates; 0 until first computed. */
@@ -402,11 +410,12 @@ export class ChatSession {
     return this.agentsMdCache;
   }
 
-  private latestUserMessageTs(): number | undefined {
-    // Use the full transcript so compaction and tool continuations retain the
-    // original request time instead of taking the time of a later tool result.
+  private turnUserMessage(): ChatMessage | undefined {
+    // Steering refines this request; it does not replace its system context.
+    // Use the full transcript even when compaction has removed the turn's start.
     for (let i = this.record.messages.length - 1; i >= 0; i--) {
-      if (this.record.messages[i].role === "user") return this.record.messages[i].ts;
+      const message = this.record.messages[i];
+      if (message.role === "user" && !message.steering) return message;
     }
     return undefined;
   }
@@ -693,9 +702,6 @@ export class ChatSession {
         text: message.content, mode: this.turnMode(), steering: true, attachments: message.attachments
       });
     }
-    // Only the latest query selects the system notes for the next request.
-    const latest = messages[messages.length - 1];
-    await this.loadQueryMemories(latest.content, latest.ts);
   }
 
   async sendUserMessage(text: string, attachments: ChatAttachment[] = [], mode: ChatMode = this.record.mode): Promise<void> {
@@ -953,7 +959,7 @@ export class ChatSession {
     this.emit({ kind: "turnWorkStarted", messageId: responseMessageId, startedAt: workStartedAt });
 
     const s = capturedConnectionSettings(readSettings());
-    await this.loadQueryMemories(text, messageTs);
+    if (!edited.steering) await this.loadQueryMemories(text, messageTs);
     if (index === 0) {
       this.queueTitleGeneration(text || `Attachment: ${edited.attachments?.[0]?.fileName ?? "file"}`, s, text);
     }
@@ -969,6 +975,8 @@ export class ChatSession {
     const contextIndex = context?.findIndex(message =>
       message.role === target.role && message.ts === target.ts) ?? -1;
     this.record.messages = this.record.messages.slice(0, index);
+    if (!this.record.messages.some(message => message.ts === this.record.turnSystemPrompt?.messageTs)) delete this.record.turnSystemPrompt;
+    this.pendingMemorySelection = undefined;
     if (index > 0 && context && contextIndex >= 0) {
       // The target survived in the compacted tail, so its preceding summary
       // cannot include the discarded future. Keep that summary instead of
@@ -1068,7 +1076,7 @@ export class ChatSession {
   }
 
   private selectedNotes(): WorkspaceNote[] {
-    const messageTs = this.latestUserMessageTs();
+    const messageTs = this.turnUserMessage()?.ts;
     if (this.pendingMemorySelection && this.pendingMemorySelection.messageTs === messageTs) return this.pendingMemorySelection.memories;
     return this.record.memorySelections?.find(selection => selection.messageTs === messageTs)?.memories ?? [];
   }
@@ -1088,7 +1096,7 @@ export class ChatSession {
   }
 
   private async fitQueryMemories(s: HarnessSettings): Promise<void> {
-    if (!this.pendingMemorySelection || this.pendingMemorySelection.messageTs !== this.latestUserMessageTs()) return;
+    if (!this.pendingMemorySelection || this.pendingMemorySelection.messageTs !== this.turnUserMessage()?.ts) return;
     const selected = this.selectedNotes();
     const limit = this.contextLimit() - outputTokenReserve(this.contextLimit());
     while (selected.length && await this.countRequestPrompt(s, await this.buildPromptMessages()) >= limit) {
@@ -1096,13 +1104,20 @@ export class ChatSession {
     }
   }
 
-  private commitQueryMemories(): void {
+  private commitRequestContext(systemPrompt: string): void {
+    const messageTs = this.turnUserMessage()?.ts;
+    if (messageTs === undefined) return;
     const selection = this.pendingMemorySelection;
-    if (!selection || selection.messageTs !== this.latestUserMessageTs()) return;
-    this.pendingMemorySelection = undefined;
-    this.record.memorySelections = [...(this.record.memorySelections ?? []).filter(previous => previous.messageTs !== selection.messageTs), selection];
-    this.refreshMemoryVisibility();
-    void this.saveRecord().catch(() => this.emit({ kind: "notice", text: "Could not save the loaded memory history." }));
+    const saved = this.record.turnSystemPrompt;
+    const newSelection = selection?.messageTs === messageTs;
+    if (!newSelection && saved?.messageTs === messageTs && saved.protocol === this.toolProtocol && saved.content === systemPrompt) return;
+    this.record.turnSystemPrompt = { messageTs, protocol: this.toolProtocol, content: systemPrompt };
+    if (newSelection) {
+      this.pendingMemorySelection = undefined;
+      this.record.memorySelections = [...(this.record.memorySelections ?? []).filter(previous => previous.messageTs !== messageTs), selection];
+      this.refreshMemoryVisibility();
+    }
+    void this.saveRecord().catch(() => this.emit({ kind: "notice", text: "Could not save the request context." }));
   }
 
   refreshMemoryVisibility(): void {
@@ -1155,7 +1170,7 @@ export class ChatSession {
       return false;
     }
     await recomputeTokens(s.endpoint, this.record, s.model);
-    const latestUser = [...this.record.messages].reverse().find(message => message.role === "user");
+    const latestUser = this.turnUserMessage();
     if (latestUser && this.pendingMemorySelection?.messageTs !== latestUser.ts
       && !this.record.memorySelections?.some(selection => selection.messageTs === latestUser.ts)) {
       // Continue after a reload may resume a query that never reached the server.
@@ -1184,7 +1199,7 @@ export class ChatSession {
   private async buildPromptMessagesForRequest(
     s: HarnessSettings,
     options: { reload: boolean; repairNote?: string }
-  ): Promise<{ messages: PromptMessage[]; tokens: number } | undefined> {
+  ): Promise<{ messages: PromptMessage[]; tokens: number; systemPrompt: string } | undefined> {
     if (!(await this.prepareContextForModelRequest(s, options))) return undefined;
 
     const limit = this.contextLimit();
@@ -1195,7 +1210,8 @@ export class ChatSession {
       });
       return undefined;
     }
-    let messages = await this.buildPromptMessages();
+    const systemPrompt = this.systemPrompt();
+    let messages = await this.buildPromptMessages(systemPrompt);
     if (options.repairNote) messages = withPromptRepair(messages, options.repairNote);
     // Count the tokens of the prompt that is ACTUALLY sent (system prompt +
     // re-rendered tool calls + wrapped results), not the sum of stored
@@ -1206,7 +1222,7 @@ export class ChatSession {
     if (s.autoCompact && promptTok >= Math.min(promptLimit, autoCompactTriggerTokens(limit, s.autoCompactThresholdPercent))) {
       const compacted = await this.runCompact("auto", options);
       if (compacted) {
-        messages = await this.buildPromptMessages();
+        messages = await this.buildPromptMessages(systemPrompt);
         if (options.repairNote) messages = withPromptRepair(messages, options.repairNote);
         promptTok = await this.countRequestPrompt(s, messages);
       }
@@ -1218,7 +1234,7 @@ export class ChatSession {
       return undefined;
     }
 
-    return { messages, tokens: promptTok };
+    return { messages, tokens: promptTok, systemPrompt };
   }
 
   private generationRequest(s: HarnessSettings, messages: PromptMessage[]): ChatCompletionRequest {
@@ -1538,7 +1554,7 @@ export class ChatSession {
       // Guidance can arrive during context preparation or compaction.
       if (this.pendingSteering.length) continue;
 
-      const { messages } = request;
+      const { messages, systemPrompt } = request;
       serverUsageTotal = undefined;
       let promptTokenCount = request.tokens;
       let generatedChars = 0;
@@ -1587,7 +1603,7 @@ export class ChatSession {
           {
             ...this.generationRequest(s, messages),
             onResponseAccepted: () => {
-              this.commitQueryMemories();
+              this.commitRequestContext(systemPrompt);
               // HTTP headers can arrive while this request is still queued.
               // Keep a title wait until prompt progress or model output proves
               // the continuation has started using the server.
@@ -1597,7 +1613,7 @@ export class ChatSession {
           AbortSignal.any([this.abort.signal, responseAbort.signal])
         )) {
           // Stream output also proves acceptance for transports without a callback.
-          this.commitQueryMemories();
+          this.commitRequestContext(systemPrompt);
           if (this.pendingSteering.length) break;
           if (chunk.kind === "promptProgress") {
             if (promptTokenCount !== chunk.totalTokens) {
@@ -2740,24 +2756,12 @@ export class ChatSession {
     }
   }
 
-  private async buildPromptMessages(): Promise<PromptMessage[]> {
-    const sys = buildSystemPrompt({
-      featureSettings: readSettings(),
-      family: this.compatibilityFamily(),
-      mode: this.turnMode(),
-      workspaceRoot: this.workspaceRoot,
-      agentsMd: this.cachedAgentsMd(),
-      userMessageTs: this.latestUserMessageTs(),
-      memoryEnabled: readSettings().memoryEnabled,
-      memories: this.selectedNotes(),
-      supportsVision: this.supportsVision,
-      nativeTools: this.toolProtocol === "native"
-    });
+  private async buildPromptMessages(sys = this.systemPrompt()): Promise<PromptMessage[]> {
     if (this.toolProtocol === "native") return this.buildNativePromptMessages(sys);
     const msgs: { role: "system" | "user" | "assistant" | "tool"; content: string }[] = [
       { role: "system", content: sys }
     ];
-    for (const m of modelMessages(this.record)) {
+    for (const { message: m } of chronologicalMessages(modelMessages(this.record))) {
       if (m.role === "tool") {
         const name = m.toolCall?.name ?? "tool";
         const call = renderToolCallForPrompt(this.compatibilityFamily(), name, m.toolCall?.argsJson ?? "{}");
@@ -2889,11 +2893,6 @@ export class ChatSession {
     }
     return messages;
   }
-}
-
-function messageContainsToolCall(message: ChatMessage): boolean {
-  return Array.isArray(message.events)
-    && message.events.some(event => !!event && typeof event === "object" && (event as { kind?: unknown }).kind === "toolCall");
 }
 
 function asThoughtEvents(events: ParsedEvent[]): ParsedEvent[] {

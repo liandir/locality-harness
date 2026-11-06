@@ -113,6 +113,8 @@ export interface ChatRecord {
   contextMessages?: ChatMessage[];
   /** Accepted per-query retrieval snapshots; rendered as work activities, never note ownership. */
   memorySelections?: MemorySelection[];
+  /** Host-only accepted prompt for the latest turn; steering and Continue reuse it. */
+  turnSystemPrompt?: { messageTs: number; protocol: "native" | "legacy"; content: string };
   /** Legacy chat summary fields: read-only compatibility. */
   memory?: ChatMemory;
   memoryAttempt?: MemoryAttempt;
