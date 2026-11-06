@@ -77,10 +77,11 @@ export function questionIcon(): string {
 }
 
 export function forkIcon(): string {
-  return `<svg viewBox="0 0 20 18" width="17" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
-    <path d="M2.5 9H7c3 0 3.75 5 6.75 5M8 6.5C10.5 6.5 11.25 4 13.75 4"/>
-    <circle cx="16" cy="4" r="2.25"/>
-    <circle cx="16" cy="14" r="2.25"/>
+  return `<svg viewBox="1.96 0 20 18" width="17" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+    <path d="M5.91 9H11L14.6 12.6"/>
+    <path d="M12.5 7.5L14.6 5.4" stroke-linecap="butt"/>
+    <circle cx="16" cy="4" r="2" fill="currentColor"/>
+    <circle cx="16" cy="14" r="2"/>
   </svg>`;
 }
 
