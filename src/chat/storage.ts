@@ -238,6 +238,9 @@ export class ChatStorage {
     forked.mode = rec.mode;
     forked.reasoningEffort = normalizeReasoningEffort(rec.reasoningEffort);
     forked.messages = structuredClone(rec.messages.slice(0, end));
+    if (rec.turnSystemPrompt && forked.messages.some(message => message.ts === rec.turnSystemPrompt?.messageTs)) {
+      forked.turnSystemPrompt = { ...rec.turnSystemPrompt };
+    }
     forked.memorySelections = rec.memorySelections?.filter(selection => forked.messages.some(message => message.role === "user" && message.ts === selection.messageTs)).map(selection => structuredClone(selection));
     forked.memorySources = rec.memorySources && { ...rec.memorySources };
     if (forked.messages.some(message => message.role === "assistant" && message.ts === rec.pendingPlanMessageTs)) {
@@ -328,6 +331,10 @@ export class ChatStorage {
       mode: normalizeChatMode(rec.mode),
       reasoningEffort: normalizeReasoningEffort(rec.reasoningEffort),
       messages,
+      turnSystemPrompt: rec.turnSystemPrompt && Number.isFinite(rec.turnSystemPrompt.messageTs)
+        && messages.some(message => message.role === "user" && !message.steering && message.ts === rec.turnSystemPrompt?.messageTs)
+        && ["native", "legacy"].includes(rec.turnSystemPrompt.protocol) && typeof rec.turnSystemPrompt.content === "string"
+        ? rec.turnSystemPrompt : undefined,
       memorySelections: Array.isArray(rec.memorySelections) ? rec.memorySelections.filter(selection => selection && Number.isFinite(selection.messageTs) && messages.some(message => message.role === "user" && message.ts === selection.messageTs))
         .map(selection => ({ messageTs: selection.messageTs, memories: Array.isArray(selection.memories) ? selection.memories.filter(validWorkspaceNote).slice(0, MAX_MEMORY_COUNT) : [] })) : undefined,
       memory: validMemory(rec.memory) ? rec.memory : undefined,

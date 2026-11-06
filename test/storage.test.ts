@@ -18,6 +18,28 @@ afterEach(async () => {
 });
 
 describe("ChatStorage", () => {
+  it("retains accepted turn prompts on reload and full forks, excluding them from earlier forks", async () => {
+    const storage = new ChatStorage(ws, chatsRoot);
+    const rec = storage.newRecord("native");
+    rec.messages = [
+      { role: "user", content: "Earlier request", ts: 1 },
+      { role: "assistant", content: "Earlier answer", ts: 2 },
+      { role: "user", content: "Current request", ts: 3 },
+      { role: "user", content: "Guidance", steering: true, ts: 4 }
+    ];
+    rec.turnSystemPrompt = { messageTs: 3, protocol: "native", content: "Original system context" };
+    await storage.save(rec);
+    const loaded = (await storage.load(rec.id))!;
+    expect(loaded.turnSystemPrompt).toEqual(rec.turnSystemPrompt);
+    const full = await storage.fork(loaded);
+    expect((await storage.load(full.id))?.turnSystemPrompt).toEqual(rec.turnSystemPrompt);
+    const earlier = await storage.fork(loaded, 1);
+    expect((await storage.load(earlier.id))?.turnSystemPrompt).toBeUndefined();
+    rec.turnSystemPrompt.messageTs = 4;
+    await storage.save(rec);
+    expect((await storage.load(rec.id))?.turnSystemPrompt).toBeUndefined();
+  });
+
   it("preserves historical memory navigation on reload and fork, filtering invalid source references", async () => {
     const storage = new ChatStorage(ws, chatsRoot);
     const rec = storage.newRecord("native");

@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { ChatStorage, type ChatRecord } from "../src/chat/storage.js";
 import type { ChatSession, UiEvent } from "../src/chat/session.js";
 import { editDiffCases } from "./fixtures/editDiff.js";
+import { steeredConversation } from "./fixtures/steeredConversation.js";
 
 const planText = (markdown: string) => `<proposed_plan>\n${markdown}\n</proposed_plan>`;
 
@@ -1432,6 +1433,30 @@ describe("ChatSession", () => {
     expect(messages[0].content).toContain("[context summary]\nGOAL: finish the refactor");
   });
 
+  it.each(["native", "legacy"] as const)("replays assistant preambles, tools and steering chronologically in %s context", async toolProtocol => {
+    const { ChatSession } = await import("../src/chat/session.js");
+    const record = newRecord();
+    record.messages = steeredConversation();
+    const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record, emit: () => {} });
+    const internal = session as unknown as { toolProtocol: "native" | "legacy"; buildPromptMessages(): Promise<import("../src/llm/client.js").LlmMessage[]> };
+    internal.toolProtocol = toolProtocol;
+    try {
+      const messages = await internal.buildPromptMessages();
+      const prompt = JSON.stringify(messages);
+      const markers = ["Inspect the parser", "Checking the files.", "First file contents", "error: missing",
+        "Only inspect the tests", "Checking the tests.", "Test file contents", "Inspection complete."];
+      for (let i = 1; i < markers.length; i++) {
+        expect(prompt.indexOf(markers[i])).toBeGreaterThan(prompt.indexOf(markers[i - 1]));
+      }
+      if (toolProtocol === "native") {
+        expect(messages.map(message => message.role)).toEqual(["system", "user", "assistant", "tool", "tool", "user", "assistant", "tool", "assistant"]);
+        expect(messages[2].reasoning_content).toBe("Inspect before editing.");
+        expect(messages[6].reasoning_content).toBe("Follow the guidance.");
+        expect(messages[2].tool_calls?.map(call => call.id)).toEqual(["read", "missing"]);
+      }
+    } finally { await session.shutdown(); }
+  });
+
   it.each(["native", "legacy"] as const)("uses the latest saved user time only in %s system context after compaction", async toolProtocol => {
     const { ChatSession } = await import("../src/chat/session.js");
     const record = newRecord();
@@ -1456,7 +1481,7 @@ describe("ChatSession", () => {
     internal.toolProtocol = toolProtocol;
     const messages = await internal.buildPromptMessages();
     expect(messages[0].role).toBe("system");
-    expect(messages[0].content).toContain(`Latest user prompt time: ${new Date(latestTs).toISOString()}`);
+    expect(messages[0].content).toContain(`User request time: ${new Date(latestTs).toISOString()}`);
     expect(messages[0].content).toContain("only to contextualize the current request relative to workspace memories");
     expect(JSON.stringify(messages)).not.toContain(new Date(answerTs).toISOString());
     expect(JSON.stringify(messages)).not.toContain(new Date(firstTs).toISOString());
@@ -4798,7 +4823,7 @@ describe("steering an active turn", () => {
     await fs.rm(workspaceRoot, { recursive: true, force: true });
   });
 
-  it.each(["act", "plan", "review"] as const)("interrupts generation and preserves the %s policy while refreshing the query timestamp", async mode => {
+  it.each(["act", "plan", "review"] as const)("interrupts generation and preserves the complete %s system prompt", async mode => {
     const requests: import("../src/llm/client.js").ChatCompletionRequest[] = [];
     let requestSignal: AbortSignal | undefined;
     mocks.streamChat.mockImplementation(async function* (_endpoint, request, signal: AbortSignal) {
@@ -4822,12 +4847,8 @@ describe("steering an active turn", () => {
     expect(requestSignal?.aborted).toBe(true);
     await turn;
     expect(requests).toHaveLength(2);
-    const policy = (message: typeof requests[number]["messages"][number]) => ({
-      ...message, content: String(message.content).replace(/Latest user prompt time: \S+/, "Latest user prompt time: <timestamp>")
-    });
-    expect(policy(requests[1].messages[0])).toEqual(policy(requests[0].messages[0]));
-    const steeringTs = record.messages.find(message => message.steering)!.ts;
-    expect(requests[1].messages[0].content).toContain(`Latest user prompt time: ${new Date(steeringTs).toISOString()}`);
+    expect(requests[1].messages[0]).toEqual(requests[0].messages[0]);
+    expect(requests[1].messages[0].content).toContain(`User request time: ${new Date(record.messages[0].ts).toISOString()}`);
     expect(requests[1].tools).toEqual(requests[0].tools);
     expect(requests[1].reasoning_effort).toEqual(requests[0].reasoning_effort);
     expect(requests[1].messages.filter(m => m.role === "system")).toHaveLength(1);
@@ -5453,34 +5474,119 @@ describe("automatic note budgeting and steering", () => {
       expect(events.some(e => e.kind === "compactStart")).toBe(false);
     } finally { await session.shutdown(); await fs.rm(root, { recursive: true, force: true }); }
   });
-  it("replaces the current selection for steering and keeps it stable through tools", async () => {
+  it.each(["llama.cpp", "vllm"] as const)("preserves the full system prompt through steering and tools on %s", async backend => {
     const { MemoryStore } = await import("../src/chat/memoryStore.js");
     const { ChatSession } = await import("../src/chat/session.js");
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "locality-memory-steer-"));
     const store = new MemoryStore(root);
     await store.save({ name: "Parser", contents: "PARSER_STEER_SENTINEL" });
     await store.save({ name: "Colors", contents: "COLOR_STEER_SENTINEL" });
-    mocks.settings.memoryAutoLoad = true;
+    mocks.settings.memoryAutoLoad = true; mocks.backend = backend;
+    await fs.writeFile(path.join(root, "AGENTS.md"), "Original project instructions.");
     const record = newRecord(), prompts: string[] = [];
     const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: root, record, emit: () => {} });
     let step = 0;
     mocks.streamChat.mockImplementation(async function* (_endpoint, request) {
       prompts.push(request.messages[0].content);
-      if (step++ === 0) { yield { kind: "text", text: "Looking at parser" }; expect(session.steerUserMessage("Colors")).toBe(true); }
+      if (step++ === 0) {
+        yield { kind: "text", text: "Looking at parser" };
+        await fs.writeFile(path.join(root, "AGENTS.md"), "Changed project instructions.");
+        expect(session.steerUserMessage("Colors")).toBe(true);
+      }
       else if (step === 2) yield { kind: "toolCall", name: "list_dir", id: "list", argsJson: '{"path":"."}' };
       else yield { kind: "text", text: "Done" };
     });
     try {
       await session.sendUserMessage("Parser");
       expect(prompts[0]).toContain("PARSER_STEER_SENTINEL");
-      for (const prompt of prompts.slice(1)) { expect(prompt).toContain("COLOR_STEER_SENTINEL"); expect(prompt).not.toContain("PARSER_STEER_SENTINEL"); }
-      expect(record.memorySelections).toHaveLength(2);
+      for (const prompt of prompts.slice(1)) expect(prompt).toBe(prompts[0]);
+      expect(record.memorySelections).toHaveLength(1);
       expect(prompts.length).toBeGreaterThanOrEqual(3);
+      await session.sendUserMessage("Colors");
+      expect(prompts.at(-1)).toContain("COLOR_STEER_SENTINEL");
+      expect(prompts.at(-1)).not.toContain("PARSER_STEER_SENTINEL");
+      expect(prompts.at(-1)).toContain("Changed project instructions.");
+      expect(record.memorySelections).toHaveLength(2);
     } finally { await session.shutdown(); await fs.rm(root, { recursive: true, force: true }); }
   });
 });
 
 describe("committed automatic memory selections", () => {
+  it("preserves a steered turn's accepted prompt after reopening, then refreshes an edited root request", async () => {
+    const { MemoryStore, noteRevision } = await import("../src/chat/memoryStore.js");
+    const { ChatSession } = await import("../src/chat/session.js");
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "locality-steer-resume-"));
+    const store = new MemoryStore(root), storage = new ChatStorage(root, path.join(root, "chats"));
+    const note = (await store.save({ name: "Parser", contents: "ORIGINAL_NOTE" })).note;
+    await store.save({ name: "Colors", contents: "COLOR_NOTE" });
+    await fs.writeFile(path.join(root, "AGENTS.md"), "ORIGINAL_INSTRUCTIONS");
+    mocks.settings.memoryAutoLoad = true;
+    const record = storage.newRecord("native"), prompts: string[] = [];
+    let session = new ChatSession({ storage, workspaceRoot: root, record, emit: () => {} });
+    mocks.streamChat.mockImplementation(async function* (_endpoint, request) {
+      prompts.push(request.messages[0].content);
+      if (prompts.length === 1) {
+        yield { kind: "text", text: "Starting." };
+        session.steerUserMessage("Colors");
+      } else {
+        request.onResponseAccepted();
+        throw new Error("Disconnected after steering");
+      }
+    });
+    try {
+      await session.sendUserMessage("Parser");
+      expect(prompts).toHaveLength(2);
+      expect(prompts[1]).toBe(prompts[0]);
+      await session.shutdown();
+      const saved = (await storage.load(record.id))!;
+      expect(saved.turnSystemPrompt?.content).toBe(prompts[0]);
+      expect(saved.memorySelections).toEqual([{ messageTs: saved.messages[0].ts, memories: [note] }]);
+      await store.save({ ...note, contents: "UPDATED_NOTE" }, noteRevision(note));
+      await fs.writeFile(path.join(root, "AGENTS.md"), "UPDATED_INSTRUCTIONS");
+      session = new ChatSession({ storage, workspaceRoot: root, record: saved, emit: () => {} });
+      mocks.streamChat.mockImplementation(async function* (_endpoint, request) {
+        prompts.push(request.messages[0].content);
+        yield { kind: "text", text: "Done." };
+      });
+      expect(await session.continueTurn(saved.messages.at(-1)!.ts)).toBe(true);
+      expect(prompts[2]).toBe(prompts[0]);
+      expect(saved.memorySelections).toHaveLength(1);
+      await session.editUserMessage(saved.messages[0].ts, "Parser revised");
+      expect(prompts.at(-1)).toContain("UPDATED_NOTE");
+      expect(prompts.at(-1)).toContain("UPDATED_INSTRUCTIONS");
+      expect(prompts.at(-1)).not.toContain("ORIGINAL_NOTE");
+    } finally { await session.shutdown(); await fs.rm(root, { recursive: true, force: true }); }
+  });
+
+  it("selects notes from the original request when steering arrives before the first generation", async () => {
+    const { MemoryStore } = await import("../src/chat/memoryStore.js");
+    const { ChatSession } = await import("../src/chat/session.js");
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "locality-steer-preflight-"));
+    const store = new MemoryStore(root);
+    const note = (await store.save({ name: "Parser", contents: "ORIGINAL_NOTE" })).note;
+    await store.save({ name: "Colors", contents: "COLOR_NOTE" });
+    mocks.settings.memoryAutoLoad = true;
+    let ready!: (size: number) => void;
+    mocks.fetchServerContextSize.mockImplementationOnce(() => new Promise(resolve => { ready = resolve; }));
+    const record = newRecord();
+    const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: root, record, emit: () => {} });
+    mocks.streamChat.mockImplementation(async function* (_endpoint, request) {
+      expect(request.messages[0].content).toContain("ORIGINAL_NOTE");
+      expect(request.messages[0].content).not.toContain("COLOR_NOTE");
+      expect(request.messages.at(-1)).toMatchObject({ role: "user", content: "Colors" });
+      yield { kind: "text", text: "Done." };
+    });
+    try {
+      const turn = session.sendUserMessage("Parser");
+      await vi.waitFor(() => expect(ready).toBeDefined());
+      expect(session.steerUserMessage("Colors")).toBe(true);
+      ready(32768);
+      await turn;
+      expect(mocks.streamChat).toHaveBeenCalledOnce();
+      expect(record.memorySelections).toEqual([{ messageTs: record.messages[0].ts, memories: [note] }]);
+    } finally { await session.shutdown(); await fs.rm(root, { recursive: true, force: true }); }
+  });
+
   it.each([
     ["llama.cpp", false], ["vllm", false], ["llama.cpp", true], ["vllm", true]
   ] as const)("fits notes with fresh project instructions on %s (previously cached: %s)", async (backend, cached) => {
@@ -5515,13 +5621,13 @@ describe("committed automatic memory selections", () => {
     } finally { await session.shutdown(); await fs.rm(root, { recursive: true, force: true }); }
   });
 
-  it("publishes only the selection used by a batch of steering messages", async () => {
+  it("keeps the original selection and all guidance for a batch of steering messages", async () => {
     const { MemoryStore } = await import("../src/chat/memoryStore.js");
     const { ChatSession } = await import("../src/chat/session.js");
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "locality-memory-batched-steer-"));
     const store = new MemoryStore(root);
-    await store.save({ name: "Parser", contents: "UNUSED_PARSER_SENTINEL" });
-    const colors = (await store.save({ name: "Colors", contents: "USED_COLORS_SENTINEL" })).note;
+    const parser = (await store.save({ name: "Parser", contents: "ORIGINAL_PARSER_SENTINEL" })).note;
+    await store.save({ name: "Colors", contents: "UNUSED_COLORS_SENTINEL" });
     mocks.settings.memoryAutoLoad = true;
     const record = newRecord(), events: UiEvent[] = [], prompts: string[] = [];
     const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: root, record, emit: e => events.push(e) });
@@ -5529,22 +5635,23 @@ describe("committed automatic memory selections", () => {
       prompts.push(request.messages[0].content);
       if (prompts.length === 1) {
         yield { kind: "text", text: "Starting." };
-        expect(session.steerUserMessage("Parser")).toBe(true);
+        expect(session.steerUserMessage("Keep it brief")).toBe(true);
         expect(session.steerUserMessage("Colors")).toBe(true);
       } else yield { kind: "text", text: "Done." };
     });
     try {
-      await session.sendUserMessage("Begin");
+      await session.sendUserMessage("Parser");
       expect(prompts).toHaveLength(2);
-      expect(prompts[1]).toContain("USED_COLORS_SENTINEL");
-      expect(prompts.join("\n")).not.toContain("UNUSED_PARSER_SENTINEL");
-      expect(record.messages.filter(m => m.role === "user").map(m => m.content)).toEqual(["Begin", "Parser", "Colors"]);
-      expect(record.memorySelections).toHaveLength(2);
-      expect(record.memorySelections?.at(-1)?.memories).toEqual([colors]);
-      expect(events.filter(e => e.kind === "memorySelections").flatMap(e => e.selections.flatMap(s => s.memories)).every(note => note.id === colors.id)).toBe(true);
+      expect(prompts[1]).toBe(prompts[0]);
+      expect(prompts[1]).toContain("ORIGINAL_PARSER_SENTINEL");
+      expect(prompts.join("\n")).not.toContain("UNUSED_COLORS_SENTINEL");
+      expect(record.messages.filter(m => m.role === "user").map(m => m.content)).toEqual(["Parser", "Keep it brief", "Colors"]);
+      expect(record.memorySelections).toHaveLength(1);
+      expect(record.memorySelections?.[0].memories).toEqual([parser]);
+      expect(events.filter(e => e.kind === "memorySelections").flatMap(e => e.selections.flatMap(s => s.memories)).every(note => note.id === parser.id)).toBe(true);
       const userIndex = events.findIndex(e => e.kind === "userMessage" && e.text === "Colors");
       const selectionIndex = events.findIndex(e => e.kind === "memorySelections" && e.selections.some(s => s.memories.length));
-      expect(selectionIndex).toBeGreaterThan(userIndex);
+      expect(selectionIndex).toBeLessThan(userIndex);
       expect(record.messages.filter(m => m.role === "tool")).toEqual([]);
     } finally { await session.shutdown(); await fs.rm(root, { recursive: true, force: true }); }
   });
@@ -5573,6 +5680,7 @@ describe("committed automatic memory selections", () => {
       await session.shutdown();
       const saved = (await storage.load(record.id))!;
       expect(saved.memorySelections).toEqual(record.memorySelections);
+      expect(saved.turnSystemPrompt !== undefined).toBe(accepted);
       const updated = (await store.save({ ...note, contents: "UPDATED_RULES_SENTINEL" }, noteRevision(note))).note;
       session = new ChatSession({ storage, workspaceRoot: root, record: saved, emit: e => events.push(e) });
       mocks.streamChat.mockImplementation(async function* (_endpoint, request) {

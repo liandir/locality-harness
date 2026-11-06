@@ -83,14 +83,14 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
    user action backgrounds align with the outer edge of their bubble. */
 .message-actions { --message-action-outset: calc((var(--icon-action-size) - 14px) / 2); display: flex; align-items: center; gap: 1px; min-height: var(--icon-action-size); margin-top: -2px; }
 .message-action-buttons { display: inline-flex; flex: 0 0 auto; gap: 1px; }
-@media (hover: hover) {
-  /* Preserve spacing and keyboard access while revealing only this message's footer. */
-  .msg > .message-actions { opacity: 0; pointer-events: none; }
-  .msg:is(:hover, :focus-within) > .message-actions { opacity: 1; pointer-events: auto; }
-}
 .msg.user > .message-actions { align-self: flex-end; flex-direction: row-reverse; gap: 15px; max-width: 90%; }
 .msg.assistant > .message-actions { align-self: flex-start; margin-inline-start: calc(-1 * var(--message-action-outset)); }
-.msg > .message-actions.recovery-actions { opacity: 1; pointer-events: auto; }
+/* Keep the divider below the final answer and any edit summary. */
+.msg.assistant:has(> .final-answer-part) > :has(+ .message-actions) {
+  border-bottom: 1px solid var(--surface-stroke);
+  padding-bottom: calc(1.5 * var(--chat-part-gap));
+}
+.msg.assistant:has(> .final-answer-part) > .message-actions { margin-top: 0; }
 .message-actions .message-mode { margin-inline-start: 7px; margin-inline-end: 4px; }
 .message-date { flex: 0 0 auto; margin-inline: 7px; font-variant-numeric: tabular-nums; color: var(--vscode-descriptionForeground); font-size: 0.82em; line-height: 1.35; white-space: nowrap; }
 .msg.user .message-actions > :is(.message-mode, .message-date) { margin-inline: 0; }

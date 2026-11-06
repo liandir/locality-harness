@@ -226,13 +226,21 @@ Markdown directly below the selected title and shared icon controls for editing.
 Draft keys reject actions from replaced editors; new notes reach storage only
 after their contents are confirmed. Failed and stale writes retain the draft.
 
-Automatic selection occurs for each user message, stays stable through tools,
+Automatic selection occurs for each ordinary user turn, stays stable through steering and tools,
 and enters the shared system-prompt builder and normal backend token counting.
 Refresh project instructions before fitting notes and drop lowest-ranked whole notes
 before overflow/compaction. Keep candidates private until the server accepts the
-request; batched steering selects only for the latest query. Persist retrieval
-snapshots, never synthetic recall calls or ownership. The webview projects each
-snapshot into ordinary recall tool cards in the response's work timeline, including
-after steering, with stable IDs and the shared disclosure and output surfaces.
+request. Persist the accepted harness prompt in the host-only `turnSystemPrompt`,
+keyed by the original user message and tool protocol, alongside retrieval snapshots.
+Steering preserves the prompt, reference timestamp and selection; Continue reuses
+them after reload. New ordinary turns and edits of the original request refresh them.
+Compaction summaries remain separate, and protocol fallback can rebuild the prompt
+for the required tool format. Never persist synthetic recall calls or ownership.
+The webview projects snapshots into ordinary recall cards after the original user
+bubble and before the response's work, with stable IDs and shared surfaces. Older
+snapshots associated with steering retain their historical positions.
+`chat/messageOrder.ts` restores assistant preambles before their saved tool results
+for the UI and legacy prompt replay, matching native prompt chronology while keeping
+original record indices for UI identities.
 The memory tool is the explicit write exception in Plan and Review; file tools
 retain their mode and approval rules. Native calls still require terminal evidence.

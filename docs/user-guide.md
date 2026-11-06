@@ -489,10 +489,11 @@ Two independent workspace switches are off by default:
   file tools. Saving notes is automatic in Act, Plan, and Review, without an edit
   approval prompt. Search and recall retain the read-approval setting.
 - **Chat > Auto-load memories** (`locality.memoryAutoLoad`) ranks enabled notes
-  for every new user query, including queued messages and steering. The old
+  for every new user turn, including queued messages. The old
   chat-start preference is preserved under this setting. Selected notes go into
-  one reference-data section of the system prompt; each new query replaces the
-  previous selection. Tool continuations keep the current selection.
+  one reference-data section of the system prompt; each new turn replaces the
+  previous selection. Steering appends guidance while preserving that turn's
+  system prompt and memories, as do tool continuations and Continue after reload.
 
 **Maximum memories / search results** (`locality.memoryMaxCount`) caps both
 automatic loading and search results: default 10, range 1-100. Local keyword
@@ -502,8 +503,10 @@ Notes count toward the prompt budget; the lowest-ranked whole notes are removed
 if needed before normal compaction. Each loaded note appears as **Recalled <memory-name>**
 in the normal working session, with expandable contents. When the response finishes,
 these activities collapse inside **Worked for…** with the other tools. Only notes
-sent in an accepted model request appear; batched steering uses the latest query's
-selection. Historical snapshots remain readable after edits or deletion.
+sent in an accepted model request appear. Automatic recalls stay after the original
+user bubble and before the response's work; steering adds no automatic recalls.
+The agent can still explicitly search or recall notes when memory tools are enabled.
+Historical snapshots remain readable after edits or deletion.
 
 Ask the agent to remember a specific durable fact or preference. The agent uses
 `create_memory({ name, contents, id? })`: omit the ID to create an enabled note,
