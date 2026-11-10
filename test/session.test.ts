@@ -140,6 +140,7 @@ beforeEach(() => {
     mockCommandHandle(mocks.runCommand(command, cwd, signal, onOutput))
   );
   mocks.settings.personalization = "";
+  mocks.settings.model = "test-model";
   mocks.settings.autoapproveReads = true;
   mocks.settings.autoapproveWrites = false;
   mocks.settings.autoapproveCommands = false;
@@ -622,14 +623,18 @@ describe("session shutdown", () => {
 
 describe("ChatSession", () => {
 
-  it("keeps ordinary prompt processing out of the context-loading status", async () => {
+  it("labels reported prompt processing as context loading on every turn", async () => {
     mocks.streamChat.mockImplementation(async function* (
       _endpoint: string, request: { return_progress?: boolean; onResponseAccepted?: () => void }
     ) {
       expect(request.return_progress).toBe(true);
       request.onResponseAccepted?.();
+      expect(events.filter(event => event.kind === "turnPreparing").at(-1))
+        .toEqual({ kind: "turnPreparing", reason: "server" });
       for (const processedTokens of [0, 1024, 2048, 4096, 4096]) {
         yield { kind: "promptProgress", processedTokens, totalTokens: 4096 };
+        expect(events.filter(event => event.kind === "turnPreparing").at(-1))
+          .toEqual({ kind: "turnPreparing", reason: processedTokens < 4096 ? "context" : "server" });
       }
       yield { kind: "thought", text: "Considering the answer." };
       yield { kind: "text", text: "Ready" };
@@ -646,7 +651,7 @@ describe("ChatSession", () => {
     for (const message of ["First request", "Next request"]) {
       events.length = 0;
       await session.sendUserMessage(message);
-      expect(events).not.toContainEqual({ kind: "turnPreparing", reason: "context" });
+      expect(events.filter(event => event.kind === "turnPreparing" && event.reason === "context")).toHaveLength(1);
       const thoughtIndex = events.findIndex(event => event.kind === "thought");
       expect(thoughtIndex).toBeGreaterThan(-1);
       expect(events.slice(thoughtIndex).some(event => event.kind === "turnPreparing")).toBe(false);
@@ -681,6 +686,117 @@ describe("ChatSession", () => {
     expect(events.slice(secondTurnStart)).toContainEqual({ kind: "turnPreparing", reason: "server" });
   });
 
+  describe.each(["llama.cpp", "vllm"] as const)("%s context-loading status without progress", backend => {
+    it.each(["native", "legacy"])("detects changed prefixes while preserving ordinary queue waits (%s)", async protocol => {
+      const { ChatSession } = await import("../src/chat/session.js");
+      const ws = await fs.mkdtemp(path.join(os.tmpdir(), "locality-context-status-"));
+      mocks.backend = backend;
+      let timestamp = Date.now();
+      const clock = vi.spyOn(Date, "now").mockImplementation(() => timestamp++);
+      const record = newRecord();
+      record.title = "Context status";
+      const events: UiEvent[] = [];
+      let expectedReason = "server";
+      mocks.streamChat.mockImplementation(async function* (_endpoint, request: ChatCompletionRequest) {
+        if (protocol === "legacy" && request.tools) throw new mocks.NativeToolsUnsupportedError("tools unsupported");
+        const expected = { kind: "turnPreparing", reason: expectedReason };
+        expect(events.filter(event => event.kind === "turnPreparing").at(-1)).toEqual(expected);
+        request.onResponseAccepted?.();
+        // Headers alone do not distinguish queueing from prefill.
+        expect(events.filter(event => event.kind === "turnPreparing").at(-1)).toEqual(expected);
+        yield { kind: "text", text: "Done." };
+      });
+      const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: ws, record, emit: event => events.push(event) });
+      const send = async (reason: string, mode: "act" | "review" = "review") => {
+        expectedReason = reason;
+        events.length = 0;
+        await session.sendUserMessage("Next question", [], mode);
+        expect(events.filter(event => event.kind === "abort")).toEqual([]);
+        expect(events.some(event => event.kind === "turnPreparing" && event.reason === "context")).toBe(reason === "context");
+      };
+      try {
+        await send("server", "act");
+        await send("server");
+        await fs.writeFile(path.join(ws, "AGENTS.md"), "Use project conventions.");
+        await send("context");
+        await send("server");
+        mocks.settings.personalization = "Use concise responses.";
+        await send("context");
+        await send("server");
+        mocks.settings.personalization = "";
+        await send("context");
+        mocks.settings.editToolsEnabled = false;
+        await send("context");
+        await send("server");
+        mocks.settings.model = "another-model";
+        await send("context");
+        await send("server");
+      } finally { clock.mockRestore(); await session.shutdown(); await fs.rm(ws, { recursive: true, force: true }); }
+    });
+
+    it.each(["cancel", "error"])("keeps a changed prefix pending after accepted prefill ends with %s", async outcome => {
+      const { ChatSession } = await import("../src/chat/session.js");
+      mocks.backend = backend;
+      let timestamp = Date.now();
+      const clock = vi.spyOn(Date, "now").mockImplementation(() => timestamp++);
+      const record = newRecord();
+      record.title = "Retry context";
+      const events: UiEvent[] = [];
+      let pass = 0;
+      mocks.streamChat.mockImplementation(async function* (_endpoint, request: ChatCompletionRequest) {
+        pass++;
+        request.onResponseAccepted?.();
+        expect(events.filter(event => event.kind === "turnPreparing").at(-1))
+          .toEqual({ kind: "turnPreparing", reason: pass === 2 || pass === 3 ? "context" : "server" });
+        if (pass === 2) {
+          if (outcome === "cancel") session.cancel();
+          throw new Error("Prefill interrupted");
+        }
+        yield { kind: "text", text: "Done." };
+      });
+      const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record, emit: event => events.push(event) });
+      try {
+        await session.sendUserMessage("First question");
+        mocks.settings.personalization = "Use short answers.";
+        await session.sendUserMessage("Changed context");
+        expect(events).toContainEqual(expect.objectContaining({ kind: "abort" }));
+        await session.sendUserMessage("Retry");
+        await session.sendUserMessage("Unchanged context");
+        expect(pass).toBe(4);
+      } finally { clock.mockRestore(); await session.shutdown(); }
+    });
+
+    it("restores context loading when an auxiliary title stops blocking a changed prompt", async () => {
+      const { ChatSession } = await import("../src/chat/session.js");
+      mocks.backend = backend;
+      let timestamp = Date.now();
+      const clock = vi.spyOn(Date, "now").mockImplementation(() => timestamp++);
+      let resolveTitle!: (value: string) => void;
+      mocks.complete.mockReturnValue(new Promise<string>(resolve => { resolveTitle = resolve; }));
+      const events: UiEvent[] = [];
+      let pass = 0;
+      mocks.streamChat.mockImplementation(async function* (_endpoint, request: ChatCompletionRequest) {
+        request.onResponseAccepted?.();
+        if (pass++ > 0) {
+          expect(events.filter(event => event.kind === "turnPreparing").at(-1))
+            .toEqual({ kind: "turnPreparing", reason: "title" });
+          resolveTitle("Context loading");
+          await vi.waitFor(() => expect(events.filter(event => event.kind === "turnPreparing").at(-1))
+            .toEqual({ kind: "turnPreparing", reason: "context" }));
+        }
+        yield { kind: "text", text: "Done." };
+      });
+      const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record: newRecord(), emit: event => events.push(event) });
+      try {
+        await session.sendUserMessage("First question");
+        mocks.settings.personalization = "Use short answers.";
+        await session.sendUserMessage("Changed prompt");
+        expect(events.filter(event => event.kind === "abort")).toEqual([]);
+        expect(pass).toBe(2);
+      } finally { clock.mockRestore(); await session.shutdown(); }
+    });
+  });
+
   it.each(["progress", "partial-progress", "output"])("keeps successful reads active through result ingestion using %s", async completionSignal => {
     const ws = await fs.mkdtemp(path.join(os.tmpdir(), "locality-session-"));
     await fs.writeFile(path.join(ws, "a.txt"), "file A\n", "utf8");
@@ -712,7 +828,7 @@ describe("ChatSession", () => {
         yield { kind: "promptProgress", processedTokens: 1024, totalTokens: 2048 };
         expect(ingested()).toHaveLength(0);
       }
-      expect(events).not.toContainEqual({ kind: "turnPreparing", reason: "context" });
+      expect(events.some(event => event.kind === "turnPreparing" && event.reason === "context")).toBe(completionSignal !== "output");
       if (completionSignal === "progress") {
         yield { kind: "promptProgress", processedTokens: 2048, totalTokens: 2048 };
         expect(ingested()).toHaveLength(2);
@@ -786,7 +902,7 @@ describe("ChatSession", () => {
     await session.sendUserMessage("Use the tool");
     expect(pass).toBe(2);
     expect(events.filter(event => event.kind === "abort")).toEqual([]);
-    expect(events).not.toContainEqual({ kind: "turnPreparing", reason: "context" });
+    expect(events).toContainEqual({ kind: "turnPreparing", reason: "context" });
   });
 
   it("finishes only the reads included in the current prompt", async () => {
@@ -870,7 +986,7 @@ describe("ChatSession", () => {
     });
     await session.sendUserMessage("Read missing.txt");
     expect(pass).toBe(2);
-    expect(events).not.toContainEqual({ kind: "turnPreparing", reason: "context" });
+    expect(events).toContainEqual({ kind: "turnPreparing", reason: "context" });
     expect(events.some(event => event.kind === "contextActivity" && event.activityIds.length)).toBe(true);
     expect(events.some(event => event.kind === "abort")).toBe(false);
   });
@@ -966,7 +1082,7 @@ describe("ChatSession", () => {
         if (withProgress) {
           yield { kind: "promptProgress", processedTokens: 0, totalTokens: 100 };
           expect(events.filter(event => event.kind === "turnPreparing").at(-1))
-            .toEqual({ kind: "turnPreparing", reason: "server" });
+            .toEqual({ kind: "turnPreparing", reason: "context" });
           expect(contextActivityIds(events)).toHaveLength(1);
         }
         yield { kind: "text", text: "done" };
@@ -4490,7 +4606,7 @@ describe("separate transcript and model context", () => {
       }
       yield { kind: "promptProgress", processedTokens: 128, totalTokens: 2048 };
       expect(events).not.toContainEqual({ kind: "contextActivity", activityIds: [] });
-      expect(events.some(event => event.kind === "turnPreparing" && event.reason === "context")).toBe(needsIngestion);
+      expect(events).toContainEqual({ kind: "turnPreparing", reason: "context" });
       if (pass === 1 && outcome !== "complete") {
         if (outcome === "cancel") session.cancel();
         throw new Error(outcome === "cancel" ? "Cancelled" : "Server disconnected");
@@ -4511,7 +4627,7 @@ describe("separate transcript and model context", () => {
     await session.sendUserMessage("Continue again");
     expect(pass).toBe(2);
     expect(events.some(event => event.kind === "abort")).toBe(false);
-    expect(events.some(event => event.kind === "turnPreparing" && event.reason === "context")).toBe(outcome !== "complete");
+    expect(events).toContainEqual({ kind: "turnPreparing", reason: "context" });
     expect(events.some(event => event.kind === "contextActivity" && event.activityIds.includes(compacted.compactId))).toBe(outcome !== "complete");
   });
 

@@ -28,7 +28,7 @@ export interface UiQueuedMessage {
 // --- Side view (welcome / chats / settings) ---
 
 export type SideTab = "welcome" | "chats" | "memories" | "settings";
-export const SETTINGS_SECTIONS = ["model", "tools", "chat", "automation", "user", "personalization", "reset"] as const;
+export const SETTINGS_SECTIONS = ["model", "tools", "chat", "automation", "user", "reset"] as const;
 export type SettingsSection = typeof SETTINGS_SECTIONS[number];
 export type WorkspacePathType = "file" | "directory" | "other" | "missing";
 

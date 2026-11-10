@@ -84,10 +84,7 @@ h3 { font-size: 0.82em; margin: 0 0 12px; color: var(--vscode-descriptionForegro
 .setting-action-row { display: flex; gap: 8px; align-items: stretch; }
 .setting-action-row input { min-width: 0; flex: 1; }
 .panel-section .wide-button + .wide-button { margin-top: 8px; }
-.settings-editor { margin-bottom: 8px; }
-.settings-editor-heading { display: flex; align-items: center; justify-content: center; gap: 8px; }
-.settings-editor-content { padding-bottom: 4px; }
-.settings-editor-actions { display: flex; justify-content: flex-end; gap: 6px; margin-top: 8px; }
+.settings-editor { margin-bottom: 12px; }
 .switch-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 32px; margin: 12px 0; color: var(--vscode-foreground); cursor: pointer; }
 .switch-row input { position: absolute; opacity: 0; pointer-events: none; }
 .switch { width: 38px; height: 20px; flex: 0 0 auto; border-radius: var(--control-radius); background: var(--surface-fill); border: 1px solid transparent; position: relative; transition: background 0.15s; }
@@ -154,6 +151,6 @@ h3 { font-size: 0.82em; margin: 0 0 12px; color: var(--vscode-descriptionForegro
 .memory-name-row input[type=text] { min-width: 0; min-height: 0; height: 100%; flex: 1; padding: 0 6px 0 15px; }
 .memory-content-input, .settings-textarea { display: block; width: 100%; min-height: 120px; resize: vertical; padding: 8px 10px; box-sizing: border-box; background: var(--surface-fill); color: var(--vscode-input-foreground, var(--vscode-foreground)); border: 1px solid transparent; border-radius: var(--control-radius); font: inherit; line-height: 1.55; outline: none; }
 .memory-content-input:focus-visible, .settings-textarea:focus-visible { background: var(--surface-fill-strong); }
-.memory-edit-actions { display: flex; flex: 0 0 auto; justify-content: flex-end; gap: 4px; margin-top: 6px; }
+.memory-edit-actions, .settings-editor-actions { display: flex; flex: 0 0 auto; justify-content: flex-end; gap: 4px; margin-top: 6px; }
 .memory-name-row .memory-edit-actions { margin-top: 0; }
 .memory-entry > .memory-error { margin: 4px 4px 8px 16px; }

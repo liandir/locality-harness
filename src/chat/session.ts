@@ -26,6 +26,7 @@ import type { WorkspaceMemory } from "./workspaceMemory.js";
 import { initialMemoryContext } from "./initialMemoryContext.js";
 import * as path from "node:path";
 import * as fs from "node:fs/promises";
+import { createHash } from "node:crypto";
 import {
   fetchServerMetadata,
   GenerationLengthError,
@@ -212,8 +213,10 @@ export class ChatSession {
   private features: FeatureRuntime[];
   private featureDisplays = new Map<string, FeatureResultUpdate>();
   private featureMessages = new Map<string, ChatMessage>();
-  /** Only reopened history uses the standalone context-loading status. */
+  /** Reopened or rewritten context still needs to reach the model. */
   private loadedChatContextPending: boolean;
+  /** Last prefix whose prefill finished; HTTP acceptance alone is insufficient. */
+  private processedPromptPrefix?: string;
   /** Tools and compaction own the wait while their results enter the next prompt. */
   private contextActivities = new Map<string, { active: boolean; restore?: UiEvent }>();
   // A turn may contain several model requests separated by tool results. Keep
@@ -1090,6 +1093,9 @@ export class ChatSession {
     if (this.titleAbort !== controller) return;
     this.titleAbort = undefined;
     this.emit({ kind: "titleGenerationFinished" });
+    if (this.loadedChatContextPending && this.responseAbort && !this.responseAbort.signal.aborted && !this.abort?.signal.aborted) {
+      this.emit({ kind: "turnPreparing", reason: "context" });
+    }
   }
 
   private cancelPendingTitle(): void {
@@ -1624,12 +1630,28 @@ export class ChatSession {
         });
       };
 
+      const generationRequest = this.generationRequest(s, messages);
+      // Compare only the reusable prefix, not appended user context or tool
+      // results. A changed system prompt/catalog requires loading context again
+      // even on transports (vLLM) without live prefill progress. This is a local
+      // invalidation hint, not a claim about the server's cache residency.
+      const promptPrefix = createHash("sha256").update(JSON.stringify({
+        connection: connectionIdentity(s.endpoint, s.model), backend: this.serverBackend,
+        protocol: this.toolProtocol,
+        system: messages.filter(message => message.role === "system"),
+        tools: generationRequest.tools,
+        reasoningEffort: generationRequest.reasoning_effort,
+        template: generationRequest.chat_template_kwargs,
+        thinkingDisabled: generationRequest.thinking_budget_tokens === 0
+      })).digest("hex");
+      this.loadedChatContextPending ||= this.processedPromptPrefix !== undefined && this.processedPromptPrefix !== promptPrefix;
       const loadingChatContext = this.loadedChatContextPending;
       const pendingActivityIds = this.activeContextActivityIds();
       let promptFinished = false;
       const finishPrompt = (): void => {
         if (promptFinished) return;
         promptFinished = true;
+        this.processedPromptPrefix = promptPrefix;
         this.loadedChatContextPending = false;
         this.completeContextIngestion(pendingActivityIds, true);
         if (pendingActivityIds.length) this.emit({ kind: "turnPreparing", reason: "server" });
@@ -1650,7 +1672,7 @@ export class ChatSession {
         for await (const chunk of streamChat(
           s.endpoint,
           {
-            ...this.generationRequest(s, messages),
+            ...generationRequest,
             onResponseAccepted: () => {
               this.commitRequestContext(systemPrompt, userContext);
               // HTTP headers can arrive while this request is still queued.
@@ -1665,13 +1687,14 @@ export class ChatSession {
           this.commitRequestContext(systemPrompt, userContext);
           if (this.pendingSteering.length) break;
           if (chunk.kind === "promptProgress") {
+            if (promptFinished) continue;
             if (promptTokenCount !== chunk.totalTokens) {
               promptTokenCount = chunk.totalTokens;
               this.emit({ kind: "tokens", total: promptTokenCount, limit: this.contextLimit() });
             }
             const processing = chunk.processedTokens < chunk.totalTokens;
-            if (!receivedPromptProgress || (loadingChatContext && processing !== processingPrompt)) {
-              this.emit({ kind: "turnPreparing", reason: loadingChatContext && processing ? "context" : "server" });
+            if (!receivedPromptProgress || processing !== processingPrompt) {
+              this.emit({ kind: "turnPreparing", reason: processing ? "context" : "server" });
             }
             receivedPromptProgress = true;
             processingPrompt = processing;
@@ -1806,7 +1829,7 @@ export class ChatSession {
             break;
           }
         }
-        finishPrompt();
+        if (!this.pendingSteering.length && !this.abort.signal.aborted) finishPrompt();
         if (this.abort.signal.aborted) aborted = true;
         if (!aborted && !this.pendingSteering.length) {
           const tail = this.toolProtocol === "native"
