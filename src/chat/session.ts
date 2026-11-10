@@ -36,7 +36,7 @@ import {
   tokenize,
   type LlmMessage
 } from "../llm/client.js";
-import { buildSystemPrompt, coalesceSameRole, renderToolCallForPrompt } from "../llm/prompt.js";
+import { buildUserContext, withUserContext, buildSystemPrompt, coalesceSameRole, renderToolCallForPrompt } from "../llm/prompt.js";
 import type { ChatToolProcess, ChatToolResultDisplay } from "./types.js";
 import { createFeatures } from "../build/runtime.js";
 import type { FeatureRuntime, FeatureResultUpdate } from "../build/contracts.js";
@@ -81,7 +81,7 @@ import { generateChatTitle } from "./chatTitle.js";
 import { continuationContext } from "./continuation.js";
 import { chronologicalMessages, messageContainsToolCall } from "./messageOrder.js";
 import type { ChatMode } from "./mode.js";
-import { asOpenAiTools, toolsForMode, isMemoryToolName, validateToolArguments } from "../tools/toolDefinitions.js";
+import { asOpenAiTools, toolsForMode, toolsForPrompt, isMemoryToolName, validateToolArguments } from "../tools/toolDefinitions.js";
 import {
   compatibilityFamily,
   compatibilityFamilyLabel,
@@ -201,6 +201,7 @@ export class ChatSession {
   private supportsVision = false;
   private serverBackend: ServerBackend = "llama.cpp";
   private serverMetadataError = "";
+  private untrackedUserContextTokens = 0;
   private systemPromptTokenCache?: { text: string; identity: string; tokens: number };
   // Last AGENTS.md content loaded for this session. Refreshed (mtime-cached) at
   // the start of every prompt build so the sync buildPromptMessages can read it.
@@ -339,8 +340,12 @@ export class ChatSession {
    */
   private async compactConfig(s: HarnessSettings): Promise<CompactConfig> {
     const limit = this.contextLimit();
-    const sysTokens = await this.systemPromptTokens(s);
-    const messageBudget = Math.max(1024, limit - sysTokens - 256);
+    const sysTokens = await this.promptOverheadTokens(s);
+    // The current context is restored even if its user message leaves the tail.
+    const userContext = this.currentUserContext();
+    const contextReserve = userContext && !this.untrackedUserContextTokens
+      ? await countTokens(s.endpoint, withUserContext("", userContext), s.model) : 0;
+    const messageBudget = Math.max(1024, limit - sysTokens - contextReserve - 256);
     return {
       limit: messageBudget,
       thresholdPercent: s.autoCompactThresholdPercent,
@@ -351,16 +356,21 @@ export class ChatSession {
   }
 
   /**
-   * Tokens of the system prompt (tool catalog included). It is separate from
-   * the message transcript, so recomputeTokens cannot see
-   * it — without this the ring undercounts by a fixed chunk.
+   * Count the stable system/catalog plus any current context not yet stored
+   * in model history (pending acceptance or removed by compaction). Keep
+   * their caches separate so changing turn context never retokenizes the base.
    */
-  private async systemPromptTokens(s: HarnessSettings, refreshAgentsMd = true): Promise<number> {
+  private async promptOverheadTokens(s: HarnessSettings, refreshAgentsMd = true): Promise<number> {
     const nativeTools = this.toolProtocol === "native";
     if (refreshAgentsMd) await this.currentAgentsMd();
     const text = this.systemPrompt();
+    const user = this.turnUserMessage();
+    const stored = modelMessages(this.record).find(message => message.role === "user" && message.ts === user?.ts);
+    const context = this.currentUserContext();
+    this.untrackedUserContextTokens = context && !stored?.requestContext
+      ? await countTokens(s.endpoint, withUserContext("", context), s.model) : 0;
     const catalog = nativeTools
-      ? `\n<tools>${JSON.stringify(asOpenAiTools(toolsForMode(this.turnMode(), "native", readSettings().memoryEnabled, this.supportsVision, readSettings())))}</tools>`
+      ? `\n<tools>${JSON.stringify(asOpenAiTools(toolsForPrompt("native", readSettings().memoryEnabled, this.supportsVision, readSettings())))}</tools>`
       : "";
     const countedText = text + catalog;
     const identity = connectionIdentity(s.endpoint, s.model);
@@ -368,31 +378,58 @@ export class ChatSession {
       let estimated = false;
       const tokens = await tokenize(s.endpoint, `<|system|>${countedText}`, s.model, { onEstimate: () => { estimated = true; } });
       this.systemPromptTokenCache = estimated ? undefined : { text: countedText, identity, tokens };
-      return tokens;
+      return tokens + this.untrackedUserContextTokens;
     }
-    return this.systemPromptTokenCache.tokens;
+    return this.systemPromptTokenCache.tokens + this.untrackedUserContextTokens;
   }
 
   private systemPrompt(): string {
     const saved = this.record.turnSystemPrompt;
-    if (saved?.messageTs === this.turnUserMessage()?.ts && saved?.protocol === this.toolProtocol) return saved.content;
+    if (saved?.messageTs === this.turnUserMessage()?.ts && saved?.protocol === this.toolProtocol && saved.contextVersion === 1) return saved.content;
     return buildSystemPrompt({
       featureSettings: readSettings(),
       family: this.compatibilityFamily(),
-      mode: this.turnMode(),
       workspaceRoot: this.workspaceRoot,
       agentsMd: this.cachedAgentsMd(),
-      userMessageTs: this.turnUserMessage()?.ts,
       memoryEnabled: readSettings().memoryEnabled,
-      memories: this.selectedNotes(),
       supportsVision: this.supportsVision,
       nativeTools: this.toolProtocol === "native"
     });
   }
 
+  private currentUserContext(): string | undefined {
+    const user = this.turnUserMessage();
+    if (!user) return undefined;
+    return user.requestContext ?? buildUserContext({
+      featureSettings: readSettings(), family: this.compatibilityFamily(),
+      mode: this.turnMode(), workspaceRoot: this.workspaceRoot,
+      userMessageTs: user.ts, memoryEnabled: readSettings().memoryEnabled,
+      memories: this.selectedNotes(), nativeTools: this.toolProtocol === "native"
+    });
+  }
+
+  /** Restore the current mode even when compaction removed the original request. */
+  private promptContextMessages(userContext = this.currentUserContext()): ChatMessage[] {
+    const context = modelMessages(this.record);
+    const user = this.turnUserMessage();
+    if (!user || !userContext) return context;
+    if (context.some(message => message.role === "user" && message.ts === user.ts)) {
+      return context.map(message => message.role === "user" && message.ts === user.ts
+        ? { ...message, requestContext: userContext } : message);
+    }
+    const messages = [...context];
+    let index = 0;
+    while (messages[index]?.role === "system") index++;
+    messages.splice(index, 0, {
+      role: "user", ts: user.ts, requestContext: userContext,
+      content: "Continue the task described in the conversation context above."
+    });
+    return messages;
+  }
+
   /** Sync best-effort variant for mid-stream estimates; 0 until first computed. */
-  private cachedSystemPromptTokens(): number {
-    return this.systemPromptTokenCache?.tokens ?? 0;
+  private cachedPromptOverheadTokens(): number {
+    return (this.systemPromptTokenCache?.tokens ?? 0) + this.untrackedUserContextTokens;
   }
 
   /**
@@ -440,7 +477,7 @@ export class ChatSession {
   emitLoaded(): void {
     this.emit({ kind: "chatLoaded", record: this.record });
     if (this.serverContextSize !== undefined) {
-      this.emit({ kind: "tokens", total: this.record.totalTokens + this.cachedSystemPromptTokens(), limit: this.contextLimit() });
+      this.emit({ kind: "tokens", total: this.record.totalTokens + this.cachedPromptOverheadTokens(), limit: this.contextLimit() });
     }
     this.emit({ kind: "chatModeChanged", mode: this.record.mode });
     this.emit({ kind: "reasoningEffortChanged", effort: this.record.reasoningEffort });
@@ -545,8 +582,9 @@ export class ChatSession {
       // Keep this pending across cancellation or failure until prefill completes.
       this.loadedChatContextPending = true;
       await this.saveRecord();
+      await this.promptOverheadTokens(s, false);
       if (options.reload) this.emit({ kind: "chatLoaded", record: this.record });
-      this.emit({ kind: "tokens", total: this.record.totalTokens + this.cachedSystemPromptTokens(), limit: this.contextLimit() });
+      this.emit({ kind: "tokens", total: this.record.totalTokens + this.cachedPromptOverheadTokens(), limit: this.contextLimit() });
       this.emitCompactStatus();
       const completion: Extract<UiEvent, { kind: "compactEnd" }> = {
         kind: "compactEnd",
@@ -938,6 +976,7 @@ export class ChatSession {
     const edited = { ...this.record.messages[index] };
     edited.content = text;
     edited.mode = this.turnMode();
+    delete edited.requestContext;
     delete this.record.pendingPlanMessageTs;
     if (this.turnMode() === "plan") this.record.planning = true;
     if (removeAttachmentIds.length && edited.attachments) {
@@ -1066,9 +1105,9 @@ export class ChatSession {
    * Cached message tokens are exact; uncached and live buffer use char/4.
    */
   private emitLiveTokenEstimate(liveText: string): void {
-    let total = this.cachedSystemPromptTokens();
+    let total = this.cachedPromptOverheadTokens();
     for (const m of modelMessages(this.record)) {
-      total += m.tokens ?? Math.ceil((m.content.length + (m.reasoningContent?.length ?? 0)) / 4)
+      total += m.tokens ?? Math.ceil((withUserContext(m.content, m.requestContext).length + (m.reasoningContent?.length ?? 0)) / 4)
         + (m.attachments?.filter(isImageAttachment).length ?? 0) * VISION_TOKEN_RESERVE;
     }
     if (liveText) total += Math.ceil(liveText.length / 4);
@@ -1104,14 +1143,21 @@ export class ChatSession {
     }
   }
 
-  private commitRequestContext(systemPrompt: string): void {
+  private commitRequestContext(systemPrompt: string, userContext: string | undefined): void {
     const messageTs = this.turnUserMessage()?.ts;
     if (messageTs === undefined) return;
     const selection = this.pendingMemorySelection;
     const saved = this.record.turnSystemPrompt;
     const newSelection = selection?.messageTs === messageTs;
-    if (!newSelection && saved?.messageTs === messageTs && saved.protocol === this.toolProtocol && saved.content === systemPrompt) return;
-    this.record.turnSystemPrompt = { messageTs, protocol: this.toolProtocol, content: systemPrompt };
+    if (!newSelection && saved?.messageTs === messageTs && saved.protocol === this.toolProtocol && saved.content === systemPrompt && this.turnUserMessage()?.requestContext === userContext) return;
+    this.record.turnSystemPrompt = { messageTs, protocol: this.toolProtocol, content: systemPrompt, contextVersion: 1 };
+    for (const message of [...this.record.messages, ...(this.record.contextMessages ?? [])]) {
+      if (message.role === "user" && message.ts === messageTs && message.requestContext !== userContext) {
+        message.requestContext = userContext;
+        delete message.tokens;
+      }
+    }
+    if (modelMessages(this.record).some(message => message.role === "user" && message.ts === messageTs)) this.untrackedUserContextTokens = 0;
     if (newSelection) {
       this.pendingMemorySelection = undefined;
       this.record.memorySelections = [...(this.record.memorySelections ?? []).filter(previous => previous.messageTs !== messageTs), selection];
@@ -1179,13 +1225,14 @@ export class ChatSession {
     // Fit optional notes against the same fresh project instructions as the request.
     await this.currentAgentsMd();
     await this.fitQueryMemories(s);
-    const sysTokens = await this.systemPromptTokens(s, false);
+    let sysTokens = await this.promptOverheadTokens(s, false);
     const limit = this.contextLimit();
     this.emit({ kind: "tokens", total: this.record.totalTokens + sysTokens, limit });
     this.emitCompactStatus();
 
     if (this.serverBackend !== "vllm" && s.autoCompact && this.record.totalTokens + sysTokens >= autoCompactTriggerTokens(limit, s.autoCompactThresholdPercent)) {
       await this.runCompact("auto", options);
+      sysTokens = this.cachedPromptOverheadTokens();
     }
 
     if (this.serverBackend !== "vllm" && this.record.totalTokens + sysTokens >= limit) {
@@ -1199,7 +1246,7 @@ export class ChatSession {
   private async buildPromptMessagesForRequest(
     s: HarnessSettings,
     options: { reload: boolean; repairNote?: string }
-  ): Promise<{ messages: PromptMessage[]; tokens: number; systemPrompt: string } | undefined> {
+  ): Promise<{ messages: PromptMessage[]; tokens: number; systemPrompt: string; userContext?: string } | undefined> {
     if (!(await this.prepareContextForModelRequest(s, options))) return undefined;
 
     const limit = this.contextLimit();
@@ -1211,7 +1258,8 @@ export class ChatSession {
       return undefined;
     }
     const systemPrompt = this.systemPrompt();
-    let messages = await this.buildPromptMessages(systemPrompt);
+    const userContext = this.currentUserContext();
+    let messages = await this.buildPromptMessages(systemPrompt, userContext);
     if (options.repairNote) messages = withPromptRepair(messages, options.repairNote);
     // Count the tokens of the prompt that is ACTUALLY sent (system prompt +
     // re-rendered tool calls + wrapped results), not the sum of stored
@@ -1222,7 +1270,7 @@ export class ChatSession {
     if (s.autoCompact && promptTok >= Math.min(promptLimit, autoCompactTriggerTokens(limit, s.autoCompactThresholdPercent))) {
       const compacted = await this.runCompact("auto", options);
       if (compacted) {
-        messages = await this.buildPromptMessages(systemPrompt);
+        messages = await this.buildPromptMessages(systemPrompt, userContext);
         if (options.repairNote) messages = withPromptRepair(messages, options.repairNote);
         promptTok = await this.countRequestPrompt(s, messages);
       }
@@ -1234,7 +1282,7 @@ export class ChatSession {
       return undefined;
     }
 
-    return { messages, tokens: promptTok, systemPrompt };
+    return { messages, tokens: promptTok, systemPrompt, userContext };
   }
 
   private generationRequest(s: HarnessSettings, messages: PromptMessage[]): ChatCompletionRequest {
@@ -1242,7 +1290,7 @@ export class ChatSession {
       model: s.model, messages, temperature: s.temperature, top_k: s.topK, top_p: s.topP,
       thinking_budget_tokens: this.turnReasoningEffort() === REASONING_NONE ? 0 : s.reasoningBudget ?? -1,
       ...reasoningRequestOverrides(this.turnReasoningEffort(), s.reasoningEfforts),
-      tools: this.toolProtocol === "native" ? asOpenAiTools(toolsForMode(this.turnMode(), "native", readSettings().memoryEnabled, this.supportsVision, readSettings())) : undefined,
+      tools: this.toolProtocol === "native" ? asOpenAiTools(toolsForPrompt("native", readSettings().memoryEnabled, this.supportsVision, readSettings())) : undefined,
       tool_choice: "auto", parallel_tool_calls: false, return_progress: true
     };
   }
@@ -1260,7 +1308,7 @@ export class ChatSession {
       ...messages,
       {
         role: "system",
-        content: `<tools>${JSON.stringify(asOpenAiTools(toolsForMode(this.turnMode(), "native", readSettings().memoryEnabled, this.supportsVision, readSettings())))}</tools>`
+        content: `<tools>${JSON.stringify(asOpenAiTools(toolsForPrompt("native", readSettings().memoryEnabled, this.supportsVision, readSettings())))}</tools>`
       }
     ];
   }
@@ -1445,15 +1493,15 @@ export class ChatSession {
     content: string
   ): Promise<string> {
     await recomputeTokens(s.endpoint, this.record, s.model);
-    const sysTokens = await this.systemPromptTokens(s);
+    let sysTokens = await this.promptOverheadTokens(s);
     const limit = this.contextLimit();
     const overhead = s.templateOverheadTokensPerMessage;
     const toolTokens = await countTokens(s.endpoint, `<|tool|>${content}`, s.model);
-    let projectedTokens = this.record.totalTokens + sysTokens + toolTokens + overhead;
+    const projectedTokens = this.record.totalTokens + sysTokens + toolTokens + overhead;
 
     if (s.autoCompact && projectedTokens >= autoCompactTriggerTokens(limit, s.autoCompactThresholdPercent)) {
       await this.runCompact("auto", { reload: false });
-      projectedTokens = this.record.totalTokens + sysTokens + toolTokens + overhead;
+      sysTokens = this.cachedPromptOverheadTokens();
     }
 
     // A single result may never exceed its per-message cap, nor the room that
@@ -1554,7 +1602,7 @@ export class ChatSession {
       // Guidance can arrive during context preparation or compaction.
       if (this.pendingSteering.length) continue;
 
-      const { messages, systemPrompt } = request;
+      const { messages, systemPrompt, userContext } = request;
       serverUsageTotal = undefined;
       let promptTokenCount = request.tokens;
       let generatedChars = 0;
@@ -1603,7 +1651,7 @@ export class ChatSession {
           {
             ...this.generationRequest(s, messages),
             onResponseAccepted: () => {
-              this.commitRequestContext(systemPrompt);
+              this.commitRequestContext(systemPrompt, userContext);
               // HTTP headers can arrive while this request is still queued.
               // Keep a title wait until prompt progress or model output proves
               // the continuation has started using the server.
@@ -1613,7 +1661,7 @@ export class ChatSession {
           AbortSignal.any([this.abort.signal, responseAbort.signal])
         )) {
           // Stream output also proves acceptance for transports without a callback.
-          this.commitRequestContext(systemPrompt);
+          this.commitRequestContext(systemPrompt, userContext);
           if (this.pendingSteering.length) break;
           if (chunk.kind === "promptProgress") {
             if (promptTokenCount !== chunk.totalTokens) {
@@ -2073,7 +2121,7 @@ export class ChatSession {
     await recomputeTokens(s.endpoint, this.record, s.model);
     this.emit({
       kind: "tokens",
-      total: serverUsageTotal ?? this.record.totalTokens + this.cachedSystemPromptTokens(),
+      total: serverUsageTotal ?? this.record.totalTokens + this.cachedPromptOverheadTokens(),
       limit: this.contextLimit()
     });
     this.emitCompactStatus();
@@ -2747,12 +2795,12 @@ export class ChatSession {
     }
   }
 
-  private async buildPromptMessages(sys = this.systemPrompt()): Promise<PromptMessage[]> {
-    if (this.toolProtocol === "native") return this.buildNativePromptMessages(sys);
+  private async buildPromptMessages(sys = this.systemPrompt(), userContext = this.currentUserContext()): Promise<PromptMessage[]> {
+    if (this.toolProtocol === "native") return this.buildNativePromptMessages(sys, userContext);
     const msgs: { role: "system" | "user" | "assistant" | "tool"; content: string }[] = [
       { role: "system", content: sys }
     ];
-    for (const { message: m } of chronologicalMessages(modelMessages(this.record))) {
+    for (const { message: m } of chronologicalMessages(this.promptContextMessages(userContext))) {
       if (m.role === "tool") {
         const name = m.toolCall?.name ?? "tool";
         const call = renderToolCallForPrompt(this.compatibilityFamily(), name, m.toolCall?.argsJson ?? "{}");
@@ -2766,7 +2814,7 @@ export class ChatSession {
       } else if (m.role === "assistant" && !m.content.trim()) {
         continue;
       } else {
-        msgs.push({ role: m.fileUndoNotice ? "user" : m.role as "user" | "assistant" | "system", content: m.content });
+        msgs.push({ role: m.fileUndoNotice ? "user" : m.role as "user" | "assistant" | "system", content: withUserContext(m.content, m.requestContext) });
       }
     }
     // The tool replay above should keep assistant/tool-result exchanges alternating.
@@ -2774,13 +2822,13 @@ export class ChatSession {
     return coalesceSameRole(msgs);
   }
 
-  private async buildNativePromptMessages(systemPrompt: string): Promise<PromptMessage[]> {
+  private async buildNativePromptMessages(systemPrompt: string, userContext?: string): Promise<PromptMessage[]> {
     // Compaction stores its summary as a leading system message. Native chat
     // templates commonly permit exactly one system message, at index zero, so
     // fold any leading stored system context into the harness prompt instead
     // of replaying it as a second system message.
     const storedSystemContext: string[] = [];
-    const context = modelMessages(this.record);
+    const context = this.promptContextMessages(userContext);
     let transcriptStart = 0;
     while (context[transcriptStart]?.role === "system") {
       storedSystemContext.push(context[transcriptStart].content);
@@ -2801,9 +2849,9 @@ export class ChatSession {
                   type: "image_url" as const,
                   image_url: { url: await this.storage.attachmentDataUrl(this.record.id, attachment) }
                 }))),
-                { type: "text" as const, text: `${stored.content || "Please examine the attached images."}\n\nAttached images (in the order shown):\n${JSON.stringify(attachments.map(a => ({ name: a.fileName, file_type: attachmentFileType(a.fileName) ?? a.extension, type: "image" })))}` }
+                { type: "text" as const, text: `${withUserContext(stored.content || "Please examine the attached images.", stored.requestContext)}\n\nAttached images (in the order shown):\n${JSON.stringify(attachments.map(a => ({ name: a.fileName, file_type: attachmentFileType(a.fileName) ?? a.extension, type: "image" })))}` }
               ]
-            : stored.content;
+            : withUserContext(stored.content, stored.requestContext);
           messages.push({
             role: stored.fileUndoNotice ? "user" : stored.role,
             content,

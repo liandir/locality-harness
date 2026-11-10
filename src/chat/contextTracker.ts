@@ -2,6 +2,7 @@ import { connectionIdentity } from "../llm/connection.js";
 import { isImageAttachment } from "./attachments.js";
 import { tokenize } from "../llm/client.js";
 import type { LlmContent } from "../llm/client.js";
+import { withUserContext } from "../llm/prompt.js";
 import { VISION_TOKEN_RESERVE, modelMessages } from "./storage.js";
 import type { ChatMessage, ChatRecord } from "./types.js";
 
@@ -156,7 +157,7 @@ function countNewlines(s: string): number {
 }
 
 function formatForCounting(m: ChatMessage): string {
-  return `<|${m.role}|>${m.reasoningContent ? `<|reasoning|>${m.reasoningContent}` : ""}${m.content}`;
+  return `<|${m.role}|>${m.reasoningContent ? `<|reasoning|>${m.reasoningContent}` : ""}${withUserContext(m.content, m.requestContext)}`;
 }
 
 function formatPromptMessageForCounting(m: {

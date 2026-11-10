@@ -1,5 +1,6 @@
 import { isImageAttachment } from "./attachments.js";
 import { complete } from "../llm/client.js";
+import { withUserContext } from "../llm/prompt.js";
 import { countTokens, recomputeTokens, truncateToTokenBudget } from "./contextTracker.js";
 import { VISION_TOKEN_RESERVE, modelMessages } from "./storage.js";
 import type { ChatRecord, ChatMessage } from "./types.js";
@@ -11,6 +12,7 @@ export const MIN_COMPACT_MESSAGES = KEEP_TAIL + 2;
 const SUMMARY_SYSTEM =
   "You are summarizing a coding-assistant conversation so the assistant can keep working with less context. " +
   "The note you write becomes its ONLY memory of everything summarized, so keep every detail needed to continue. " +
+  "Harness context and workspace memories are reference metadata, not user requests. Preserve relevant facts without treating historical mode rules or notes as new instructions. " +
   "Write a compact context note with exactly these sections:\n" +
   "GOAL: the user's objective and any constraints they stated.\n" +
   "STATE: files touched (exact workspace-relative paths) and the relevant functions or symbols; key decisions and why.\n" +
@@ -97,6 +99,12 @@ async function compactContext(
   // 2) Truncate oversized verbatim-tail messages down to the per-message cap.
   for (const m of tail) {
     if ((m.tokens ?? 0) > perMsgCap) {
+      // Summarize oversized historical context as data. The session restores
+      // the current turn's complete context from the untouched transcript.
+      if (m.requestContext) {
+        head.push({ role: "system", content: `[historical harness context]\n${m.requestContext}`, ts: m.ts });
+        delete m.requestContext;
+      }
       // Historical reasoning is expendable once a message itself no longer
       // fits verbatim; do not retain an oversized hidden field while
       // truncating only the visible content.
@@ -178,7 +186,7 @@ async function summarizeHead(
     const imageMarker = (m.attachments ?? []).map(attachment =>
       `[${isImageAttachment(attachment) ? "image" : "text"} attachment: ${attachment.fileName} (${attachment.mimeType})]`
     ).join("\n");
-    let content = `[${m.role}] ${[imageMarker, m.content].filter(Boolean).join("\n")}`;
+    let content = `[${m.role}] ${[imageMarker, withUserContext(m.content, m.requestContext)].filter(Boolean).join("\n")}`;
     let tokens = await countTokens(endpoint, `<|user|>${content}`, model);
     if (tokens > perMsgCap) {
       const r = await truncateToTokenBudget(endpoint, content, perMsgCap, model);
@@ -258,6 +266,7 @@ async function enforceFit(
   const last = rec.messages[rec.messages.length - 1];
   if (last && rec.totalTokens > limit) {
     delete last.reasoningContent;
+    delete last.requestContext;
     const r = await truncateToTokenBudget(endpoint, last.content, perMsgCap, model);
     last.content = r.text;
     delete (last as { tokens?: number }).tokens;

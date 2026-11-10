@@ -22,19 +22,22 @@ describe("ChatStorage", () => {
     const storage = new ChatStorage(ws, chatsRoot);
     const rec = storage.newRecord("native");
     rec.messages = [
-      { role: "user", content: "Earlier request", ts: 1 },
+      { role: "user", content: "Earlier request", requestContext: "First context", ts: 1 },
       { role: "assistant", content: "Earlier answer", ts: 2 },
-      { role: "user", content: "Current request", ts: 3 },
+      { role: "user", content: "Current request", requestContext: "Current context", ts: 3 },
       { role: "user", content: "Guidance", steering: true, ts: 4 }
     ];
-    rec.turnSystemPrompt = { messageTs: 3, protocol: "native", content: "Original system context" };
+    rec.turnSystemPrompt = { messageTs: 3, protocol: "native", content: "Original system context", contextVersion: 1 };
     await storage.save(rec);
     const loaded = (await storage.load(rec.id))!;
     expect(loaded.turnSystemPrompt).toEqual(rec.turnSystemPrompt);
     const full = await storage.fork(loaded);
     expect((await storage.load(full.id))?.turnSystemPrompt).toEqual(rec.turnSystemPrompt);
+    expect(full.messages.filter(message => message.role === "user").map(message => message.requestContext)).toEqual(["First context", "Current context", undefined]);
     const earlier = await storage.fork(loaded, 1);
     expect((await storage.load(earlier.id))?.turnSystemPrompt).toBeUndefined();
+    expect(earlier.messages[0].requestContext).toBe("First context");
+    expect(JSON.stringify(earlier)).not.toContain("Current context");
     rec.turnSystemPrompt.messageTs = 4;
     await storage.save(rec);
     expect((await storage.load(rec.id))?.turnSystemPrompt).toBeUndefined();

@@ -79,6 +79,21 @@ describe("compact — fit guarantee", () => {
     expect(keptTail).toBeGreaterThanOrEqual(1);
   });
 
+  it("summarizes oversized harness context and preserves the original snapshots", async () => {
+    const { compact } = await import("../src/chat/compactor.js");
+    const context = "<locality_context>HISTORICAL_NOTE " + "reference ".repeat(600) + "</locality_context>";
+    const rec = record([
+      msg("user", "first"), msg("assistant", "answer"), msg("user", "second"), msg("assistant", "answer"),
+      msg("assistant", "more context"), { ...msg("user", "latest request"), requestContext: context }
+    ]);
+    const original = structuredClone(rec.messages);
+    await compact("http://context-compact", rec, new AbortController().signal, cfg);
+    expect(rec.messages).toEqual(original);
+    expect(JSON.stringify(mocks.complete.mock.calls)).toContain("HISTORICAL_NOTE");
+    expect(rec.contextMessages!.at(-1)?.requestContext).toBeUndefined();
+    expect(rec.totalTokens).toBeLessThanOrEqual(cfg.limit);
+  });
+
   it("does nothing when there are too few messages", async () => {
     const { compact } = await import("../src/chat/compactor.js");
     const rec = record([msg("user", "hi"), msg("assistant", "hello")]);

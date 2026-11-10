@@ -128,6 +128,19 @@ describe("truncateToTokenBudget", () => {
 });
 
 describe("model context token accounting", () => {
+  it("counts persisted harness context without changing the visible user request", async () => {
+    const { ChatStorage } = await import("../src/chat/storage.js");
+    const { recomputeTokens } = await import("../src/chat/contextTracker.js");
+    const { withUserContext } = await import("../src/llm/prompt.js");
+    const rec = new ChatStorage("/tmp/workspace").newRecord("native");
+    const context = "<locality_context>Current chat mode: review. Memory snapshot: dated reference</locality_context>";
+    rec.messages = [{ role: "user", content: "Review this", requestContext: context, ts: 1 }];
+    const expected = Math.ceil(("<|user|>" + withUserContext("Review this", context)).length / 4);
+    expect(await recomputeTokens("http://context-count", rec)).toBe(expected);
+    expect(rec.messages[0].content).toBe("Review this");
+    expect(rec.messages[0].tokens).toBe(expected);
+  });
+
   it("counts compacted context only, including after changing tokenizer models", async () => {
     const { ChatStorage } = await import("../src/chat/storage.js");
     const { recomputeTokens } = await import("../src/chat/contextTracker.js");

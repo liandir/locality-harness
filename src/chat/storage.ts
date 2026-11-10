@@ -320,7 +320,9 @@ export class ChatStorage {
       const attachments = Array.isArray(message.attachments)
         ? message.attachments.filter(isValidAttachment).slice(0, MAX_ATTACHMENTS_PER_MESSAGE)
         : undefined;
-      return attachments?.length ? { ...message, attachments } : { ...message, attachments: undefined };
+      const requestContext = message.role === "user" && !message.steering && typeof message.requestContext === "string"
+        ? message.requestContext : undefined;
+      return { ...message, requestContext, attachments: attachments?.length ? attachments : undefined };
     });
     const messages = normalizeMessages(Array.isArray(rec.messages) ? rec.messages : []);
     return {

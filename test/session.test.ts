@@ -10,6 +10,15 @@ import { steeredConversation } from "./fixtures/steeredConversation.js";
 
 const planText = (markdown: string) => `<proposed_plan>\n${markdown}\n</proposed_plan>`;
 
+// Inspect the latest harness block, ignoring plain steering and tool messages.
+function latestUserContext(request: { messages: Array<{ content: unknown }> }): string {
+  return String([...request.messages].reverse().find(message =>
+    typeof message.content === "string" && message.content.startsWith("<locality_context>"))?.content ?? "");
+}
+function requestContextText(request: { messages: Array<{ content: unknown }> }): string {
+  return `${request.messages[0].content}\n\n${latestUserContext(request)}`;
+}
+
 const mocks = vi.hoisted(() => ({
   GenerationLengthError: class GenerationLengthError extends Error {},
   MalformedNativeToolCallError: class MalformedNativeToolCallError extends Error {},
@@ -476,7 +485,7 @@ describe("interrupted turn continuation", () => {
       let ready!: (size: number) => void;
       mocks.fetchServerContextSize.mockImplementation(() => new Promise<number>(resolve => { ready = resolve; }));
       mocks.streamChat.mockImplementation(async function* (_endpoint, request) {
-        expect(request.messages.at(-1)).toMatchObject({ role: "user", content: "Try this" });
+        expect(request.messages.at(-1)).toMatchObject({ role: "user", content: expect.stringContaining("User request:\nTry this") });
         yield { kind: "text", text: "Recovered" };
       });
       const resumed = session.continueTurn(second);
@@ -525,7 +534,7 @@ describe("interrupted turn continuation", () => {
     let pass = 0;
     mocks.streamChat.mockImplementation(async function* (_endpoint, request) {
       if (pass++ < 2) {
-        expect(request.messages.at(-1)).toMatchObject({ role: "user", content: "Create a file" });
+        expect(request.messages.at(-1)).toMatchObject({ role: "user", content: expect.stringContaining("User request:\nCreate a file") });
         yield { kind: "toolCall", name: "create_file", argsJson: '{"path":"new.txt","content":"approved"}', id: `write_${pass}` };
       } else yield { kind: "text", text: "Done" };
     });
@@ -560,7 +569,7 @@ describe("interrupted turn continuation", () => {
       await session.cancelPlanning();
       expect(record.mode).toBe("act");
       mocks.streamChat.mockImplementation(async function* (_endpoint, request) {
-        expect(request.tools.some((tool: { function: { name: string } }) => tool.function.name === "create_file")).toBe(false);
+        expect(latestUserContext(request)).toContain("Current chat mode: plan.");
         yield { kind: "text", text: planText("Completed plan") };
       });
       await session.continueTurn(record.messages.at(-1)!.ts);
@@ -1073,7 +1082,7 @@ describe("ChatSession", () => {
         await firstRequestGate;
         yield { kind: "toolCall", name: "read_file", argsJson: '{"path":"a.txt"}', id: "call_read_modes" };
       } else {
-        if (JSON.stringify(request.messages[0]?.content).includes("You are in plan mode.")) yield { kind: "text", text: planText("done") };
+        if (latestUserContext(request).includes("Current chat mode: plan.")) yield { kind: "text", text: planText("done") };
         else yield { kind: "text", text: "done" };
       }
     });
@@ -1107,7 +1116,8 @@ describe("ChatSession", () => {
     expect(requests[2].thinking_budget_tokens).toBe(0);
     expect(requests[2].reasoning_effort).toBeUndefined();
     expect(requests[2].chat_template_kwargs).toEqual({ enable_thinking: false });
-    expect(requests[2].tools?.some(tool => tool.function.name === "create_file")).toBe(false);
+    expect(requests[2].tools).toEqual(requests[0].tools);
+    expect(latestUserContext(requests[2])).toContain("Current chat mode: plan.");
     expect(record.messages.filter(message => message.role === "user").map(message => message.mode)).toEqual(["act", "plan"]);
     expect(events.filter(event => event.kind === "turnEnd").map(event => event.mode)).toEqual(["act", "plan"]);
   });
@@ -1138,8 +1148,8 @@ describe("ChatSession", () => {
     expect(record.mode).toBe(mode === "plan" ? "plan" : composerMode);
     expect(record.messages[0]).toMatchObject({ role: "user", mode });
     expect(events).toContainEqual(expect.objectContaining({ kind: "userMessage", mode }));
-    expect(requests[0].tools?.some(tool => tool.function.name === "create_file")).toBe(mode === "act");
-    expect(requests[0].tools?.some(tool => tool.function.name === "run_command")).toBe(mode === "act");
+    expect(requests[0].tools?.some(tool => tool.function.name === "create_file")).toBe(true);
+    expect(requests[0].tools?.some(tool => tool.function.name === "run_command")).toBe(true);
   });
 
   it("retains plan approval after reload and keeps revisions in Plan until acceptance", async () => {
@@ -1148,7 +1158,7 @@ describe("ChatSession", () => {
     const requests: Array<{ messages: Array<{ content: unknown }>; tools?: Array<{ function: { name: string } }> }> = [];
     mocks.streamChat.mockImplementation(async function* (_endpoint: string, request: typeof requests[number]) {
       requests.push(request);
-      if (JSON.stringify(request.messages[0]?.content).includes("You are in plan mode.")) yield { kind: "text", text: planText("A concrete plan or completed response.") };
+      if (latestUserContext(request).includes("Current chat mode: plan.")) yield { kind: "text", text: planText("A concrete plan or completed response.") };
       else yield { kind: "text", text: "A concrete plan or completed response." };
     });
     const { ChatSession } = await import("../src/chat/session.js");
@@ -1174,7 +1184,8 @@ describe("ChatSession", () => {
       await session.sendUserMessage("Include validation", [], "plan");
       expect(loaded.pendingPlanMessageTs).toBe(loaded.messages.at(-1)?.ts);
       expect(loaded.mode).toBe("plan");
-      expect(requests[1].tools?.some(tool => tool.function.name === "create_file" || tool.function.name === "run_command")).toBe(false);
+      expect(requests[1].tools).toEqual(requests[0].tools);
+      expect(latestUserContext(requests[1])).toContain("Current chat mode: plan.");
 
       const revisedPlan = loaded.pendingPlanMessageTs!;
       expect(session.resolvePlan(revisedPlan, "act")).toBe(true);
@@ -1402,7 +1413,7 @@ describe("ChatSession", () => {
       role: "system",
       content: expect.stringContaining("[context summary]\nGOAL: refactor Game.tsx")
     }));
-    expect(messages).toContainEqual(expect.objectContaining({ role: "user", content: "please continue" }));
+    expect(messages).toContainEqual(expect.objectContaining({ role: "user", content: expect.stringContaining("User request:\nplease continue") }));
   });
 
   it("adds a user turn when a compacted native tail contains only tool history", async () => {
@@ -1458,7 +1469,7 @@ describe("ChatSession", () => {
     } finally { await session.shutdown(); }
   });
 
-  it.each(["native", "legacy"] as const)("uses the latest saved user time only in %s system context after compaction", async toolProtocol => {
+  it.each(["native", "legacy"] as const)("uses the latest saved user time in the %s user context after compaction", async toolProtocol => {
     const { ChatSession } = await import("../src/chat/session.js");
     const record = newRecord();
     const firstTs = Date.parse("2026-09-01T12:00:00Z");
@@ -1477,24 +1488,25 @@ describe("ChatSession", () => {
     const internal = session as unknown as {
       toolProtocol: "native" | "legacy";
       buildPromptMessages(): Promise<Array<{ role: string; content: string }>>;
-      systemPromptTokens(settings: unknown): Promise<number>;
+      promptOverheadTokens(settings: unknown): Promise<number>;
     };
     internal.toolProtocol = toolProtocol;
     const messages = await internal.buildPromptMessages();
     expect(messages[0].role).toBe("system");
-    expect(messages[0].content).toContain(`User request time: ${new Date(latestTs).toISOString()}`);
-    expect(messages[0].content).toContain("only to contextualize the current request relative to workspace memories");
+    expect(latestUserContext({ messages })).toContain(`User request time: ${new Date(latestTs).toISOString()}`);
+    expect(latestUserContext({ messages })).toContain("only to contextualize the current request relative to workspace memories");
     expect(JSON.stringify(messages)).not.toContain(new Date(answerTs).toISOString());
     expect(JSON.stringify(messages)).not.toContain(new Date(firstTs).toISOString());
-    expect(JSON.stringify(messages.slice(1))).not.toContain(new Date(latestTs).toISOString());
-    await internal.systemPromptTokens(mocks.settings);
+    expect(messages[0].content).not.toContain(new Date(latestTs).toISOString());
+    await internal.promptOverheadTokens(mocks.settings);
     expect(mocks.tokenize.mock.calls.some(call => String(call[1]).includes(new Date(latestTs).toISOString()))).toBe(true);
 
     // Advancing the transcript to a new user request updates the reference time.
     record.messages.push({ role: "user", content: "next request", ts: latestTs + 86400000 });
     const next = await internal.buildPromptMessages();
-    expect(next[0].content).toContain(new Date(latestTs + 86400000).toISOString());
-    expect(next[0].content).not.toContain(new Date(latestTs).toISOString());
+    expect(next[0]).toEqual(messages[0]);
+    expect(latestUserContext({ messages: next })).toContain(new Date(latestTs + 86400000).toISOString());
+    expect(latestUserContext({ messages: next })).not.toContain(new Date(latestTs).toISOString());
   });
 
   it("sends the saved answer timestamp to the UI at turn end", async () => {
@@ -3096,7 +3108,8 @@ describe("ChatSession", () => {
       expect(JSON.stringify(requests[3].messages)).toContain("[blocked: modeViolation]");
       expect(JSON.stringify(requests[4].messages)).toContain("Planning reference");
       for (const request of requests.slice(2)) {
-        expect(request.tools?.some(tool => tool.function.name === "run_command")).not.toBe(true);
+        expect(request.tools).toEqual(requests[0].tools);
+        expect(latestUserContext(request)).toContain("Current chat mode: plan.");
       }
       if (profile === "native") {
         expect(requests[0].tools?.some(tool => tool.function.name === "run_command")).toBe(true);
@@ -4930,7 +4943,7 @@ describe("steering an active turn", () => {
     await turn;
     expect(requests).toHaveLength(2);
     expect(requests[1].messages[0]).toEqual(requests[0].messages[0]);
-    expect(requests[1].messages[0].content).toContain(`User request time: ${new Date(record.messages[0].ts).toISOString()}`);
+    expect(latestUserContext(requests[1])).toContain(`User request time: ${new Date(record.messages[0].ts).toISOString()}`);
     expect(requests[1].tools).toEqual(requests[0].tools);
     expect(requests[1].reasoning_effort).toEqual(requests[0].reasoning_effort);
     expect(requests[1].messages.filter(m => m.role === "system")).toHaveLength(1);
@@ -5453,7 +5466,7 @@ describe("explicit workspace notes", () => {
       expect(record.messages.filter(m => m.role === "tool").at(-1)?.content).toContain("Recall");
     } finally { await session.shutdown(); await fs.rm(root, { recursive: true, force: true }); }
   });
-  it.each(["llama.cpp", "vllm"] as const)("replaces automatic system notes per query, caps results, persists snapshots and includes notes in %s counts", async backend => {
+  it.each(["llama.cpp", "vllm"] as const)("appends automatic user context per query, caps results, persists snapshots and includes notes in %s counts", async backend => {
     const { ChatSession } = await import("../src/chat/session.js");
     const { ChatStorage } = await import("../src/chat/storage.js");
     const { MemoryStore } = await import("../src/chat/memoryStore.js");
@@ -5465,7 +5478,7 @@ describe("explicit workspace notes", () => {
     mocks.settings.memoryAutoLoad = true; mocks.settings.memoryMaxCount = 1; mocks.backend = backend;
     const prompts: string[] = [];
     mocks.streamChat.mockImplementation(async function* (_endpoint, request) {
-      prompts.push(request.messages[0].content);
+      prompts.push(requestContextText(request));
       expect(request.messages.filter((m: { role: string }) => m.role === "tool")).toEqual([]);
       yield { kind: "text", text: "Done." };
     });
@@ -5488,7 +5501,7 @@ describe("explicit workspace notes", () => {
 });
 
 describe("automatic note budgeting and steering", () => {
-  it.each(["llama.cpp", "vllm"] as const)("keeps the system note separate from compacted history on %s", async backend => {
+  it.each(["llama.cpp", "vllm"] as const)("preserves the current user context after compaction on %s", async backend => {
     const { MemoryStore } = await import("../src/chat/memoryStore.js");
     const { ChatSession } = await import("../src/chat/session.js");
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "locality-memory-compact-"));
@@ -5502,9 +5515,10 @@ describe("automatic note budgeting and steering", () => {
       await session.compactNow();
       expect(events).toContainEqual(expect.objectContaining({ kind: "compactEnd", status: "executed" }));
       expect(record.memorySelections?.at(-1)?.memories).toEqual([note]);
-      expect(JSON.stringify(record.contextMessages)).not.toContain("COMPACT_NOTE_SENTINEL");
+      expect(record.messages.filter(m => m.role === "user").every(m => m.requestContext?.includes("COMPACT_NOTE_SENTINEL"))).toBe(true);
       const messages = await (session as unknown as { buildPromptMessages(): Promise<{ role: string; content: string }[]> }).buildPromptMessages();
-      expect(messages[0].content.match(/COMPACT_NOTE_SENTINEL/g)).toHaveLength(1);
+      expect(messages[0].content).not.toContain("COMPACT_NOTE_SENTINEL");
+      expect(latestUserContext({ messages }).match(/COMPACT_NOTE_SENTINEL/g)).toHaveLength(1);
       expect(JSON.stringify(mocks.tokenize.mock.calls)).toContain("COMPACT_NOTE_SENTINEL");
     } finally { await session.shutdown(); await fs.rm(root, { recursive: true, force: true }); }
   });
@@ -5544,8 +5558,8 @@ describe("automatic note budgeting and steering", () => {
     mocks.tokenize.mockImplementation(async (_endpoint, text: string) => text.includes("LOW_RANK_SENTINEL") ? 5000 : 20);
     const events: UiEvent[] = [], record = newRecord();
     mocks.streamChat.mockImplementation(async function* (_endpoint, request) {
-      expect(request.messages[0].content).toContain("HIGH_RANK_SENTINEL");
-      expect(request.messages[0].content).not.toContain("LOW_RANK_SENTINEL");
+      expect(latestUserContext(request)).toContain("HIGH_RANK_SENTINEL");
+      expect(latestUserContext(request)).not.toContain("LOW_RANK_SENTINEL");
       yield { kind: "text", text: "Done." };
     });
     const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: root, record, emit: e => events.push(e) });
@@ -5569,7 +5583,7 @@ describe("automatic note budgeting and steering", () => {
     const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: root, record, emit: () => {} });
     let step = 0;
     mocks.streamChat.mockImplementation(async function* (_endpoint, request) {
-      prompts.push(request.messages[0].content);
+      prompts.push(requestContextText(request));
       if (step++ === 0) {
         yield { kind: "text", text: "Looking at parser" };
         await fs.writeFile(path.join(root, "AGENTS.md"), "Changed project instructions.");
@@ -5606,7 +5620,7 @@ describe("committed automatic memory selections", () => {
     const record = storage.newRecord("native"), prompts: string[] = [];
     let session = new ChatSession({ storage, workspaceRoot: root, record, emit: () => {} });
     mocks.streamChat.mockImplementation(async function* (_endpoint, request) {
-      prompts.push(request.messages[0].content);
+      prompts.push(requestContextText(request));
       if (prompts.length === 1) {
         yield { kind: "text", text: "Starting." };
         session.steerUserMessage("Colors");
@@ -5621,13 +5635,14 @@ describe("committed automatic memory selections", () => {
       expect(prompts[1]).toBe(prompts[0]);
       await session.shutdown();
       const saved = (await storage.load(record.id))!;
-      expect(saved.turnSystemPrompt?.content).toBe(prompts[0]);
+      expect(prompts[0]).toContain(saved.turnSystemPrompt?.content);
+      expect(prompts[0]).toContain(saved.messages[0].requestContext);
       expect(saved.memorySelections).toEqual([{ messageTs: saved.messages[0].ts, memories: [note] }]);
       await store.save({ ...note, contents: "UPDATED_NOTE" }, noteRevision(note));
       await fs.writeFile(path.join(root, "AGENTS.md"), "UPDATED_INSTRUCTIONS");
       session = new ChatSession({ storage, workspaceRoot: root, record: saved, emit: () => {} });
       mocks.streamChat.mockImplementation(async function* (_endpoint, request) {
-        prompts.push(request.messages[0].content);
+        prompts.push(requestContextText(request));
         yield { kind: "text", text: "Done." };
       });
       expect(await session.continueTurn(saved.messages.at(-1)!.ts)).toBe(true);
@@ -5653,8 +5668,8 @@ describe("committed automatic memory selections", () => {
     const record = newRecord();
     const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: root, record, emit: () => {} });
     mocks.streamChat.mockImplementation(async function* (_endpoint, request) {
-      expect(request.messages[0].content).toContain("ORIGINAL_NOTE");
-      expect(request.messages[0].content).not.toContain("COLOR_NOTE");
+      expect(latestUserContext(request)).toContain("ORIGINAL_NOTE");
+      expect(latestUserContext(request)).not.toContain("COLOR_NOTE");
       expect(request.messages.at(-1)).toMatchObject({ role: "user", content: "Colors" });
       yield { kind: "text", text: "Done." };
     });
@@ -5678,12 +5693,13 @@ describe("committed automatic memory selections", () => {
     await new MemoryStore(root).save({ name: "Parser", contents: "OPTIONAL_NOTE_SENTINEL" });
     mocks.settings.memoryAutoLoad = true; mocks.backend = backend;
     mocks.fetchServerContextSize.mockResolvedValue(4096);
-    const count = (text: string) => text.includes("OPTIONAL_NOTE_SENTINEL") && text.includes("PROJECT_INSTRUCTIONS_SENTINEL") ? 5000 : 20;
+    const count = (text: string) => text.includes("OPTIONAL_NOTE_SENTINEL") && text.includes("PROJECT_INSTRUCTIONS_SENTINEL") ? 5000
+      : text.includes("OPTIONAL_NOTE_SENTINEL") || text.includes("PROJECT_INSTRUCTIONS_SENTINEL") ? 2000 : 20;
     mocks.tokenize.mockImplementation(async (_endpoint, text: string) => count(text));
     mocks.countPrompt.mockImplementation(async (_endpoint, request) => count(JSON.stringify(request)));
     const prompts: string[] = [], events: UiEvent[] = [], record = newRecord();
     mocks.streamChat.mockImplementation(async function* (_endpoint, request) {
-      prompts.push(request.messages[0].content);
+      prompts.push(requestContextText(request));
       yield { kind: "text", text: "Done." };
     });
     const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: root, record, emit: e => events.push(e) });
@@ -5714,7 +5730,7 @@ describe("committed automatic memory selections", () => {
     const record = newRecord(), events: UiEvent[] = [], prompts: string[] = [];
     const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: root, record, emit: e => events.push(e) });
     mocks.streamChat.mockImplementation(async function* (_endpoint, request) {
-      prompts.push(request.messages[0].content);
+      prompts.push(requestContextText(request));
       if (prompts.length === 1) {
         yield { kind: "text", text: "Starting." };
         expect(session.steerUserMessage("Keep it brief")).toBe(true);
@@ -5766,13 +5782,108 @@ describe("committed automatic memory selections", () => {
       const updated = (await store.save({ ...note, contents: "UPDATED_RULES_SENTINEL" }, noteRevision(note))).note;
       session = new ChatSession({ storage, workspaceRoot: root, record: saved, emit: e => events.push(e) });
       mocks.streamChat.mockImplementation(async function* (_endpoint, request) {
-        expect(request.messages[0].content).toContain(accepted ? "ORIGINAL_RULES_SENTINEL" : "UPDATED_RULES_SENTINEL");
+        expect(latestUserContext(request)).toContain(accepted ? "ORIGINAL_RULES_SENTINEL" : "UPDATED_RULES_SENTINEL");
         expect(request.messages.some((m: { role: string }) => m.role === "tool")).toBe(false);
         yield { kind: "text", text: "Resumed." };
       });
       expect(await session.continueTurn(saved.messages.at(-1)!.ts)).toBe(true);
       expect(saved.memorySelections).toHaveLength(1);
       expect(saved.memorySelections![0].memories).toEqual([accepted ? note : updated]);
+    } finally { await session.shutdown(); await fs.rm(root, { recursive: true, force: true }); }
+  });
+});
+
+describe("stable request prefixes", () => {
+  it("migrates a legacy accepted prompt and restores frozen context when compaction removes its request", async () => {
+    const { ChatSession } = await import("../src/chat/session.js");
+    const record = newRecord();
+    record.messages = [
+      { role: "user", content: "Plan the parser", mode: "plan", ts: 1000 },
+      { role: "assistant", content: "", ts: 2000, interruption: { reason: "Disconnected", mode: "plan", reasoningEffort: "effort:high" } }
+    ];
+    record.turnSystemPrompt = { messageTs: 1000, protocol: "native", content: "LEGACY_MODE_AND_TIME_PREFIX" };
+    record.memorySelections = [{ messageTs: 1000, memories: [{
+      version: 1, id: "01234567-89ab-4cde-8fab-0123456789ab", name: "Parser",
+      contents: "ACCEPTED_OLD_NOTE", createdAt: 10, updatedAt: 20, enabled: true
+    }] }];
+    let acceptedUser = "";
+    mocks.streamChat.mockImplementation(async function* (_endpoint, request) {
+      expect(request.messages[0].content).not.toContain("LEGACY_MODE_AND_TIME_PREFIX");
+      expect(request.messages[0].content).not.toContain("ACCEPTED_OLD_NOTE");
+      acceptedUser = latestUserContext(request);
+      expect(acceptedUser).toContain("Current chat mode: plan.");
+      expect(acceptedUser).toContain("1970-01-01T00:00:01.000Z");
+      expect(acceptedUser).toContain("ACCEPTED_OLD_NOTE");
+      yield { kind: "text", text: planText("- Inspect parser\n- Verify changes") };
+    });
+    const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record, emit: () => {} });
+    try {
+      expect(await session.continueTurn(2000)).toBe(true);
+      expect(record.turnSystemPrompt?.contextVersion).toBe(1);
+      expect(acceptedUser).toContain(record.messages[0].requestContext);
+      record.contextMessages = [
+        { role: "system", content: "[context summary] Plan the parser", ts: 3000 },
+        { role: "user", content: "Keep the plan concise", steering: true, ts: 1500 }
+      ];
+      const messages = await (session as unknown as { buildPromptMessages(): Promise<ChatCompletionRequest["messages"]> }).buildPromptMessages();
+      expect(messages[0].content).not.toContain("ACCEPTED_OLD_NOTE");
+      expect(latestUserContext({ messages })).toContain(record.messages[0].requestContext);
+      expect(messages.at(-1)?.content).toBe("Keep the plan concise");
+      expect(JSON.stringify(messages).match(/ACCEPTED_OLD_NOTE/g)).toHaveLength(1);
+    } finally { await session.shutdown(); }
+  });
+
+  it.each([
+    ["llama.cpp", "native"], ["vllm", "native"], ["llama.cpp", "legacy"], ["vllm", "legacy"]
+  ] as const)("preserves prior %s/%s messages across mode changes, note edits, and reload", async (backend, protocol) => {
+    const { ChatSession } = await import("../src/chat/session.js");
+    const { MemoryStore, noteRevision } = await import("../src/chat/memoryStore.js");
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "locality-stable-prefix-"));
+    const storage = new ChatStorage(root, path.join(root, "chats"));
+    const notes = new MemoryStore(root);
+    const original = (await notes.save({ name: "Parser", contents: "FIRST_SNAPSHOT" })).note;
+    mocks.backend = backend;
+    mocks.settings.memoryEnabled = true;
+    mocks.settings.memoryAutoLoad = true;
+    mocks.settings.toolCallingMode = "compat-qwen3";
+    const requests: Pick<ChatCompletionRequest, "messages" | "tools">[] = [];
+    mocks.streamChat.mockImplementation(async function* (_endpoint, request: ChatCompletionRequest) {
+      if (protocol === "legacy" && request.tools) throw new mocks.NativeToolsUnsupportedError("tools unsupported");
+      requests.push({ messages: structuredClone(request.messages), tools: structuredClone(request.tools) });
+      yield { kind: "text", text: latestUserContext(request).includes("Current chat mode: plan.") ? planText("- Inspect\n- Verify") : "Done." };
+    });
+    let record = storage.newRecord("compat-qwen3");
+    let session = new ChatSession({ storage, workspaceRoot: root, record, emit: () => {} });
+    try {
+      await session.sendUserMessage("Parser first", [], "act");
+      const updated = (await notes.save({ ...original, contents: "SECOND_SNAPSHOT" }, noteRevision(original))).note;
+      await session.sendUserMessage("Parser second", [], "plan");
+      expect(session.resolvePlan(record.pendingPlanMessageTs!, "act")).toBe(true);
+      await notes.setEnabled(updated.id, false, noteRevision(updated));
+      await session.sendUserMessage("Parser third", [], "review");
+      await session.shutdown();
+      record = (await storage.load(record.id))!;
+      session = new ChatSession({ storage, workspaceRoot: root, record, emit: () => {} });
+      await session.sendUserMessage("Parser fourth", [], "act");
+      expect(requests).toHaveLength(4);
+      for (let index = 1; index < requests.length; index++) {
+        expect(requests[index].tools).toEqual(requests[0].tools);
+        expect(requests[index].messages.slice(0, requests[index - 1].messages.length)).toEqual(requests[index - 1].messages);
+      }
+      expect(latestUserContext(requests[0])).toContain("FIRST_SNAPSHOT");
+      expect(latestUserContext(requests[1])).toContain("SECOND_SNAPSHOT");
+      expect(latestUserContext(requests[1])).not.toContain("FIRST_SNAPSHOT");
+      expect(latestUserContext(requests[2])).not.toContain("SNAPSHOT");
+      expect(JSON.stringify(requests[3].messages)).toContain("FIRST_SNAPSHOT");
+      expect(JSON.stringify(requests[3].messages)).toContain("SECOND_SNAPSHOT");
+      for (const request of requests) {
+        expect(request.messages[0].content).not.toContain("User request time:");
+        expect(request.messages[0].content).not.toContain("SNAPSHOT");
+      }
+      expect(record.messages.filter(message => message.role === "user").map(message => message.content)).toEqual([
+        "Parser first", "Parser second", "Parser third", "Parser fourth"
+      ]);
+      expect(record.messages.filter(message => message.role === "user").every(message => message.requestContext)).toBe(true);
     } finally { await session.shutdown(); await fs.rm(root, { recursive: true, force: true }); }
   });
 });

@@ -6,7 +6,7 @@ import { createRequire } from "node:module";
 import vm from "node:vm";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
-import type { toolsForMode as toolSelector } from "../src/tools/toolDefinitions.js";
+import type { toolsForPrompt as catalogSelector, toolsForMode as toolSelector } from "../src/tools/toolDefinitions.js";
 import type { buildSystemPrompt as promptBuilder } from "../src/llm/prompt.js";
 import type { SideFeature } from "../src/build/sideContracts.js";
 import type { FeatureContext, FeatureRuntime } from "../src/build/contracts.js";
@@ -16,6 +16,8 @@ import type { SideHostFactory } from "../src/build/sideHostContracts.js";
 
 interface Probe {
   toolsForMode: typeof toolSelector;
+  toolsForPrompt: typeof catalogSelector;
+  buildUserContext: typeof promptBuilder;
   buildSystemPrompt: typeof promptBuilder;
   sideFeature: SideFeature;
   createSideHost?: SideHostFactory;
@@ -34,8 +36,8 @@ const { profilePlugin, auditMetadata } = await import(scriptsPath) as {
 async function probe(profile: string, values: Record<string, unknown> = {}, workspaceValues: Record<string, unknown> = { safeCommandPatterns: [".*"] }, verified = true) {
   const result = await esbuild.build({
     stdin: { contents: `
-      export { toolsForMode } from './src/tools/toolDefinitions.ts';
-      export { buildSystemPrompt } from './src/llm/prompt.ts';
+      export { toolsForMode, toolsForPrompt } from './src/tools/toolDefinitions.ts';
+      export { buildSystemPrompt, buildUserContext } from './src/llm/prompt.ts';
       export { createFeatures } from './src/build/runtime.js';
       export { sideFeature } from './src/build/side.js';
       export { createSideHost } from './src/build/sideHost.js';
@@ -102,19 +104,21 @@ describe("edition composition", () => {
       expect(names).not.toContain("run_process");
       expect(names.includes("web_search")).toBe(profile === "advanced");
       expect(names.includes("read_webpage")).toBe(profile === "advanced");
+      const catalog = api.toolsForPrompt(transport, false, false, settings);
+      expect(catalog.some(tool => tool.name === "run_command")).toBe(profile !== "no-commands");
+      expect(catalog.some(tool => tool.name === "web_search")).toBe(profile === "advanced");
       for (const family of ["gemma4", "qwen3", "muse-glimmer", "gpt-oss"] as const) {
-        const prompt = api.buildSystemPrompt({ family, mode, nativeTools: transport === "native", workspaceRoot: "/tmp", featureSettings: settings });
-        expect(prompt).not.toContain("run_process");
-        expect(prompt.includes("SAFE-LIST CONFIGURATION")).toBe(profile === "safe-list" && mode === "act");
-        if (profile === "no-commands" || mode !== "act") {
-          for (const name of ["run_command", "wait_process", "stop_process"]) expect(prompt).not.toContain(name);
+        const opts = { family, mode, nativeTools: transport === "native", workspaceRoot: "/tmp", featureSettings: settings };
+        const prompt = api.buildSystemPrompt(opts);
+        const context = api.buildUserContext(opts);
+        expect(prompt).toBe(api.buildSystemPrompt({ ...opts, mode: "act" }));
+        expect(prompt + context).not.toContain("run_process");
+        expect(context.includes("SAFE-LIST CONFIGURATION")).toBe(profile === "safe-list" && mode === "act");
+        if (profile === "no-commands") {
+          for (const name of ["run_command", "wait_process", "stop_process"]) expect(prompt + context).not.toContain(name);
         }
-        if (mode !== "act") {
-          for (const name of ["write_file", "create_file", "edit_file", "insert_text", "replace_range", "update_todos"]) {
-            expect(prompt).not.toContain(name);
-          }
-        }
-        if (profile !== "advanced") expect(prompt).not.toContain("web_search");
+        if (mode !== "act") expect(context).toContain("This mode is read-only");
+        if (profile !== "advanced") expect(prompt + context).not.toContain("web_search");
         expect(prompt).not.toContain('"availability"');
         expect(prompt).not.toContain("You are offline");
       }
@@ -215,7 +219,7 @@ describe("edition composition", () => {
     const configured = verified.readSettings();
     for (const mode of ["act", "plan", "review"] as const) {
       expect(api.toolsForMode(mode, "native", false, false, configured).map(tool => tool.name)).toContain("web_search");
-      expect(api.buildSystemPrompt({ family: "gemma4", mode, nativeTools: true, workspaceRoot: "/tmp", featureSettings: configured })).toContain("The user approves each web request");
+      expect(api.buildUserContext({ family: "gemma4", mode, nativeTools: true, workspaceRoot: "/tmp", featureSettings: configured })).toContain("The user approves each web request");
     }
   });
 
@@ -240,7 +244,7 @@ describe("edition composition", () => {
       expect(html).toContain("Maximum number of search results");
       expect(html).toContain(`min="1" max="20" step="1" value="${expected}"`);
       for (const mode of ["act", "plan", "review"] as const) for (const transport of ["native", "legacy"] as const) {
-        const prompt = api.buildSystemPrompt({ family: "gemma4", mode, nativeTools: transport === "native", workspaceRoot: "/tmp", featureSettings: settings });
+        const prompt = api.buildUserContext({ family: "gemma4", mode, nativeTools: transport === "native", workspaceRoot: "/tmp", featureSettings: settings });
         expect(prompt).toContain(`at most ${expected} results per call`);
       }
     }
@@ -267,7 +271,7 @@ describe("edition composition", () => {
     const html = api.sideFeature.render(settings as unknown as Record<string, unknown>, (key, _label, checked) => `${key}:${checked}`, value => value);
     expect(html).toContain("autoapproveWebSearch:true");
     for (const mode of ["act", "plan", "review"] as const) {
-      const prompt = api.buildSystemPrompt({ family: "gemma4", mode, nativeTools: true, workspaceRoot: "/tmp", featureSettings: settings });
+      const prompt = api.buildUserContext({ family: "gemma4", mode, nativeTools: true, workspaceRoot: "/tmp", featureSettings: settings });
       expect(prompt).toContain("The user has enabled automatic web-request approval.");
       expect(prompt).not.toContain("The user approves each web request");
     }
