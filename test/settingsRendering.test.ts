@@ -21,8 +21,22 @@ describe("settings rendering", () => {
     expect([...html.matchAll(/data-settings-section="([^"]+)" aria-expanded="([^"]+)"/g)]
       .map(([, section, expanded]) => [section, expanded])).toEqual([
       ["model", "false"], ["chat", "false"], ["tools", "true"],
-      ["automation", "true"], ["user", "false"], ["reset", "false"]
+      ["automation", "true"], ["user", "false"], ["personalization", "false"], ["reset", "false"]
     ]);
+  });
+
+  it("opens personalization with a safely escaped draft and shared controls", () => {
+    const view = state({ personalization: "Saved preferences" });
+    view.personalizationEditor = { draft: '</textarea><script>bad()</script>\nNew preferences', error: "Could not save <file>" };
+    const html = renderSettings(view, new Set(["user", "personalization"]));
+    expect(html).toContain('data-settings-section="personalization" aria-expanded="true"');
+    expect(html).toContain('class="settings-textarea"');
+    expect(html).toContain('&lt;/textarea&gt;&lt;script&gt;bad()&lt;/script&gt;\nNew preferences');
+    expect(html).not.toContain('<script>bad()');
+    expect(html).toContain('Could not save &lt;file&gt;');
+    expect(html).toContain('id="savePersonalization" class="action-btn"');
+    expect(html).toContain('id="cancelPersonalization" class="action-btn"');
+    expect(html.indexOf('data-settings-section="user"')).toBeLessThan(html.indexOf('id="personalization"'));
   });
 
   it.each(["memoryEnabled", "memoryAutoLoad"])("keeps %s independent of other memory switches", enabled => {

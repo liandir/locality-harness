@@ -27,6 +27,7 @@ const mocks = vi.hoisted(() => ({
   settings: {
     endpoint: "http://127.0.0.1:8080",
     model: "test-model",
+    personalization: "",
     titlePrompt: "Summarize the user message in 2-6 words. Output ONLY the summary.",
     commitMessagePrompt: "Write a concise Git commit message.",
     toolCallingMode: "compat-gemma4",
@@ -64,7 +65,8 @@ vi.mock("vscode", () => ({
     getConfiguration: () => ({
       get: (key: string) => (mocks.settings as Record<string, unknown>)[key],
       inspect: (key: string) => ["memoryEnabled", "memoryAutoLoad"].includes(key)
-        ? { workspaceValue: (mocks.settings as Record<string, unknown>)[key] } : undefined,
+        ? { workspaceValue: (mocks.settings as Record<string, unknown>)[key] }
+        : key === "personalization" ? { globalValue: mocks.settings.personalization } : undefined,
       update: mocks.updateSetting
     }),
     onDidChangeConfiguration: (listener: (event: { affectsConfiguration(key: string): boolean }) => void) => {
@@ -137,6 +139,7 @@ beforeEach(() => {
   mocks.startCommand.mockImplementation((command, cwd, signal, onOutput) =>
     mockCommandHandle(mocks.runCommand(command, cwd, signal, onOutput))
   );
+  mocks.settings.personalization = "";
   mocks.settings.autoapproveReads = true;
   mocks.settings.autoapproveWrites = false;
   mocks.settings.autoapproveCommands = false;
@@ -5885,5 +5888,39 @@ describe("stable request prefixes", () => {
       ]);
       expect(record.messages.filter(message => message.role === "user").every(message => message.requestContext)).toBe(true);
     } finally { await session.shutdown(); await fs.rm(root, { recursive: true, force: true }); }
+  });
+});
+
+
+describe("personalized system prompts", () => {
+  it.each(["llama.cpp", "vllm"] as const)("applies edits on the next %s user turn and preserves accepted tool continuations", async backend => {
+    const { ChatSession } = await import("../src/chat/session.js");
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "locality-personalization-"));
+    mocks.backend = backend;
+    mocks.settings.personalization = "ORIGINAL_USER_PREFERENCE";
+    let timestamp = Date.now();
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => timestamp++);
+    const record = newRecord(), prompts: string[] = [];
+    mocks.streamChat.mockImplementation(async function* (_endpoint, request) {
+      prompts.push(request.messages[0].content);
+      if (prompts.length === 1) {
+        request.onResponseAccepted();
+        mocks.settings.personalization = "UPDATED_USER_PREFERENCE";
+        yield { kind: "toolCall", name: "list_dir", id: "list", argsJson: '{"path":"."}' };
+      } else yield { kind: "text", text: "Done." };
+    });
+    const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: root, record, emit: () => {} });
+    try {
+      await session.sendUserMessage("Inspect the directory");
+      expect(prompts).toHaveLength(2);
+      expect(prompts[0]).toContain("ORIGINAL_USER_PREFERENCE");
+      expect(prompts[1]).toBe(prompts[0]);
+      await session.sendUserMessage("Next question");
+      expect(prompts[2]).toContain("UPDATED_USER_PREFERENCE");
+      expect(prompts[2]).not.toContain("ORIGINAL_USER_PREFERENCE");
+      mocks.settings.personalization = "";
+      await session.sendUserMessage("Another question");
+      expect(prompts[3]).not.toContain("USER PERSONALIZATION");
+    } finally { clock.mockRestore(); await session.shutdown(); await fs.rm(root, { recursive: true, force: true }); }
   });
 });

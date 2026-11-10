@@ -26,6 +26,7 @@ export interface HarnessSettings {
   reasoningEfforts: ReasoningEfforts;
   titlePrompt: string;
   commitMessagePrompt: string;
+  personalization: string;
   showThinking: boolean;
   steerWithEnter: boolean;
   autoCompact: boolean;
@@ -57,6 +58,7 @@ export type AutoApprovalSetting = Extract<keyof HarnessSettings, `autoapprove${s
 export function readSettings(): HarnessSettings {
   const cfg = vscode.workspace.getConfiguration(NS);
   const reasoningBudget = cfg.get<unknown>("reasoningBudget");
+  const personalization = cfg.inspect?.<unknown>("personalization")?.globalValue;
   return {
     serverType: "auto",
     endpoint: cfg.get<string>("endpoint") ?? "http://localhost:8080/v1",
@@ -69,6 +71,7 @@ export function readSettings(): HarnessSettings {
     reasoningEfforts: normalizeReasoningEfforts(cfg.get<unknown>("reasoningEfforts")),
     titlePrompt: cfg.get<string>("titlePrompt")?.trim() || DEFAULT_TITLE_PROMPT,
     commitMessagePrompt: cfg.get<string>("commitMessagePrompt")?.trim() || DEFAULT_COMMIT_MESSAGE_PROMPT,
+    personalization: typeof personalization === "string" ? personalization : "",
     showThinking: cfg.get<boolean>("showThinking") ?? false,
     steerWithEnter: cfg.get<boolean>("steerWithEnter") === true,
     memoryEnabled: cfg.inspect?.<boolean>("memoryEnabled")?.workspaceValue === true,
@@ -103,13 +106,14 @@ export async function writeSetting<K extends keyof HarnessSettings>(
   scope: "global" | "effective" = "global"
 ): Promise<void> {
   if (!SETTING_KEYS.includes(key)) throw new Error("Setting is unavailable in this edition.");
+  if (key === "personalization" && typeof value !== "string") throw new Error("Personalization must be text.");
   if (key === "reasoningBudget" && !isReasoningBudget(value)) {
     throw new Error("Enter a positive whole number or leave the reasoning budget empty for unlimited reasoning.");
   }
   const cfg = vscode.workspace.getConfiguration(NS);
   let target = ["memoryEnabled", "memoryAutoLoad", "memoryMaxCount"].includes(key)
     ? vscode.ConfigurationTarget.Workspace : vscode.ConfigurationTarget.Global;
-  if (scope === "effective") {
+  if (scope === "effective" && key !== "personalization") {
     const inspected = cfg.inspect(key);
     if (inspected?.workspaceFolderValue !== undefined) target = vscode.ConfigurationTarget.WorkspaceFolder;
     else if (inspected?.workspaceValue !== undefined) target = vscode.ConfigurationTarget.Workspace;
@@ -130,6 +134,7 @@ export const SETTING_KEYS: (keyof HarnessSettings)[] = [
   "reasoningEfforts",
   "titlePrompt",
   "commitMessagePrompt",
+  "personalization",
   "showThinking",
   "steerWithEnter",
   "autoCompact",

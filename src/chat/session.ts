@@ -391,6 +391,7 @@ export class ChatSession {
       family: this.compatibilityFamily(),
       workspaceRoot: this.workspaceRoot,
       agentsMd: this.cachedAgentsMd(),
+      personalization: readSettings().personalization,
       memoryEnabled: readSettings().memoryEnabled,
       supportsVision: this.supportsVision,
       nativeTools: this.toolProtocol === "native"

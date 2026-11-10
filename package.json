@@ -220,6 +220,12 @@
           },
           "description": "Additional reasoning-effort choices shown in settings. Each key is the display label and its value is sent as reasoning_effort. vLLM accepts none, minimal, low, medium, high, xhigh, and max; model support varies. Default is built in; use Activate Reasoning to turn reasoning on or off."
         },
+        "locality.personalization": {
+          "type": "string",
+          "default": "",
+          "scope": "application",
+          "description": "Personal preferences for responses, such as language, tone, and formatting. Applies to all workspaces from your next message."
+        },
         "locality.titlePrompt": {
           "type": "string",
           "default": "Summarize the user message in 2-6 words. Output ONLY the summary.",

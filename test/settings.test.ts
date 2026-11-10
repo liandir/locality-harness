@@ -180,3 +180,23 @@ it("migrates the legacy workspace loading value without enabling global values o
   expect(mocks.update).not.toHaveBeenCalledWith("memoryAutoLoad", true, 2);
   expect(mocks.update).toHaveBeenCalledWith("memoryLoadOnStart", undefined, 2);
 });
+
+describe("personalization settings", () => {
+  it("reads only user preferences and preserves multiline text", async () => {
+    const { readSettings, writeSetting } = await import("../src/config/settings.js");
+    expect(readSettings().personalization).toBe("");
+    mocks.values.set("personalization", "Workspace override");
+    mocks.workspace.set("personalization", "Workspace override");
+    expect(readSettings().personalization).toBe("");
+    mocks.workspace.clear();
+    const value = "Use British English.\n  Prefer short explanations.\n";
+    mocks.explicit.set("personalization", value);
+    expect(readSettings().personalization).toBe(value);
+    await writeSetting("personalization", value, "effective");
+    expect(mocks.update).toHaveBeenCalledWith("personalization", value, 1);
+    mocks.workspace.set("personalization", "Workspace override");
+    await writeSetting("personalization", "", "effective");
+    expect(mocks.update).toHaveBeenLastCalledWith("personalization", "", 1);
+    await expect(writeSetting("personalization", 123 as never)).rejects.toThrow("must be text");
+  });
+});

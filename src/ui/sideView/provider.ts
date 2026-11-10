@@ -18,7 +18,7 @@ import { validateEndpoint } from "../../network/endpointValidator.js";
 import { fetchServerMetadata, fetchServerModels, type ServerModel } from "../../llm/client.js";
 import { ChatStorage } from "../../chat/storage.js";
 import { DEFAULT_REASONING_EFFORT, type ReasoningEffort } from "../../chat/reasoningEffort.js";
-import type { ExtToSide, SideTab, SideToExt, ChatTab } from "../messaging.js";
+import type { ExtToSide, SideTab, SideToExt, ChatTab, PersonalizationEditor } from "../messaging.js";
 import { SETTINGS_SECTIONS, type SettingsSection } from "../messaging.js";
 import { MemoryPanel } from "../memoryPanel.js";
 
@@ -36,6 +36,7 @@ export class SideViewProvider implements vscode.WebviewViewProvider {
   private chatListGeneration = 0;
   private memoryPanel?: MemoryPanel;
   private clearingMemories = false;
+  private personalizationEditor: PersonalizationEditor = {};
 
   constructor(
     private context: vscode.ExtensionContext,
@@ -79,8 +80,10 @@ export class SideViewProvider implements vscode.WebviewViewProvider {
   post(msg: ExtToSide): void { this.view?.webview.postMessage(msg); }
 
   pushSettings(resetDrafts = false): void {
+    if (resetDrafts) this.personalizationEditor = {};
     const s = readSettings();
     this.post({ type: "settings", settings: s as unknown as Record<string, unknown>, reasoningEffort: this.currentReasoningEffort(), ...(resetDrafts ? { resetDrafts: true } : {}) });
+    this.post({ type: "personalizationEditor", editor: this.personalizationEditor });
     void this.featureHost?.pushSettings();
     void this.pushCredentialState(s.endpoint);
   }
@@ -272,6 +275,28 @@ export class SideViewProvider implements vscode.WebviewViewProvider {
           this.post({ type: "settingSaved", key: m.key, ok: false, error: (e as Error).message });
         }
         break;
+      case "personalizationDraft":
+        if (!this.personalizationEditor.saving && typeof m.value === "string") this.personalizationEditor = { draft: m.value };
+        break;
+      case "cancelPersonalization":
+        if (this.personalizationEditor.saving) break;
+        this.personalizationEditor = {};
+        this.pushSettings();
+        break;
+      case "savePersonalization": {
+        const draft = this.personalizationEditor.draft;
+        if (this.personalizationEditor.saving || draft === undefined) break;
+        this.personalizationEditor = { draft, saving: true };
+        this.post({ type: "personalizationEditor", editor: this.personalizationEditor });
+        try {
+          await writeSetting("personalization", draft);
+          this.personalizationEditor = {};
+        } catch (error) {
+          this.personalizationEditor = { draft, error: (error as Error).message };
+        }
+        this.pushSettings();
+        break;
+      }
       case "setReasoningEffort":
         try {
           await this.reasoningEffortControl?.set(m.effort);

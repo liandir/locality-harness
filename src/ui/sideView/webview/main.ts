@@ -293,6 +293,17 @@ function bind(): void {
   bindRangeSetting("autoCompactThresholdPercent");
   bindApprovalSettings();
   sideFeature.bind(root, send, render);
+  const personalization = root.querySelector<HTMLTextAreaElement>("#personalization");
+  personalization?.addEventListener("input", () => {
+    if (state.personalizationEditor?.saving) return;
+    state.personalizationEditor = { draft: personalization.value };
+    const unchanged = personalization.value === String(state.settings.personalization ?? "");
+    for (const id of ["savePersonalization", "cancelPersonalization"]) root.querySelector<HTMLButtonElement>(`#${id}`)!.disabled = unchanged;
+    root.querySelector<HTMLElement>("#personalization-error")!.hidden = true;
+    send({ type: "personalizationDraft", value: personalization.value });
+  });
+  root.querySelector("#savePersonalization")?.addEventListener("click", () => send({ type: "savePersonalization" }));
+  root.querySelector("#cancelPersonalization")?.addEventListener("click", () => send({ type: "cancelPersonalization" }));
   root.querySelector("#editWorkspacePrompts")?.addEventListener("click", () => send({ type: "editWorkspacePrompts" }));
   root.querySelector("#editUserSettings")?.addEventListener("click", () => send({ type: "editUserSettingsJson" }));
   root.querySelector("#restorePrompts")?.addEventListener("click", () => send({ type: "restoreDefaultGeneratedPrompts" }));
@@ -350,6 +361,13 @@ window.addEventListener("message", ev => {
   const msg = ev.data as ExtToSide;
   if (sideFeature.receive?.(msg)) { render(); return; }
   switch (msg.type) {
+    case "personalizationEditor": {
+      state.personalizationEditor = msg.editor;
+      const input = root.querySelector<HTMLTextAreaElement>("#personalization");
+      const value = msg.editor.draft ?? String(state.settings.personalization ?? "");
+      render(document.activeElement !== input || input?.value === value);
+      break;
+    }
     case "settingsSections":
       expandedSettings = new Set(msg.expanded);
       updateSettingsSections();
@@ -379,6 +397,7 @@ window.addEventListener("message", ev => {
     case "appInfo": state.version = msg.version; render(); break;
     case "settings":
       if (msg.resetDrafts) {
+        state.personalizationEditor = undefined;
         state.endpointDraft = undefined;
         state.endpointSubmitted = undefined;
         state.endpointRequestId = undefined;

@@ -559,3 +559,20 @@ describe("conditional image tool", () => {
     expect(buildSystemPrompt({ ...opts, supportsVision: true })).toContain("view_image is available");
   });
 });
+
+describe("user personalization", () => {
+  it.each([false, true])("includes saved preferences only in the stable system prompt (native: %s)", nativeTools => {
+    const options = { family: "qwen3" as const, workspaceRoot: "/tmp/ws", nativeTools, personalization: "Use British English.\nKeep explanations concise." };
+    const system = buildSystemPrompt({ ...options, mode: "act" });
+    expect(system).toContain("USER PERSONALIZATION");
+    expect(system).toContain(options.personalization);
+    expect(system).toContain("current user request and project instructions take precedence");
+    expect(system).toContain("do not change mode restrictions or tool permissions");
+    for (const mode of ["plan", "review", "act"] as const) {
+      expect(buildSystemPrompt({ ...options, mode, userMessageTs: 1234 })).toBe(system);
+      expect(buildUserContext({ ...options, mode })).not.toContain(options.personalization);
+    }
+    expect(buildSystemPrompt({ ...options, personalization: "" })).not.toContain("USER PERSONALIZATION");
+    expect(buildSystemPrompt({ ...options, personalization: " \n " })).not.toContain("USER PERSONALIZATION");
+  });
+});

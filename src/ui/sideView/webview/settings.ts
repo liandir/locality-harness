@@ -123,6 +123,7 @@ export function renderSettings(state: SideViewState, expandedSettings: ReadonlyS
       `)}
 
       ${section("user", "User", `
+        ${renderPersonalization(state, expandedSettings.has("personalization"))}
         <button id="editUserSettings" class="action-btn wide-button">Edit User Settings</button>
         <button id="editWorkspacePrompts" class="action-btn wide-button">Edit workspace prompts</button>
         <button id="restorePrompts" class="action-btn wide-button">Restore default prompts</button>
@@ -133,6 +134,26 @@ export function renderSettings(state: SideViewState, expandedSettings: ReadonlyS
       `)}
     </div>
   `;
+}
+
+function renderPersonalization(state: SideViewState, expanded: boolean): string {
+  const editor = state.personalizationEditor ?? {};
+  const saved = String(state.settings.personalization ?? "");
+  const value = editor.draft ?? saved;
+  const unchanged = value === saved;
+  return `<div class="settings-editor">
+    <button type="button" class="action-btn wide-button disclosure-trigger settings-editor-heading" data-settings-section="personalization" aria-expanded="${expanded}" aria-controls="settings-personalization"><span>Personalization</span>${chevronIcon()}</button>
+    <div id="settings-personalization" class="settings-editor-content" ${expanded ? "" : "hidden"}>
+      <label class="field-label" for="personalization">Your preferences</label>
+      <textarea id="personalization" class="settings-textarea" rows="6" aria-describedby="personalization-help" placeholder="For example: Use concise responses, British English, and TypeScript examples." ${editor.saving ? "readonly" : ""}>${esc(value)}</textarea>
+      <p id="personalization-help" class="setting-help">Applies to all workspaces from your next message.</p>
+      <p id="personalization-error" class="validation err" role="alert" ${editor.error ? "" : "hidden"}>${esc(editor.error ?? "")}</p>
+      <div class="settings-editor-actions">
+        <button type="button" id="cancelPersonalization" class="action-btn" ${editor.saving || unchanged ? "disabled" : ""}>Cancel</button>
+        <button type="button" id="savePersonalization" class="action-btn" ${editor.saving || unchanged ? "disabled" : ""}>${editor.saving ? "Saving…" : "Save"}</button>
+      </div>
+    </div>
+  </div>`;
 }
 
 function renderMemorySettings(settings: Record<string, unknown>): string {
