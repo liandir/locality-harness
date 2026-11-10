@@ -1999,7 +1999,7 @@ function updateComposer(): void {
             ${state.editingQueuedMessageId === message.id
               ? `<button class="icon-btn icon-btn-compact queued-message-action save" type="button" data-save-queued="${escapeHtml(message.id)}" data-tip="Save" aria-label="Save queued message">${checkIcon()}</button>
                  <button class="icon-btn icon-btn-compact queued-message-action" type="button" data-cancel-queued-edit data-tip="Cancel" aria-label="Cancel editing">&times;</button>`
-              : `<button class="icon-btn icon-btn-compact queued-message-action" type="button" data-steer-queued="${escapeHtml(message.id)}" data-tip="Send now to steer the running response" aria-label="Steer" ${state.busy ? "" : "disabled"}>${steerIcon()}</button>
+              : `<button class="icon-btn icon-btn-compact queued-message-action" type="button" data-steer-queued="${escapeHtml(message.id)}" data-tip="Send now" aria-label="Steer" ${state.busy ? "" : "disabled"}>${steerIcon()}</button>
                  <button class="icon-btn icon-btn-compact queued-message-action" type="button" data-edit-queued="${escapeHtml(message.id)}" data-tip="Edit" aria-label="Edit queued message">${pencilIcon()}</button>
                  <button class="icon-btn icon-btn-compact queued-message-action remove" type="button" data-remove-queued="${escapeHtml(message.id)}" data-tip="Remove" aria-label="Remove queued message">${trashIcon()}</button>`}
           </span>
