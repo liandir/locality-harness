@@ -508,6 +508,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .change-summary-head { display: flex; align-items: center; gap: 8px; }
 .change-summary-toggle { width: max-content; max-width: none; background: transparent; border: 0; color: inherit; font: inherit; text-align: left; }
 .change-summary-title { flex-shrink: 0; }
+/* Align UI-font labels and editor-font counts by their text baselines. */
+.change-summary-toggle > :is(.change-summary-title, .diff-stat-group) { align-self: baseline; }
 .change-summary-toggle > .diff-stat-group { margin-left: 8px; }
 .change-summary .change-undo-btn { margin-left: auto; }
 .change-file-row { width: 100%; }
