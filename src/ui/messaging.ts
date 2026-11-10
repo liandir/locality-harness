@@ -47,6 +47,7 @@ export interface MemoryEditor {
   error?: string;
 }
 export interface MemoryPanelState { editors: MemoryEditor[]; activeKey?: string }
+export interface PersonalizationEditor { draft?: string; saving?: boolean; error?: string }
 
 export type SideToExt =
   | { type: "ready" }
@@ -59,6 +60,9 @@ export type SideToExt =
   | { type: "setSettingsSectionExpanded"; section: SettingsSection; expanded: boolean }
   | { type: "openGithub" }
   | { type: "saveSetting"; key: string; value: unknown }
+  | { type: "personalizationDraft"; value: string }
+  | { type: "savePersonalization" }
+  | { type: "cancelPersonalization" }
   | { type: "setReasoningEffort"; effort: ReasoningEffort }
   | { type: "validateEndpoint"; url: string; requestId?: number; apiKey?: string }
   | { type: "validateWebSearch"; endpoint: string; apiKey: string }
@@ -83,6 +87,7 @@ export type SideToExt =
 export type ChatContextMessage = Extract<SideToExt, { type: "openChat" | "renameChat" | "deleteChat" }>;
 
 export type ExtToSide =
+  | { type: "personalizationEditor"; editor: PersonalizationEditor }
   | { type: "memoryPanel"; panel: MemoryPanelState }
   | { type: "settingsSections"; expanded: SettingsSection[] }
   | { type: "memories"; memories: ManagedMemory[]; warnings?: string[] }
@@ -108,6 +113,7 @@ export type ChatToExt = (
   | { type: "send"; text: string; mode: ChatMode; attachmentIds?: string[] }
   | { type: "steerMessage"; text: string; mode: ChatMode; attachmentIds?: string[] }
   | { type: "queueMessage"; id: string; text: string; mode: ChatMode; attachmentIds?: string[] }
+  | { type: "steerQueuedMessage"; id: string }
   | { type: "updateQueuedMessage"; id: string; text: string }
   | { type: "reorderQueuedMessages"; ids: string[] }
   | { type: "removeQueuedMessage"; id: string }

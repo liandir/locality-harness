@@ -2,7 +2,7 @@
   "name": "locality",
   "displayName": "Locality",
   "description": "Drive a LAN-hosted llama.cpp or vLLM server from VS Code with hard network isolation, workspace-scoped tools, and an approval-gated terminal.",
-  "version": "2.2.2",
+  "version": "2.2.3",
   "repository": {
     "type": "git",
     "url": "https://github.com/liandir/locality.git"
@@ -219,6 +219,12 @@
             "type": "string"
           },
           "description": "Additional reasoning-effort choices shown in settings. Each key is the display label and its value is sent as reasoning_effort. vLLM accepts none, minimal, low, medium, high, xhigh, and max; model support varies. Default is built in; use Activate Reasoning to turn reasoning on or off."
+        },
+        "locality.personalization": {
+          "type": "string",
+          "default": "",
+          "scope": "application",
+          "description": "Personal preferences for responses, such as language, tone, and formatting. Applies to all workspaces from your next message."
         },
         "locality.titlePrompt": {
           "type": "string",

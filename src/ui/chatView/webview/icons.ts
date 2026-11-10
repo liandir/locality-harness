@@ -1,12 +1,7 @@
-export function sendIcon(): string {
+export function sendIcon(queued = false): string {
   return `<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false">
+    ${queued ? '<path d="M2.6 1h10.8v1.2H2.6Z" fill="currentColor"/>' : ""}
     <path d="M8.55 3.15 13.4 8l-.85.85-3.95-3.94V13H7.4V4.91L3.45 8.85 2.6 8l4.85-4.85h1.1Z" fill="currentColor"/>
-  </svg>`;
-}
-
-export function steerIcon(): string {
-  return `<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
-    <path d="M12.5 13V6.5h-9M7 3 3.5 6.5 7 10"/>
   </svg>`;
 }
 
@@ -78,9 +73,9 @@ export function questionIcon(): string {
 
 export function forkIcon(): string {
   return `<svg viewBox="1.96 0 20 18" width="17" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
-    <path d="M5.91 9H11L14.6 12.6"/>
-    <path d="M12.5 7.5L14.6 5.4" stroke-linecap="butt"/>
-    <circle cx="16" cy="4" r="1.75" fill="currentColor"/>
+    <path d="M5.91 9H11L14.6 5.4"/>
+    <path d="M12.5 10.5L14.6 12.6" stroke-linecap="butt"/>
+    <circle cx="16" cy="4" r="1.75"/>
     <circle cx="16" cy="14" r="1.75"/>
   </svg>`;
 }

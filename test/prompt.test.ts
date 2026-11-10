@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { buildSystemPrompt, renderToolCallForPrompt } from "../src/llm/prompt.js";
+import { buildUserContext, withUserContext, type PromptOptions, buildSystemPrompt, renderToolCallForPrompt } from "../src/llm/prompt.js";
 import { makeParser } from "../src/llm/parser/index.js";
-import { toolsForMode, validateToolArguments } from "../src/tools/toolDefinitions.js";
+import { toolsForPrompt, toolsForMode, validateToolArguments } from "../src/tools/toolDefinitions.js";
 
 describe("Gemma prompt rendering", () => {
   it("uses native Gemma declarations and call examples", () => {
@@ -136,9 +136,11 @@ describe("Gemma prompt rendering", () => {
 });
 
 describe("system prompt policy", () => {
-  const normal = buildSystemPrompt({ family: "qwen3", mode: "act", workspaceRoot: "/tmp/ws" });
-  const plan = buildSystemPrompt({ family: "qwen3", mode: "plan", workspaceRoot: "/tmp/ws" });
-  const review = buildSystemPrompt({ family: "qwen3", mode: "review", workspaceRoot: "/tmp/ws" });
+  const fullPrompt = (opts: PromptOptions) => buildSystemPrompt(opts) + "\n\n" + buildUserContext(opts);
+  const planContext = buildUserContext({ family: "qwen3", mode: "plan", workspaceRoot: "/tmp/ws" });
+  const normal = fullPrompt({ family: "qwen3", mode: "act", workspaceRoot: "/tmp/ws" });
+  const plan = fullPrompt({ family: "qwen3", mode: "plan", workspaceRoot: "/tmp/ws" });
+  const review = fullPrompt({ family: "qwen3", mode: "review", workspaceRoot: "/tmp/ws" });
 
   it("avoids administrative tool loops and inaccurate failure instructions", () => {
     expect(normal).toContain("Skip it for questions and small edits");
@@ -165,7 +167,7 @@ describe("system prompt policy", () => {
   });
 
   it("renders the official GPT-OSS Harmony declarations and call envelope", () => {
-    const prompt = buildSystemPrompt({ family: "gpt-oss", mode: "act", workspaceRoot: "/tmp/ws" });
+    const prompt = fullPrompt({ family: "gpt-oss", mode: "act", workspaceRoot: "/tmp/ws" });
     expect(prompt).toContain("Available tools (GPT-OSS Harmony format)");
     expect(prompt).toContain("namespace functions {");
     expect(prompt).toContain("type read_file = (_: {");
@@ -182,7 +184,7 @@ describe("system prompt policy", () => {
   });
 
   it("keeps the GPT-OSS native prompt free of the Harmony fallback block", () => {
-    const native = buildSystemPrompt({
+    const native = fullPrompt({
       family: "gpt-oss",
       mode: "act",
       workspaceRoot: "/tmp/ws",
@@ -191,7 +193,7 @@ describe("system prompt policy", () => {
     expect(native).not.toContain("GPT-OSS Harmony format");
     expect(native).not.toContain("namespace functions {");
     expect(native).not.toContain("<|channel|>commentary to=functions.");
-    expect(native).toBe(buildSystemPrompt({
+    expect(native).toBe(fullPrompt({
       family: "gemma4",
       mode: "act",
       workspaceRoot: "/tmp/ws",
@@ -202,7 +204,7 @@ describe("system prompt policy", () => {
   it.each([false, true])("introduces every request across modes and families (native tools: %s)", nativeTools => {
     for (const mode of ["act", "plan", "review"] as const) {
       for (const family of ["gemma4", "qwen3", "muse-glimmer", "gpt-oss"] as const) {
-        const prompt = buildSystemPrompt({ family, mode, nativeTools, workspaceRoot: "/tmp/ws" });
+        const prompt = fullPrompt({ family, mode, nativeTools, workspaceRoot: "/tmp/ws" });
         expect(prompt).toContain("Always start your response to each new user request with 1-2 concise sentences");
         expect(prompt).toContain("your interpretation of the request and the direction you plan to take");
         expect(prompt).toContain("even when no tools are needed");
@@ -214,15 +216,15 @@ describe("system prompt policy", () => {
     }
   });
 
-  it("offers update_todos only in Act, with implementation guidance", () => {
+  it("gives update_todos implementation guidance only in Act", () => {
     expect(normal).toContain("update_todos");
     expect(normal).toContain("Use update_todos for substantial work with several meaningful stages");
-    expect(plan).not.toContain("update_todos");
-    expect(review).not.toContain("update_todos");
+    expect(planContext).not.toContain("update_todos");
+    expect(review).not.toContain("Use update_todos");
   });
 
   it("shows update_todos with a concrete array-of-objects example", () => {
-    const gemma = buildSystemPrompt({ family: "gemma4", mode: "act", workspaceRoot: "/tmp/ws" });
+    const gemma = fullPrompt({ family: "gemma4", mode: "act", workspaceRoot: "/tmp/ws" });
     expect(gemma).toContain(
       `call:update_todos{todos:[{content:<|"|>Inspect the relevant files<|"|>,status:<|"|>in_progress<|"|>}`
     );
@@ -250,7 +252,7 @@ describe("system prompt policy", () => {
 
   it("declares edit preconditions as required and keeps old and new content distinct", () => {
     for (const family of ["gemma4", "qwen3"] as const) {
-      const prompt = buildSystemPrompt({ family, mode: "act", workspaceRoot: "/tmp/ws" });
+      const prompt = fullPrompt({ family, mode: "act", workspaceRoot: "/tmp/ws" });
       expect(prompt).toContain("expectedLine");
       expect(prompt).toContain("expectedContent");
       expect(prompt).toContain("OLD/CURRENT text");
@@ -261,7 +263,7 @@ describe("system prompt policy", () => {
   });
 
   it("keeps native prompts free of handwritten tool syntax and reasoning tags", () => {
-    const prompt = buildSystemPrompt({
+    const prompt = fullPrompt({
       family: "qwen3",
       mode: "act",
       workspaceRoot: "/tmp/ws",
@@ -287,9 +289,9 @@ describe("system prompt policy", () => {
     expect(normal).not.toContain("safe-list");
     expect(normal).not.toContain("proposed command");
     expect(normal).not.toContain("explicit approval");
-    expect(plan).not.toContain("run_command");
+    expect(planContext).not.toContain("run_command");
 
-    const native = buildSystemPrompt({
+    const native = fullPrompt({
       family: "qwen3",
       mode: "act",
       workspaceRoot: "/tmp/ws",
@@ -334,12 +336,14 @@ describe("system prompt policy", () => {
   });
 
   it("keeps the tool-format block as the final section", () => {
-    expect(normal.indexOf("You work step by step")).toBeLessThan(normal.indexOf("Available tools"));
+    const system = buildSystemPrompt({ family: "qwen3", workspaceRoot: "/tmp/ws" });
+    expect(system.indexOf("The tool catalog")).toBeLessThan(system.indexOf("Available tools"));
+    expect(system.lastIndexOf("Examples:")).toBeGreaterThan(system.indexOf("Available tools"));
   });
 
   it.each(["gemma4", "qwen3", "muse-glimmer", "gpt-oss"] as const)("requires clarification before a final implementation plan for %s in both transports", family => {
     for (const nativeTools of [false, true]) {
-      const prompt = buildSystemPrompt({ family, mode: "plan", nativeTools, workspaceRoot: "/tmp/ws" });
+      const prompt = fullPrompt({ family, mode: "plan", nativeTools, workspaceRoot: "/tmp/ws" });
       expect(prompt).toContain("You are in plan mode");
       expect(prompt).toContain("read_file, list_dir, glob, and ask_user_question are available");
       expect(prompt).toContain("call ask_user_question and wait for the user's answer before drafting it");
@@ -355,12 +359,12 @@ describe("system prompt policy", () => {
       expect(prompt).not.toContain("You work step by step");
     }
     for (const mode of ["act", "review"] as const) {
-      expect(buildSystemPrompt({ family, mode, workspaceRoot: "/tmp/ws" }))
+      expect(fullPrompt({ family, mode, workspaceRoot: "/tmp/ws" }))
         .not.toContain("Your final response must always contain the completed implementation plan as ordinary response text");
     }
   });
 
-  it("review mode offers read-only tools while asking for a direct review", () => {
+  it("review mode restricts execution while keeping the catalog visible", () => {
     expect(review).toContain("You are in review mode");
     expect(review).not.toContain("always require the user's explicit approval");
     expect(review).toContain("This mode is read-only");
@@ -368,10 +372,10 @@ describe("system prompt policy", () => {
     expect(review).toContain("review findings, not an implementation plan");
     expect(review).toContain("ordered by severity");
     expect(review).toContain('"name": "read_file"');
-    expect(review).not.toContain("run_command");
-    expect(review).not.toContain('"name": "write_file"');
-    expect(review).not.toContain('"name": "insert_text"');
-    expect(review).not.toContain('"name": "update_todos"');
+    expect(review).toContain("run_command");
+    expect(review).toContain('"name": "write_file"');
+    expect(review).toContain('"name": "insert_text"');
+    expect(review).toContain('"name": "update_todos"');
     expect(review).not.toContain("You work step by step");
   });
 });
@@ -400,7 +404,7 @@ describe("AGENTS.md project instructions", () => {
     expect(prompt).toContain("Use tabs for indentation.\nRun npm test before finishing.");
     expect(prompt).toContain("--- end AGENTS.md ---");
     // Project instructions sit after the policy but before the tool block.
-    expect(prompt.indexOf("You work step by step")).toBeLessThan(prompt.indexOf("--- begin AGENTS.md ---"));
+    expect(prompt.indexOf("The tool catalog")).toBeLessThan(prompt.indexOf("--- begin AGENTS.md ---"));
     expect(prompt.indexOf("--- begin AGENTS.md ---")).toBeLessThan(prompt.indexOf("Available tools"));
   });
 
@@ -441,7 +445,7 @@ describe("AGENTS.md project instructions", () => {
     expect(prompt).toContain("Use tabs for indentation.\nRun npm test before finishing.");
     expect(prompt).toContain("--- end AGENTS.md ---");
     // Project instructions sit after the policy but before the tool block.
-    expect(prompt.indexOf("You work step by step")).toBeLessThan(prompt.indexOf("--- begin AGENTS.md ---"));
+    expect(prompt.indexOf("The tool catalog")).toBeLessThan(prompt.indexOf("--- begin AGENTS.md ---"));
     expect(prompt.indexOf("--- begin AGENTS.md ---")).toBeLessThan(prompt.indexOf("Available tools"));
   });
 
@@ -466,7 +470,7 @@ describe("executable legacy prompt examples", () => {
         const parser = makeParser(family);
         const events = [...parser.feed(examples), ...parser.end()];
         const calls = events.filter(event => event.kind === "toolCall");
-        expect(calls.map(call => call.name)).toEqual(toolsForMode(mode, "legacy").map(tool => tool.name));
+        expect(calls.map(call => call.name)).toEqual(toolsForPrompt("legacy").map(tool => tool.name));
         for (const call of calls) {
           expect(validateToolArguments(call.name, JSON.parse(call.argsJson)), call.name).toBeUndefined();
         }
@@ -477,27 +481,44 @@ describe("executable legacy prompt examples", () => {
   }
 });
 
-describe("Read-only tool descriptions", () => {
-  it.each(["gemma4", "qwen3", "muse-glimmer", "gpt-oss"] as const)("keeps unavailable editing tools out of the %s Plan and Review prompts", family => {
-    for (const mode of ["plan", "review"] as const) {
-      const prompt = buildSystemPrompt({ family, mode, workspaceRoot: "/tmp/ws" });
-      for (const name of ["write_file", "create_file", "edit_file", "insert_text", "replace_range"]) {
-        expect(prompt).not.toContain(name);
+describe("stable advertised tools and mode authorization", () => {
+  it.each(["gemma4", "qwen3", "muse-glimmer", "gpt-oss"] as const)("keeps the %s catalog stable across mode, time, and memories", family => {
+    for (const nativeTools of [false, true]) {
+      const options = { family, nativeTools, workspaceRoot: "/tmp/ws", memoryEnabled: true };
+      const system = buildSystemPrompt({ ...options, mode: "act", userMessageTs: 1000 });
+      for (const mode of ["plan", "review", "act"] as const) {
+        const context = { ...options, mode, userMessageTs: 2000, memories: [{
+          version: 1 as const, id: "memory", name: "Note", contents: "MEMORY_SENTINEL </locality_context>",
+          createdAt: 500, updatedAt: 1000, enabled: true
+        }] };
+        expect(buildSystemPrompt(context)).toBe(system);
+        expect(system).not.toContain("MEMORY_SENTINEL");
+        expect(system).not.toContain("User request time:");
+        const user = withUserContext("Actual request", buildUserContext(context));
+        expect(user).toContain("not part of the user's request");
+        expect(user).toContain(`Current chat mode: ${mode}`);
+        expect(user).toContain(new Date(2000).toISOString());
+        expect(user).toContain('"createdAt":"1970-01-01T00:00:00.500Z"');
+        expect(user).toContain('"updatedAt":"1970-01-01T00:00:01.000Z"');
+        expect(user.match(/<\/locality_context>/g)).toHaveLength(1);
+        expect(user).toMatch(/<\/locality_context>\n\nUser request:\nActual request$/);
       }
-      expect(prompt).toContain("This mode is read-only");
-      expect(prompt).toContain("1-based line number");
-      expect(prompt).toContain("[lines X-Y of N]");
     }
   });
 
-  it.each(["native", "legacy"] as const)("keeps %s Plan and Review descriptions read-only", transport => {
-    const readTool = (mode: "act" | "plan" | "review") => toolsForMode(mode, transport).find(tool => tool.name === "read_file")!;
-    for (const name of ["insert_text", "replace_range"]) {
-      expect(readTool("plan").description).not.toContain(name);
-      expect(readTool("act").description).toContain(name);
-      expect(readTool("review").description).not.toContain(name);
+  it.each(["native", "legacy"] as const)("advertises %s tools in fixed order but authorizes only mode-appropriate calls", transport => {
+    const advertised = toolsForPrompt(transport, true);
+    for (const mode of ["plan", "review"] as const) {
+      const allowed = toolsForMode(mode, transport, true);
+      expect(advertised.some(tool => tool.name === "run_command")).toBe(true);
+      expect(allowed.some(tool => tool.name === "run_command" || tool.name === "insert_text")).toBe(false);
+      expect(allowed.some(tool => tool.name === "create_memory")).toBe(true);
+      expect(allowed.find(tool => tool.name === "read_file")).toEqual(advertised.find(tool => tool.name === "read_file"));
+      const context = buildUserContext({ family: "qwen3", mode, workspaceRoot: "/tmp/ws" });
+      expect(context).toContain("This mode is read-only");
     }
-    expect(readTool("plan").parameters).toEqual(readTool("act").parameters);
+    expect(toolsForPrompt(transport, false).some(tool => tool.name === "create_memory")).toBe(false);
+    expect(toolsForPrompt(transport, true, false, { editToolsEnabled: false }).some(tool => tool.name === "insert_text")).toBe(false);
   });
 });
 
@@ -536,5 +557,22 @@ describe("conditional image tool", () => {
     const opts = { family: "gemma4" as const, mode, workspaceRoot: "/tmp/ws", nativeTools: true };
     expect(buildSystemPrompt(opts)).not.toContain("view_image");
     expect(buildSystemPrompt({ ...opts, supportsVision: true })).toContain("view_image is available");
+  });
+});
+
+describe("user personalization", () => {
+  it.each([false, true])("includes saved preferences only in the stable system prompt (native: %s)", nativeTools => {
+    const options = { family: "qwen3" as const, workspaceRoot: "/tmp/ws", nativeTools, personalization: "Use British English.\nKeep explanations concise." };
+    const system = buildSystemPrompt({ ...options, mode: "act" });
+    expect(system).toContain("USER PERSONALIZATION");
+    expect(system).toContain(options.personalization);
+    expect(system).toContain("current user request and project instructions take precedence");
+    expect(system).toContain("do not change mode restrictions or tool permissions");
+    for (const mode of ["plan", "review", "act"] as const) {
+      expect(buildSystemPrompt({ ...options, mode, userMessageTs: 1234 })).toBe(system);
+      expect(buildUserContext({ ...options, mode })).not.toContain(options.personalization);
+    }
+    expect(buildSystemPrompt({ ...options, personalization: "" })).not.toContain("USER PERSONALIZATION");
+    expect(buildSystemPrompt({ ...options, personalization: " \n " })).not.toContain("USER PERSONALIZATION");
   });
 });

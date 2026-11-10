@@ -25,6 +25,21 @@ describe("settings rendering", () => {
     ]);
   });
 
+  it("shows personalization directly in User with a safely escaped draft and memory-style controls", () => {
+    const view = state({ personalization: "Saved preferences" });
+    view.personalizationEditor = { draft: '</textarea><script>bad()</script>\nNew preferences', error: "Could not save <file>" };
+    const html = renderSettings(view, new Set(["user"]));
+    expect(html).not.toContain('data-settings-section="personalization"');
+    expect(html).toContain('for="personalization">Personalization</label>');
+    expect(html).toContain('class="settings-textarea"');
+    expect(html).toContain('&lt;/textarea&gt;&lt;script&gt;bad()&lt;/script&gt;\nNew preferences');
+    expect(html).not.toContain('<script>bad()');
+    expect(html).toContain('Could not save &lt;file&gt;');
+    expect(html).toContain('id="savePersonalization" class="action-btn icon-btn icon-btn-compact"');
+    expect(html).toContain('id="cancelPersonalization" class="action-btn icon-btn icon-btn-compact"');
+    expect(html.indexOf('data-settings-section="user"')).toBeLessThan(html.indexOf('id="personalization"'));
+  });
+
   it.each(["memoryEnabled", "memoryAutoLoad"])("keeps %s independent of other memory switches", enabled => {
     const html = renderSettings(state({ [enabled]: true }), new Set());
     for (const key of ["memoryEnabled", "memoryAutoLoad"]) {

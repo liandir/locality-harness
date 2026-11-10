@@ -173,23 +173,28 @@ export function isMemoryToolName(name: string): boolean {
   return name === "create_memory" || name === "search_memories" || name === "recall_memory";
 }
 
-export function toolsForMode(mode: ChatMode, transport: "native" | "legacy" = "legacy", memoryEnabled = false, supportsVision = false, settings?: object): ToolSpec[] {
+/** Mode-independent catalog advertised to the model, in a fixed order. */
+export function toolsForPrompt(transport: "native" | "legacy" = "legacy", memoryEnabled = false, supportsVision = false, settings?: object): ToolSpec[] {
   const available = ALL_TOOLS.filter(tool =>
     (!tool.enabledSetting || (settings as Record<string, unknown> | undefined)?.[tool.enabledSetting] !== false)
     && (!tool.availability?.setting || !!(settings as Record<string, unknown> | undefined)?.[tool.availability.setting])
     && (!isMemoryToolName(tool.name) || memoryEnabled)
     && (tool.name !== "view_image" || (supportsVision && transport === "native"))
-    && (!tool.availability || (tool.availability.modes.includes(mode) && (!tool.availability.transport || tool.availability.transport === transport)))
+    && (!tool.availability?.transport || tool.availability.transport === transport)
   );
-  if (mode !== "act") return available
-    .filter(tool => READ_ONLY_TOOL_NAMES.has(tool.name) || isMemoryToolName(tool.name) || !!tool.availability)
-    .map(tool => tool.name === "read_file" ? { ...tool, description: READ_FILE_DESCRIPTION } : tool);
   const excluded = transport === "native"
     ? new Set(["write_file"])
     : new Set(["create_file", "edit_file"]);
   return available.filter(tool => !excluded.has(tool.name))
     .map(tool => tool.name === "read_file" && (settings as Record<string, unknown> | undefined)?.editToolsEnabled === false
       ? { ...tool, description: READ_FILE_DESCRIPTION } : tool);
+}
+
+/** Host authorization remains mode-specific even though the catalog is stable. */
+export function toolsForMode(mode: ChatMode, transport: "native" | "legacy" = "legacy", memoryEnabled = false, supportsVision = false, settings?: object): ToolSpec[] {
+  return toolsForPrompt(transport, memoryEnabled, supportsVision, settings)
+    .filter(tool => tool.availability ? tool.availability.modes.includes(mode)
+      : mode === "act" || READ_ONLY_TOOL_NAMES.has(tool.name) || isMemoryToolName(tool.name));
 }
 
 export function validateToolArguments(toolName: string, value: unknown): string | undefined {

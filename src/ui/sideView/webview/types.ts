@@ -1,5 +1,5 @@
 import type { ServerMetadata } from "../../../llm/serverTypes.js";
-import type { ChatTab, SideTab } from "../../messaging.js";
+import type { ChatTab, SideTab, PersonalizationEditor } from "../../messaging.js";
 import type { ManagedMemory, MemoryPanelState } from "../../messaging.js";
 import type { ReasoningEffort } from "../../../chat/reasoningEffort.js";
 
@@ -8,6 +8,7 @@ export interface SideViewState {
   search: string;
   chats: { id: string; title: string; updatedAt: number }[];
   settings: Record<string, unknown>;
+  personalizationEditor?: PersonalizationEditor;
   reasoningEffort: ReasoningEffort;
   reasoningEffortError?: string;
   reasoningBudgetError?: string;

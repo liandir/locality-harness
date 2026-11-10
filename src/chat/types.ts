@@ -57,6 +57,8 @@ export interface ChatMessage {
   /** Harness note about a user-requested file undo; hidden from the transcript UI. */
   fileUndoNotice?: boolean;
   content: string;
+  /** Host-owned context frozen when this user request is accepted by the server. */
+  requestContext?: string;
   /** Display-only terminal response; never included in model context. */
   interruption?: ChatInterruption;
   /** Mode selected when a user message was submitted; absent in older history. */
@@ -114,7 +116,7 @@ export interface ChatRecord {
   /** Accepted per-query retrieval snapshots; rendered as work activities, never note ownership. */
   memorySelections?: MemorySelection[];
   /** Host-only accepted prompt for the latest turn; steering and Continue reuse it. */
-  turnSystemPrompt?: { messageTs: number; protocol: "native" | "legacy"; content: string };
+  turnSystemPrompt?: { messageTs: number; protocol: "native" | "legacy"; content: string; contextVersion?: 1 };
   /** Legacy chat summary fields: read-only compatibility. */
   memory?: ChatMemory;
   memoryAttempt?: MemoryAttempt;

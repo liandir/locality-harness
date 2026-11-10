@@ -153,7 +153,7 @@ import { ChatViewProvider } from "../src/ui/chatView/provider.js";
 
 const record = (id: string) => ({ id, title: id, messages: [], reasoningEffort: "default", mode: "act" } as unknown as ChatRecord);
 function setup(memory?: WorkspaceMemory) {
-  const storage = { metadata: vi.fn().mockResolvedValue([]), list: vi.fn().mockResolvedValue([]), load: vi.fn(), save: vi.fn(), delete: vi.fn(), deleteAll: vi.fn(), deleteAttachment: vi.fn(), importAttachment: vi.fn(), importAttachmentBytes: vi.fn(), attachmentPath: (id: string) => `/workspace/${id}/image.png` };
+  const storage = { metadata: vi.fn().mockResolvedValue([]), list: vi.fn().mockResolvedValue([]), load: vi.fn(), save: vi.fn(), fork: vi.fn(), delete: vi.fn(), deleteAll: vi.fn(), deleteAttachment: vi.fn(), importAttachment: vi.fn(), importAttachmentBytes: vi.fn(), attachmentPath: (id: string) => `/workspace/${id}/image.png` };
   const preferences = new Map<string, unknown>();
   const workspaceState = {
     get: vi.fn((key: string) => preferences.get(key)),
@@ -598,6 +598,43 @@ describe("retired automatic memory generation", () => {
 });
 
 describe("independent chat tabs", () => {
+  it("opens a historical fork while the source chat keeps generating", async () => {
+    const { provider, storage, send, snapshot } = setup();
+    const source = record("source");
+    source.messages = [
+      { role: "user", content: "First request", ts: 1 },
+      { role: "assistant", content: "Completed response", ts: 2 },
+      { role: "user", content: "Next request", ts: 3 }
+    ];
+    const fork = { ...record("fork"), messages: structuredClone(source.messages.slice(0, 2)) };
+    storage.fork.mockResolvedValue(fork);
+    provider.openChat(source);
+    const session = mocks.sessions.get(source.id)!;
+    const turn = send({ type: "send", text: "Next request", mode: "act", chatId: source.id });
+    try {
+      await send({ type: "forkChat", throughUserMessageTs: 1, chatId: source.id });
+      expect(storage.fork).toHaveBeenCalledExactlyOnceWith(source, 1);
+      expect(provider.getCurrentRecord()).toBe(fork);
+      expect(snapshot()).toMatchObject({ id: fork.id, busy: false });
+      expect(provider.getTabs()).toContainEqual(expect.objectContaining({ id: source.id, running: true }));
+      expect(session.cancel).not.toHaveBeenCalled();
+      expect(session.shutdown).not.toHaveBeenCalled();
+
+      session.emit({ kind: "text", messageId: "response", delta: "Still generating in the original tab" });
+      session.finish();
+      await turn;
+      expect(provider.getCurrentRecord()).toBe(fork);
+      await provider.openChatById(source.id);
+      expect(snapshot()).toMatchObject({ id: source.id, busy: false });
+      expect(snapshot().events).toContainEqual({ kind: "text", messageId: "response", delta: "Still generating in the original tab" });
+      expect(session.cancel).not.toHaveBeenCalled();
+    } finally {
+      session.finish();
+      await turn;
+      await provider.closeAll();
+    }
+  });
+
   it("routes auto-approval to the active chat and ignores stale approval messages", async () => {
     const { provider, send } = setup();
     provider.openChat(record("a"));
@@ -1075,6 +1112,90 @@ describe("image attachment capabilities", () => {
 });
 
 describe("steering messages from the chat view", () => {
+  it("steers a selected queued message once with its latest text and attachments", async () => {
+    const { provider, send, posted, storage, snapshot } = setup();
+    provider.openChat(record("a"));
+    const a = mocks.sessions.get("a")!;
+    const turn = send({ type: "send", text: "Start", mode: "act", chatId: "a" });
+    const attachment: ChatAttachment = { id: "notes", fileName: "notes.txt", mimeType: "text/plain", extension: "txt", byteLength: 5 };
+    storage.importAttachmentBytes.mockResolvedValueOnce(attachment);
+    await send({ type: "pasteText", text: "notes", chatId: "a" });
+    await send({ type: "queueMessage", id: "first", text: "First follow-up", mode: "review", chatId: "a" });
+    await send({ type: "queueMessage", id: "guidance", text: "Original guidance", mode: "plan", attachmentIds: [attachment.id], chatId: "a" });
+    await send({ type: "queueMessage", id: "last", text: "Last follow-up", mode: "act", chatId: "a" });
+    await send({ type: "updateQueuedMessage", id: "guidance", text: "Updated guidance", chatId: "a" });
+    await send({ type: "saveDraft", text: "Unsent composer draft", chatId: "a" });
+
+    await send({ type: "steerQueuedMessage", id: "guidance", chatId: "a" });
+    await send({ type: "steerQueuedMessage", id: "guidance", chatId: "a" });
+    expect(a.steerUserMessage).toHaveBeenCalledExactlyOnceWith("Updated guidance", [attachment]);
+    expect(a.sent).toEqual(["Start"]);
+    expect(a.sentModes).toEqual(["act"]);
+    expect(a.cancel).not.toHaveBeenCalled();
+    expect(storage.deleteAttachment).not.toHaveBeenCalled();
+    await send({ type: "ready" });
+    expect(snapshot().draft).toBe("Unsent composer draft");
+    expect(posted.filter(message => "type" in message && message.type === "messageQueue").at(-1)).toMatchObject({
+      messages: [{ id: "first", text: "First follow-up", mode: "review" }, { id: "last", text: "Last follow-up", mode: "act" }]
+    });
+
+    a.finish();
+    await vi.waitFor(() => expect(a.sent).toEqual(["Start", "First follow-up"]));
+    a.finish();
+    await vi.waitFor(() => expect(a.sent).toEqual(["Start", "First follow-up", "Last follow-up"]));
+    a.finish();
+    await turn;
+    await provider.closeAll();
+  });
+
+  it.each(["finishing", "plan-pending"] as const)("keeps queued guidance and attachments when the response is %s", async state => {
+    const { provider, send, posted, storage } = setup();
+    const chat = record("a");
+    if (state === "plan-pending") { chat.planning = true; chat.pendingPlanMessageTs = 10; }
+    provider.openChat(chat);
+    const a = mocks.sessions.get("a")!;
+    const turn = state === "finishing" ? send({ type: "send", text: "Start", mode: "act", chatId: "a" }) : undefined;
+    const attachment: ChatAttachment = { id: "notes", fileName: "notes.txt", mimeType: "text/plain", extension: "txt", byteLength: 5 };
+    storage.importAttachmentBytes.mockResolvedValueOnce(attachment);
+    await send({ type: "pasteText", text: "notes", chatId: "a" });
+    await send({ type: "queueMessage", id: "guidance", text: "", mode: "act", attachmentIds: [attachment.id], chatId: "a" });
+    a.steerUserMessage.mockReturnValue(false);
+    await send({ type: "steerQueuedMessage", id: "guidance", chatId: "a" });
+    expect(a.steerUserMessage).toHaveBeenCalledExactlyOnceWith("", [attachment]);
+    expect(a.sent).toEqual(state === "finishing" ? ["Start"] : []);
+    expect(posted.filter(message => "type" in message && message.type === "messageQueue").at(-1)).toMatchObject({
+      messages: [{ id: "guidance", text: "", attachments: [expect.objectContaining({ id: attachment.id })] }]
+    });
+    expect(storage.deleteAttachment).not.toHaveBeenCalled();
+    expect(posted).toContainEqual(expect.objectContaining({ kind: "notice", text: expect.stringContaining("still queued") }));
+    await send({ type: "removeQueuedMessage", id: "guidance", chatId: "a" });
+    a.finish();
+    await turn;
+    await provider.closeAll();
+  });
+
+  it("ignores stale-tab and missing queued steering actions", async () => {
+    const { provider, send, posted } = setup();
+    provider.openChat(record("a"));
+    const a = mocks.sessions.get("a")!;
+    const turn = send({ type: "send", text: "Start", mode: "act", chatId: "a" });
+    await send({ type: "queueMessage", id: "guidance", text: "Guidance", mode: "act", chatId: "a" });
+    await send({ type: "steerQueuedMessage", id: "missing", chatId: "a" });
+    provider.openChat(record("b"));
+    await send({ type: "steerQueuedMessage", id: "guidance", chatId: "a" });
+    expect(a.steerUserMessage).not.toHaveBeenCalled();
+    expect(mocks.sessions.get("b")!.steerUserMessage).not.toHaveBeenCalled();
+    await provider.openChatById("a");
+    expect(posted.filter(message => "type" in message && message.type === "messageQueue").at(-1)).toMatchObject({
+      messages: [{ id: "guidance", text: "Guidance" }]
+    });
+    await send({ type: "steerQueuedMessage", id: "guidance", chatId: "a" });
+    expect(a.steerUserMessage).toHaveBeenCalledExactlyOnceWith("Guidance", []);
+    a.finish();
+    await turn;
+    await provider.closeAll();
+  });
+
   it("routes guidance to the active turn while preserving the normal queue", async () => {
     const { provider, send, posted } = setup();
     provider.openChat(record("a"));

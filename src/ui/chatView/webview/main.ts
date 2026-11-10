@@ -6,7 +6,7 @@ import { interruptionMessage } from "./interruption.js";
 import { startShiki, normalizeHighlightLanguage, highlightCode, highlightLanguageForPath } from "./highlighting.js";
 import { escapeHtml } from "../../html.js";
 import {
-  sendIcon, steerIcon, paperclipIcon, closeIcon, dragHandleIcon, stopIcon,
+  sendIcon, paperclipIcon, closeIcon, dragHandleIcon, stopIcon,
   clockIcon, checkIcon, folderIcon, viewImageIcon, questionIcon,
   forkIcon, rightArrowIcon, compactIcon, copyIcon, brainIcon,
   checklistIcon, dirIcon, fileIcon, downArrowIcon, circleIcon
@@ -1107,6 +1107,7 @@ function renderMessageActionsHtml(m: Message): string {
 }
 
 function renderMessageActionsInnerHtml(m: Message): string {
+  if (m.role === "user" && m.steering) return "";
   if (m.role === "assistant" && isAssistantTurnLive(m)) return "";
   const actions: string[] = [];
   let persistentHint = "";
@@ -1125,8 +1126,8 @@ function renderMessageActionsInnerHtml(m: Message): string {
       actions.push(`<button class="icon-btn copy-btn delete-message-btn" type="button" data-delete-message="${m.recordTs}" data-tip="Delete message and everything after it" aria-label="Delete message and everything after it">${trashIcon()}</button>`);
     }
   }
-  if (m.role === "assistant" && m.responseToTs !== undefined && !state.busy) {
-    if (isContinuableResponse(m)) {
+  if (m.role === "assistant" && m.responseToTs !== undefined) {
+    if (!state.busy && isContinuableResponse(m)) {
       actions.push(`<button class="icon-btn copy-btn" type="button" data-continue-chat="${m.recordTs}" data-tip="Continue" aria-label="Continue">${rightArrowIcon()}</button>`);
       if (!state.planning && state.queuedMessages.length) actions.push(`<button class="action-btn" type="button" data-resume-queue="${m.recordTs}">Run queued messages</button>`);
     } else if (!m.aborted) {
@@ -1998,7 +1999,8 @@ function updateComposer(): void {
             ${state.editingQueuedMessageId === message.id
               ? `<button class="icon-btn icon-btn-compact queued-message-action save" type="button" data-save-queued="${escapeHtml(message.id)}" data-tip="Save" aria-label="Save queued message">${checkIcon()}</button>
                  <button class="icon-btn icon-btn-compact queued-message-action" type="button" data-cancel-queued-edit data-tip="Cancel" aria-label="Cancel editing">&times;</button>`
-              : `<button class="icon-btn icon-btn-compact queued-message-action" type="button" data-edit-queued="${escapeHtml(message.id)}" data-tip="Edit" aria-label="Edit queued message">${pencilIcon()}</button>
+              : `<button class="icon-btn icon-btn-compact queued-message-action" type="button" data-steer-queued="${escapeHtml(message.id)}" data-tip="Send now" aria-label="Steer" ${state.busy ? "" : "disabled"}>${sendIcon()}</button>
+                 <button class="icon-btn icon-btn-compact queued-message-action" type="button" data-edit-queued="${escapeHtml(message.id)}" data-tip="Edit" aria-label="Edit queued message">${pencilIcon()}</button>
                  <button class="icon-btn icon-btn-compact queued-message-action remove" type="button" data-remove-queued="${escapeHtml(message.id)}" data-tip="Remove" aria-label="Remove queued message">${trashIcon()}</button>`}
           </span>
         </div>
@@ -2072,7 +2074,7 @@ function updateComposerSubmitAction(focused: Element | null = document.activeEle
   const alternate = composerControlPressed && (focused?.id === "input" || focused === button);
   const steer = state.busy && (alternate ? !state.steerWithEnter : state.steerWithEnter);
   const label = state.busy ? `${steer ? "Steer" : "Queue"} message` : "Send";
-  setHtml(button, steer ? steerIcon() : sendIcon());
+  setHtml(button, sendIcon(state.busy && !steer));
   if (button.dataset.tip !== label) button.dataset.tip = label;
   if (button.getAttribute("aria-label") !== label) button.setAttribute("aria-label", label);
 }
@@ -3368,6 +3370,10 @@ function bindOnce(): void {
       state.draftAttachments = state.draftAttachments.filter(attachment => attachment.id !== attachmentId);
       if (attachmentId) send({ type: "discardAttachment", attachmentId });
       render();
+    }
+    else if (target.closest("[data-steer-queued]")) {
+      const steer = target.closest<HTMLButtonElement>("[data-steer-queued]")!;
+      if (!steer.disabled) send({ type: "steerQueuedMessage", id: steer.dataset.steerQueued! });
     }
     else if (target.closest("[data-edit-queued]")) {
       const edit = target.closest("[data-edit-queued]") as HTMLElement;
