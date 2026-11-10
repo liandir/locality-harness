@@ -1107,6 +1107,7 @@ function renderMessageActionsHtml(m: Message): string {
 }
 
 function renderMessageActionsInnerHtml(m: Message): string {
+  if (m.role === "user" && m.steering) return "";
   if (m.role === "assistant" && isAssistantTurnLive(m)) return "";
   const actions: string[] = [];
   let persistentHint = "";
