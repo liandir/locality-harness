@@ -108,6 +108,7 @@ export type ChatToExt = (
   | { type: "send"; text: string; mode: ChatMode; attachmentIds?: string[] }
   | { type: "steerMessage"; text: string; mode: ChatMode; attachmentIds?: string[] }
   | { type: "queueMessage"; id: string; text: string; mode: ChatMode; attachmentIds?: string[] }
+  | { type: "steerQueuedMessage"; id: string }
   | { type: "updateQueuedMessage"; id: string; text: string }
   | { type: "reorderQueuedMessages"; ids: string[] }
   | { type: "removeQueuedMessage"; id: string }

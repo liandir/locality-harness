@@ -604,6 +604,20 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         this.drainMessageQueueIfIdle();
         break;
       }
+      case "steerQueuedMessage": {
+        const runtime = this.active;
+        const message = runtime.queuedMessages.find(item => item.id === m.id);
+        if (message) {
+          // Transfer ownership only after acceptance, so a finishing turn cannot lose queued work.
+          if (runtime.session?.steerUserMessage(message.text, message.attachments ?? [])) {
+            runtime.queuedMessages = runtime.queuedMessages.filter(item => item.id !== m.id);
+          } else {
+            this.post({ kind: "notice", text: "The response is no longer accepting guidance. Your message is still queued." });
+          }
+        }
+        this.pushMessageQueue(runtime);
+        break;
+      }
       case "removeQueuedMessage":
         {
           const removed = this.queuedMessages.find(message => message.id === m.id);
