@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { ChatStorage, type ChatRecord } from "../src/chat/storage.js";
 import type { ChatSession, UiEvent } from "../src/chat/session.js";
+import type { ChatCompletionRequest } from "../src/llm/client.js";
 import { editDiffCases } from "./fixtures/editDiff.js";
 import { steeredConversation } from "./fixtures/steeredConversation.js";
 
@@ -3013,20 +3014,21 @@ describe("ChatSession", () => {
   it.each((["plan", "review"] as const).flatMap(mode => ([
     ["native", false], ["native", true], ["compat-gemma4", false], ["compat-gemma4", true]
   ] as const).map(([profile, autoapprove]) => ({ mode, profile, autoapprove }))))(
-    "blocks commands in $mode ($profile, autoapprove=$autoapprove)", async ({ mode, profile, autoapprove }) => {
+    "rejects commands and continues in $mode ($profile, autoapprove=$autoapprove)", async ({ mode, profile, autoapprove }) => {
       mocks.settings.toolCallingMode = profile;
       mocks.settings.autoapproveCommands = autoapprove;
+      const answer = mode === "plan" ? planText("Inspection complete") : "Inspection complete";
       if (profile === "native") {
         let pass = 0;
         mocks.streamChat.mockImplementation(async function* () {
           if (pass++ === 0) {
             yield { kind: "toolCall", name: "run_command", argsJson: '{"command":"npm test"}', id: "call_read_only_command" };
-          } else yield { kind: "text", text: "Inspection complete" };
+          } else yield { kind: "text", text: answer };
         });
       } else {
         mockLegacyFallback([
           gemmaCall("run_command", 'command:<|"|>npm test<|"|>'),
-          "Inspection complete"
+          answer
         ]);
       }
       const { ChatSession } = await import("../src/chat/session.js");
@@ -3044,17 +3046,95 @@ describe("ChatSession", () => {
       expect(events).toContainEqual(expect.objectContaining({ kind: "toolCallResolved", status: "rejected" }));
       expect(mocks.startCommand).not.toHaveBeenCalled();
       expect(mocks.runCommand).not.toHaveBeenCalled();
+      expect(events.some(event => event.kind === "abort")).toBe(false);
+      expect(record.messages.some(message => message.interruption)).toBe(false);
+      expect(record.messages.at(-1)).toMatchObject({ role: "assistant", content: "Inspection complete" });
+      expect(events).toContainEqual(expect.objectContaining({ kind: "turnEnd", mode, messageTs: record.messages.at(-1)?.ts }));
+      if (mode === "plan") expect(record.pendingPlanMessageTs).toBe(record.messages.at(-1)?.ts);
+      await session.shutdown();
     }
   );
+
+  it.each(["native", "compat-qwen3"] as const)("recovers from an Act command recalled during planning with %s calling", async profile => {
+    const ws = await fs.mkdtemp(path.join(os.tmpdir(), "locality-plan-command-"));
+    mocks.settings.toolCallingMode = profile;
+    mocks.settings.autoapproveCommands = true;
+    const requests: ChatCompletionRequest[] = [];
+    const responses = [
+      { name: "run_command", args: { command: "npm test" }, id: "act_command" },
+      "Tests passed.",
+      { name: "run_command", args: { command: "npm test" }, id: "stale_command" },
+      { name: "read_file", args: { path: "a.txt" }, id: "plan_read" },
+      planText("- Implement the change\n- Run the tests after approval")
+    ];
+    let pass = 0;
+    mocks.streamChat.mockImplementation(async function* (_endpoint: string, request: ChatCompletionRequest) {
+      if (profile !== "native" && request.tools) throw new mocks.NativeToolsUnsupportedError("tools unsupported");
+      requests.push(request);
+      const response = responses[pass++];
+      if (typeof response === "string") yield { kind: "text", text: response };
+      else if (response) {
+        if (profile === "native") yield { kind: "toolCall", name: response.name, argsJson: JSON.stringify(response.args), id: response.id };
+        else yield { kind: "text", text: `<tool_call>${JSON.stringify({ name: response.name, arguments: response.args })}</tool_call>` };
+      } else throw new Error("Unexpected continuation");
+    });
+    const { ChatSession } = await import("../src/chat/session.js");
+    const storage = new ChatStorage(ws, path.join(ws, "chats"));
+    const record = storage.newRecord(profile);
+    const events: UiEvent[] = [];
+    const session = new ChatSession({ storage, workspaceRoot: ws, record, emit: event => events.push(event) });
+    try {
+      await fs.writeFile(path.join(ws, "a.txt"), "Planning reference\n");
+      await session.sendUserMessage("Run the tests", [], "act");
+      expect(mocks.startCommand).toHaveBeenCalledOnce();
+      events.length = 0;
+
+      await session.sendUserMessage("Plan the next change", [], "plan");
+
+      expect(requests).toHaveLength(5);
+      expect(JSON.stringify(requests[2].messages)).toContain("run_command");
+      expect(JSON.stringify(requests[3].messages)).toContain("[blocked: modeViolation]");
+      expect(JSON.stringify(requests[4].messages)).toContain("Planning reference");
+      for (const request of requests.slice(2)) {
+        expect(request.tools?.some(tool => tool.function.name === "run_command")).not.toBe(true);
+      }
+      if (profile === "native") {
+        expect(requests[0].tools?.some(tool => tool.function.name === "run_command")).toBe(true);
+        expect(requests[3].messages).toContainEqual(expect.objectContaining({
+          role: "tool", tool_call_id: "stale_command", content: expect.stringContaining("[blocked: modeViolation]")
+        }));
+      }
+      expect(mocks.startCommand).toHaveBeenCalledOnce();
+      expect(events.some(event => event.kind === "abort")).toBe(false);
+      expect(events.some(event => event.kind === "toolCallResolved" && event.status === "approved")).toBe(false);
+      expect(events).toContainEqual(expect.objectContaining({
+        kind: "planFinal", messageTs: record.pendingPlanMessageTs,
+        markdown: "- Implement the change\n- Run the tests after approval"
+      }));
+      const saved = (await storage.load(record.id))!;
+      expect(saved.mode).toBe("plan");
+      expect(saved.pendingPlanMessageTs).toBe(saved.messages.at(-1)?.ts);
+      expect(saved.messages.some(message => message.interruption)).toBe(false);
+      expect(saved.messages.filter(message => message.role === "tool").map(message => message.toolCall)).toMatchObject([
+        { name: "run_command", status: "executed" },
+        { name: "run_command", status: "rejected" },
+        { name: "read_file", status: "executed" }
+      ]);
+    } finally {
+      await session.shutdown();
+      await fs.rm(ws, { recursive: true, force: true });
+    }
+  });
 
   it.each([
     ["plan", "native"], ["review", "native"],
     ["plan", "compat-qwen3"], ["review", "compat-qwen3"]
-  ] as const)("rejects every write and process tool in %s with %s calling", async (mode, profile) => {
+  ] as const)("continues after rejecting every write and process tool in %s with %s calling", async (mode, profile) => {
     const ws = await fs.mkdtemp(path.join(os.tmpdir(), "locality-session-read-only-"));
     mocks.settings.toolCallingMode = profile;
     mocks.settings.autoapproveWrites = true;
     mocks.settings.autoapproveCommands = true;
+    const answer = mode === "plan" ? planText("Inspection complete") : "Inspection complete";
     const calls = [
       { name: "create_file", args: { path: "created.txt", content: "new file" } },
       { name: "write_file", args: { path: "existing.txt", content: "replacement" } },
@@ -3073,10 +3153,10 @@ describe("ChatSession", () => {
           let pass = 0;
           mocks.streamChat.mockImplementation(async function* () {
             if (pass++ === 0) yield { kind: "toolCall", name: call.name, argsJson: JSON.stringify(call.args), id: "call_read_only" };
-            else yield { kind: "text", text: "Inspection complete" };
+            else yield { kind: "text", text: answer };
           });
         } else {
-          mockLegacyFallback([`<tool_call>${JSON.stringify({ name: call.name, arguments: call.args })}</tool_call>`, "Inspection complete"]);
+          mockLegacyFallback([`<tool_call>${JSON.stringify({ name: call.name, arguments: call.args })}</tool_call>`, answer]);
         }
         const record = newRecord();
         record.mode = mode;
@@ -3092,6 +3172,8 @@ describe("ChatSession", () => {
           }));
           expect(events).toContainEqual(expect.objectContaining({ kind: "toolCallResolved", status: "rejected" }));
           expect(events.some(event => event.kind === "toolCallResolved" && event.status === "approved")).toBe(false);
+          expect(events.some(event => event.kind === "abort")).toBe(false);
+          expect(record.messages.at(-1)).toMatchObject({ role: "assistant", content: "Inspection complete" });
           expect(mocks.startCommand).not.toHaveBeenCalled();
           await expect(fs.readdir(ws)).resolves.toEqual(["existing.txt"]);
           await expect(fs.readFile(path.join(ws, "existing.txt"), "utf8")).resolves.toBe("original\n");

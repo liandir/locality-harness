@@ -2339,9 +2339,9 @@ export class ChatSession {
       return "executed";
     }
 
-    if (category === "unknown") {
+    if (category === "unknown" || category === "modeViolation") {
       // Recoverable: reject this call, hand the reason back as a tool result, and
-      // let the turn continue so the model can adapt (use a real tool or answer).
+      // let the turn continue so the model can use an available tool or answer.
       // Error results are sent whole — the card shows them in a scrollable
       // bubble, so a one-line preview would just hide the explanation.
       const blocked = blockedToolDetails(category, displayName, argsJson, reason);
@@ -2349,15 +2349,6 @@ export class ChatSession {
         toolId, toolName: displayName, argsJson, content: blocked, callId: e.id, status: "rejected", fullResult: true
       });
       return "executed";
-    }
-
-    if (category === "modeViolation") {
-      const blocked = blockedToolDetails(category, displayName, argsJson, reason);
-      await this.finishToolCall(s, {
-        toolId, toolName: displayName, argsJson, content: blocked, callId: e.id, status: "rejected", fullResult: true
-      });
-      this.emit({ kind: "abort", reason: blocked });
-      return "aborted";
     }
 
     if (category === "write" && reason) {
