@@ -78,9 +78,9 @@ export function questionIcon(): string {
 
 export function forkIcon(): string {
   return `<svg viewBox="1.96 0 20 18" width="17" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
-    <path d="M5.91 9H11L14.6 12.6"/>
-    <path d="M12.5 7.5L14.6 5.4" stroke-linecap="butt"/>
-    <circle cx="16" cy="4" r="1.75" fill="currentColor"/>
+    <path d="M5.91 9H11L14.6 5.4"/>
+    <path d="M12.5 10.5L14.6 12.6" stroke-linecap="butt"/>
+    <circle cx="16" cy="4" r="1.75"/>
     <circle cx="16" cy="14" r="1.75"/>
   </svg>`;
 }

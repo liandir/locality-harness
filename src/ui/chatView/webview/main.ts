@@ -1125,8 +1125,8 @@ function renderMessageActionsInnerHtml(m: Message): string {
       actions.push(`<button class="icon-btn copy-btn delete-message-btn" type="button" data-delete-message="${m.recordTs}" data-tip="Delete message and everything after it" aria-label="Delete message and everything after it">${trashIcon()}</button>`);
     }
   }
-  if (m.role === "assistant" && m.responseToTs !== undefined && !state.busy) {
-    if (isContinuableResponse(m)) {
+  if (m.role === "assistant" && m.responseToTs !== undefined) {
+    if (!state.busy && isContinuableResponse(m)) {
       actions.push(`<button class="icon-btn copy-btn" type="button" data-continue-chat="${m.recordTs}" data-tip="Continue" aria-label="Continue">${rightArrowIcon()}</button>`);
       if (!state.planning && state.queuedMessages.length) actions.push(`<button class="action-btn" type="button" data-resume-queue="${m.recordTs}">Run queued messages</button>`);
     } else if (!m.aborted) {

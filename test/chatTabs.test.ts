@@ -153,7 +153,7 @@ import { ChatViewProvider } from "../src/ui/chatView/provider.js";
 
 const record = (id: string) => ({ id, title: id, messages: [], reasoningEffort: "default", mode: "act" } as unknown as ChatRecord);
 function setup(memory?: WorkspaceMemory) {
-  const storage = { metadata: vi.fn().mockResolvedValue([]), list: vi.fn().mockResolvedValue([]), load: vi.fn(), save: vi.fn(), delete: vi.fn(), deleteAll: vi.fn(), deleteAttachment: vi.fn(), importAttachment: vi.fn(), importAttachmentBytes: vi.fn(), attachmentPath: (id: string) => `/workspace/${id}/image.png` };
+  const storage = { metadata: vi.fn().mockResolvedValue([]), list: vi.fn().mockResolvedValue([]), load: vi.fn(), save: vi.fn(), fork: vi.fn(), delete: vi.fn(), deleteAll: vi.fn(), deleteAttachment: vi.fn(), importAttachment: vi.fn(), importAttachmentBytes: vi.fn(), attachmentPath: (id: string) => `/workspace/${id}/image.png` };
   const preferences = new Map<string, unknown>();
   const workspaceState = {
     get: vi.fn((key: string) => preferences.get(key)),
@@ -598,6 +598,43 @@ describe("retired automatic memory generation", () => {
 });
 
 describe("independent chat tabs", () => {
+  it("opens a historical fork while the source chat keeps generating", async () => {
+    const { provider, storage, send, snapshot } = setup();
+    const source = record("source");
+    source.messages = [
+      { role: "user", content: "First request", ts: 1 },
+      { role: "assistant", content: "Completed response", ts: 2 },
+      { role: "user", content: "Next request", ts: 3 }
+    ];
+    const fork = { ...record("fork"), messages: structuredClone(source.messages.slice(0, 2)) };
+    storage.fork.mockResolvedValue(fork);
+    provider.openChat(source);
+    const session = mocks.sessions.get(source.id)!;
+    const turn = send({ type: "send", text: "Next request", mode: "act", chatId: source.id });
+    try {
+      await send({ type: "forkChat", throughUserMessageTs: 1, chatId: source.id });
+      expect(storage.fork).toHaveBeenCalledExactlyOnceWith(source, 1);
+      expect(provider.getCurrentRecord()).toBe(fork);
+      expect(snapshot()).toMatchObject({ id: fork.id, busy: false });
+      expect(provider.getTabs()).toContainEqual(expect.objectContaining({ id: source.id, running: true }));
+      expect(session.cancel).not.toHaveBeenCalled();
+      expect(session.shutdown).not.toHaveBeenCalled();
+
+      session.emit({ kind: "text", messageId: "response", delta: "Still generating in the original tab" });
+      session.finish();
+      await turn;
+      expect(provider.getCurrentRecord()).toBe(fork);
+      await provider.openChatById(source.id);
+      expect(snapshot()).toMatchObject({ id: source.id, busy: false });
+      expect(snapshot().events).toContainEqual({ kind: "text", messageId: "response", delta: "Still generating in the original tab" });
+      expect(session.cancel).not.toHaveBeenCalled();
+    } finally {
+      session.finish();
+      await turn;
+      await provider.closeAll();
+    }
+  });
+
   it("routes auto-approval to the active chat and ignores stale approval messages", async () => {
     const { provider, send } = setup();
     provider.openChat(record("a"));

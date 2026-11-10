@@ -1,5 +1,6 @@
 import { expect, test, type Locator } from "@playwright/test";
 import type { ChatToExt } from "../../src/ui/messaging.js";
+import type { ChatRecord } from "../../src/chat/types.js";
 import { hostMessage, webview } from "./harness.js";
 
 async function colors(tab: Locator): Promise<{ background: string; foreground: string }> {
@@ -10,6 +11,40 @@ async function colors(tab: Locator): Promise<{ background: string; foreground: s
 }
 
 for (const theme of ["light", "dark"] as const) {
+  test(`${theme}: completed responses remain forkable during a later generation`, async ({ page }) => {
+    await webview(page, theme);
+    const record: ChatRecord = {
+      id: "123e4567-e89b-42d3-a456-426614174001", workspaceRoot: "/workspace", title: "Fork during generation",
+      createdAt: 1, updatedAt: 4, toolCallingMode: "native", mode: "act", reasoningEffort: "default", totalTokens: 0,
+      messages: [
+        { role: "user", content: "First request", ts: 1 },
+        { role: "assistant", content: "Completed response", ts: 2 },
+        { role: "user", content: "Interrupted request", ts: 3 },
+        { role: "assistant", content: "", ts: 4, interruption: { reason: "Stopped by user.", mode: "act", reasoningEffort: "default" } }
+      ]
+    };
+    await hostMessage(page, { kind: "chatLoaded", record });
+    const fork = page.getByRole("button", { name: "Fork chat", exact: true });
+    await expect(fork).toHaveCount(1);
+    await expect(page.getByRole("button", { name: "Continue", exact: true })).toBeVisible();
+    await hostMessage(page, { kind: "turnPreparing", reason: "server" });
+    await expect(fork).toBeVisible();
+    await expect(page.getByRole("button", { name: "Continue", exact: true })).toHaveCount(0);
+    await hostMessage(page, { kind: "userMessage", messageId: "next", messageTs: 5, text: "Next request", mode: "act" });
+    await hostMessage(page, { kind: "turnStart", messageId: "generating" });
+    await hostMessage(page, { kind: "text", messageId: "generating", delta: "Working on the next response" });
+    await expect(fork).toHaveCount(1);
+    await expect(fork).toBeEnabled();
+    await fork.click();
+    const posted = await page.evaluate(() => (window as unknown as { posted: ChatToExt[] }).posted);
+    expect(posted).toContainEqual({ type: "forkChat", throughUserMessageTs: 1, chatId: record.id });
+    expect(posted.some(message => message.type === "cancel")).toBe(false);
+    await hostMessage(page, { kind: "text", messageId: "generating", delta: ". Finished." });
+    await expect(fork).toHaveCount(1);
+    await hostMessage(page, { kind: "turnEnd", messageId: "generating", mode: "act", messageTs: 6 });
+    await expect(fork).toHaveCount(2);
+  });
+
   test(`${theme}: chat tabs match sidebar selection, hover and keyboard focus`, async ({ page }) => {
     await webview(page, theme, "side");
     await page.mouse.move(990, 790);
