@@ -6,7 +6,7 @@ import { interruptionMessage } from "./interruption.js";
 import { startShiki, normalizeHighlightLanguage, highlightCode, highlightLanguageForPath } from "./highlighting.js";
 import { escapeHtml } from "../../html.js";
 import {
-  sendIcon, steerIcon, paperclipIcon, closeIcon, dragHandleIcon, stopIcon,
+  sendIcon, paperclipIcon, closeIcon, dragHandleIcon, stopIcon,
   clockIcon, checkIcon, folderIcon, viewImageIcon, questionIcon,
   forkIcon, rightArrowIcon, compactIcon, copyIcon, brainIcon,
   checklistIcon, dirIcon, fileIcon, downArrowIcon, circleIcon
@@ -1999,7 +1999,7 @@ function updateComposer(): void {
             ${state.editingQueuedMessageId === message.id
               ? `<button class="icon-btn icon-btn-compact queued-message-action save" type="button" data-save-queued="${escapeHtml(message.id)}" data-tip="Save" aria-label="Save queued message">${checkIcon()}</button>
                  <button class="icon-btn icon-btn-compact queued-message-action" type="button" data-cancel-queued-edit data-tip="Cancel" aria-label="Cancel editing">&times;</button>`
-              : `<button class="icon-btn icon-btn-compact queued-message-action" type="button" data-steer-queued="${escapeHtml(message.id)}" data-tip="Send now" aria-label="Steer" ${state.busy ? "" : "disabled"}>${steerIcon()}</button>
+              : `<button class="icon-btn icon-btn-compact queued-message-action" type="button" data-steer-queued="${escapeHtml(message.id)}" data-tip="Send now" aria-label="Steer" ${state.busy ? "" : "disabled"}>${sendIcon()}</button>
                  <button class="icon-btn icon-btn-compact queued-message-action" type="button" data-edit-queued="${escapeHtml(message.id)}" data-tip="Edit" aria-label="Edit queued message">${pencilIcon()}</button>
                  <button class="icon-btn icon-btn-compact queued-message-action remove" type="button" data-remove-queued="${escapeHtml(message.id)}" data-tip="Remove" aria-label="Remove queued message">${trashIcon()}</button>`}
           </span>
@@ -2074,7 +2074,7 @@ function updateComposerSubmitAction(focused: Element | null = document.activeEle
   const alternate = composerControlPressed && (focused?.id === "input" || focused === button);
   const steer = state.busy && (alternate ? !state.steerWithEnter : state.steerWithEnter);
   const label = state.busy ? `${steer ? "Steer" : "Queue"} message` : "Send";
-  setHtml(button, steer ? steerIcon() : sendIcon());
+  setHtml(button, sendIcon(state.busy && !steer));
   if (button.dataset.tip !== label) button.dataset.tip = label;
   if (button.getAttribute("aria-label") !== label) button.setAttribute("aria-label", label);
 }
