@@ -3,6 +3,8 @@ import { safeFetch } from "../src/network/safeFetch.js";
 import { serverUrl, withConnectionDraft } from "../src/llm/connection.js";
 import { fetchServerMetadata, complete, streamChat, type LlmStreamChunk } from "../src/llm/client.js";
 import { imageProbeDataUrl } from "../src/llm/imageProbe.js";
+import { compact } from "../src/chat/compactor.js";
+import type { ChatRecord } from "../src/chat/types.js";
 
 // External servers only: this suite never installs models or starts a server.
 const targets = [
@@ -14,6 +16,24 @@ const targets = [
 for (const target of targets) {
   const endpoint = process.env[`LOCALITY_LIVE_${target.name}_ENDPOINT`];
   describe.skipIf(!endpoint)(`live ${target.name} server`, () => {
+    it("compacts completed work with the shared generation policy", async () => {
+      const url = endpoint!;
+      const model = process.env[`LOCALITY_LIVE_${target.name}_MODEL`] ?? target.model;
+      await withConnectionDraft({ endpoint: url, model, serverType: "auto" }, process.env[`LOCALITY_LIVE_${target.name}_API_KEY`], async () => {
+        const metadata = await fetchServerMetadata(url, { model, force: true });
+        const rec: ChatRecord = { id: "live-compact", title: "Compaction", workspaceRoot: "/workspace", createdAt: 1, updatedAt: 1,
+          toolCallingMode: "native", mode: "act", reasoningEffort: "default", totalTokens: 0,
+          messages: [{ role: "user", content: "Update parser.ts and test the parser. Preserve public exports.", ts: 1 },
+            { role: "assistant", content: "Updated parser.ts to validate empty inputs. Parser tests passed; documentation remains to be updated.", ts: 2 }] };
+        const original = structuredClone(rec.messages);
+        await compact(url, rec, AbortSignal.timeout(120_000), { limit: Math.floor(metadata.contextSize / 2), summaryContextLimit: metadata.contextSize,
+          thresholdPercent: 80, tailBudgetPercent: 30, maxMessageTokensPercent: 25, overheadPerMessage: 4 }, model);
+        expect(rec.messages).toEqual(original);
+        expect(rec.contextMessages?.[0].content).toMatch(/^\[context summary\]\n\S/);
+        expect(rec.contextMessages?.some(message => message.content === original[0].content)).toBe(true);
+        expect(rec.totalTokens).toBeLessThan(metadata.contextSize / 2);
+      });
+    }, 180_000);
     it("validates metadata, bounded generation and model-specific capabilities", async () => {
       const url = endpoint!;
       const model = process.env[`LOCALITY_LIVE_${target.name}_MODEL`] ?? target.model;

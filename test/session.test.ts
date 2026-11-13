@@ -109,7 +109,7 @@ vi.mock("../src/llm/client.js", () => ({
 }));
 
 vi.mock("../src/llm/server.js", async importOriginal => ({
-  ...await importOriginal<typeof import("../src/llm/server.js")>(), countServerPrompt: mocks.countPrompt
+  ...await importOriginal<typeof import("../src/llm/server.js")>(), countServerPrompt: (...args: unknown[]) => mocks.backend === "vllm" ? mocks.countPrompt(...args) : Promise.resolve(undefined)
 }));
 
 vi.mock("../src/tools/terminalTool.js", () => ({
@@ -625,9 +625,9 @@ describe("ChatSession", () => {
 
   it("labels reported prompt processing as context loading on every turn", async () => {
     mocks.streamChat.mockImplementation(async function* (
-      _endpoint: string, request: { return_progress?: boolean; onResponseAccepted?: () => void }
+      _endpoint: string, request: { generation?: ChatCompletionRequest["generation"]; onResponseAccepted?: () => void }
     ) {
-      expect(request.return_progress).toBe(true);
+      expect(request.generation?.reportProgress).toBe(true);
       request.onResponseAccepted?.();
       expect(events.filter(event => event.kind === "turnPreparing").at(-1))
         .toEqual({ kind: "turnPreparing", reason: "server" });
@@ -1188,9 +1188,7 @@ describe("ChatSession", () => {
     mocks.settings.toolCallingMode = "native";
     const requests: Array<{
       messages: Array<{ content: unknown }>;
-      thinking_budget_tokens?: number;
-      reasoning_effort?: string;
-      chat_template_kwargs?: Record<string, unknown>;
+      generation?: ChatCompletionRequest["generation"];
       tools?: Array<{ function: { name: string } }>;
     }> = [];
     let releaseFirstRequest = (): void => undefined;
@@ -1227,14 +1225,13 @@ describe("ChatSession", () => {
 
     expect(requests).toHaveLength(3);
     for (const request of requests.slice(0, 2)) {
-      expect(request.thinking_budget_tokens).toBe(16384);
-      expect(request.reasoning_effort).toBe("high");
-      expect(request.chat_template_kwargs).toBeUndefined();
+      expect(request.generation?.reasoning?.budgetTokens).toBe(16384);
+      expect(request.generation?.reasoning?.effort).toBe("high");
+      expect(request.generation?.reasoning?.mode).toBe("default");
       expect(request.tools?.some(tool => tool.function.name === "create_file")).toBe(true);
     }
-    expect(requests[2].thinking_budget_tokens).toBe(0);
-    expect(requests[2].reasoning_effort).toBeUndefined();
-    expect(requests[2].chat_template_kwargs).toEqual({ enable_thinking: false });
+    expect(requests[2].generation?.reasoning?.mode).toBe("off");
+    expect(requests[2].generation?.reasoning?.effort).toBeUndefined();
     expect(requests[2].tools).toEqual(requests[0].tools);
     expect(latestUserContext(requests[2])).toContain("Current chat mode: plan.");
     expect(record.messages.filter(message => message.role === "user").map(message => message.mode)).toEqual(["act", "plan"]);
@@ -1424,15 +1421,14 @@ describe("ChatSession", () => {
 
     expect(request).toMatchObject({
       model: "test-model",
-      thinking_budget_tokens: 12345,
-      reasoning_effort: effort
+      generation: { reasoning: { budgetTokens: 12345, effort } }
     });
   });
 
   it.each([
-    ["none", { enable_thinking: false }],
-    ["default", undefined]
-  ] as const)("sends the universal %s reasoning selection", async (selection, templateArgs) => {
+    ["none"],
+    ["default"]
+  ] as const)("sends the universal %s reasoning selection", async (selection) => {
     mocks.settings.toolCallingMode = "native";
     let request: Record<string, unknown> | undefined;
     mocks.streamChat.mockImplementation(async function* (_endpoint: string, value: Record<string, unknown>) {
@@ -1453,9 +1449,8 @@ describe("ChatSession", () => {
     await session.sendUserMessage("answer briefly");
 
     expect(request).not.toHaveProperty("reasoning_effort");
-    expect(request).toHaveProperty("thinking_budget_tokens", selection === "none" ? 0 : 16384);
-    if (templateArgs) expect(request).toHaveProperty("chat_template_kwargs", templateArgs);
-    else expect(request).not.toHaveProperty("chat_template_kwargs");
+    expect(request).toHaveProperty("generation.reasoning.mode", selection === "none" ? "off" : "default");
+    expect(request).toHaveProperty("generation.reasoning.budgetTokens", 16384);
   });
 
   it("sends an unlimited budget when the setting is empty", async () => {
@@ -1472,7 +1467,7 @@ describe("ChatSession", () => {
 
     expect(mocks.streamChat).toHaveBeenCalledWith(
       mocks.settings.endpoint,
-      expect.objectContaining({ thinking_budget_tokens: -1 }),
+      expect.objectContaining({ generation: expect.objectContaining({ reasoning: expect.objectContaining({ budgetTokens: undefined }) }) }),
       expect.anything()
     );
   });
@@ -4490,7 +4485,7 @@ describe("length-limited generation recovery", () => {
     });
     await session.sendUserMessage("Continue");
     expect(mocks.streamChat).toHaveBeenCalledTimes(outcome === "repeated-limit" ? 2 : 1);
-    expect(events.filter(event => event.kind === "compactStart")).toHaveLength(outcome === "auto-disabled" || outcome === "cancelled-before-summary" ? 0 : 1);
+    expect(events.filter(event => event.kind === "compactStart")).toHaveLength(outcome === "auto-disabled" ? 0 : 1);
     expect(events).toContainEqual(expect.objectContaining({ kind: "abort", reason: outcome.startsWith("cancelled") ? "Cancelled." : "Generation limit", messageTs: expect.any(Number) }));
     expect(events.filter(event => event.kind === "turnEnd")).toEqual([]);
     expect(record.messages.at(-1)?.interruption).toBeDefined();
@@ -4514,6 +4509,79 @@ describe("length-limited generation recovery", () => {
     expect(mocks.streamChat).toHaveBeenCalledTimes(2);
     expect(events.some(event => event.kind === "compactStart" || event.kind === "abort")).toBe(false);
     expect(record.messages.at(-1)?.content).toBe("Concise answer");
+  });
+});
+
+describe("compaction transactions", () => {
+  it("publishes inside the save queue so a queued rename cannot restore stale context", async () => {
+    const { ChatSession } = await import("../src/chat/session.js");
+    const record = newRecord();
+    record.messages = [{ role: "user", content: "request", ts: 1 }, { role: "assistant", content: "completed work", ts: 2 }];
+    let saving!: () => void, release!: () => void;
+    const started = new Promise<void>(resolve => { saving = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let saved: ChatRecord | undefined;
+    let calls = 0;
+    const save = vi.fn(async (candidate: ChatRecord) => {
+      if (++calls === 1) { saving(); await gate; }
+      saved = structuredClone(candidate);
+    });
+    const session = new ChatSession({ storage: { save } as never, workspaceRoot: "/tmp/workspace", record, emit: () => undefined });
+    const compaction = session.compactNow();
+    await started;
+    const rename = session.renameTitle("Renamed during save");
+    release();
+    await Promise.all([compaction, rename]);
+    expect(saved?.title).toBe("Renamed during save");
+    expect(saved?.contextMessages?.[0].content).toContain("[context summary]");
+    expect(saved?.compactions).toHaveLength(1);
+  });
+  it.each(["llama.cpp", "vllm"] as const)("coalesces concurrent manual compaction on %s and saves its outcome", async backend => {
+    mocks.backend = backend;
+    const { ChatSession } = await import("../src/chat/session.js");
+    const record = newRecord();
+    record.messages = [{ role: "user", content: "request", ts: 1 }, { role: "assistant", content: "completed work", ts: 2 }];
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    mocks.complete.mockImplementation(async () => { await gate; return "GOAL: continue"; });
+    const save = vi.fn(async () => undefined);
+    const events: UiEvent[] = [];
+    const session = new ChatSession({ storage: { save } as never, workspaceRoot: "/tmp/workspace", record, emit: event => events.push(event) });
+    const first = session.compactNow();
+    const second = session.compactNow();
+    await vi.waitFor(() => expect(mocks.complete).toHaveBeenCalledTimes(1));
+    expect(session.isTurnActive()).toBe(true);
+    release();
+    await Promise.all([first, second]);
+    expect(events.filter(event => event.kind === "compactStart")).toHaveLength(1);
+    expect(record.compactions).toHaveLength(1);
+    expect(record.compactions![0].status).toBe("executed");
+    expect(save).toHaveBeenCalledTimes(1);
+    expect(session.isTurnActive()).toBe(false);
+  });
+
+  it.each(["save", "cancel", "change"])("preserves active and saved context on %s during compaction", async outcome => {
+    const { ChatSession } = await import("../src/chat/session.js");
+    const record = newRecord();
+    record.messages = [{ role: "user", content: "request", ts: 1 }, { role: "assistant", content: "completed work", ts: 2 }];
+    const events: UiEvent[] = [];
+    let saved: ChatRecord | undefined;
+    const save = vi.fn(async (candidate: ChatRecord) => {
+      if (outcome === "save" && candidate.contextMessages?.[0]?.content.startsWith("[context summary]")) throw new Error("Disk full");
+      saved = structuredClone(candidate);
+    });
+    const session = new ChatSession({ storage: { save } as never, workspaceRoot: "/tmp/workspace", record, emit: event => events.push(event) });
+    mocks.complete.mockImplementation(async () => {
+      if (outcome === "cancel") session.cancel();
+      if (outcome === "change") record.messages[0].content = "edited request";
+      return "GOAL: continue";
+    });
+    await session.compactNow();
+    expect(record.contextMessages).toBeUndefined();
+    expect(saved?.contextMessages).toBeUndefined();
+    expect(saved?.compactions?.[0].status).toBe("failed");
+    expect(events).toContainEqual(expect.objectContaining({ kind: "compactEnd", status: "failed" }));
+    expect(session.isTurnActive()).toBe(false);
   });
 });
 
@@ -4557,7 +4625,8 @@ describe("separate transcript and model context", () => {
       expect(workIndex).toBeGreaterThan(-1);
       expect(compactIndex).toBeGreaterThan(workIndex);
       expect(compactEndIndex).toBeGreaterThan(compactIndex);
-      expect(turnIndex).toBeGreaterThan(compactEndIndex);
+      expect(turnIndex).toBeGreaterThan(workIndex);
+      expect(events.findIndex(event => event.kind === "text")).toBeGreaterThan(compactEndIndex);
       expect(events[compactEndIndex]).toMatchObject({ source: "auto", status: "executed" });
       // Reloading here clears the live assistant message and strands compaction
       // in a standalone row, outside the response's normal tool sub-sessions.
@@ -4650,7 +4719,8 @@ describe("separate transcript and model context", () => {
     mocks.streamChat.mockImplementation(async function* () { yield { kind: "text", text: "new answer" }; });
     await reopened.sendUserMessage("new request");
     const request = mocks.streamChat.mock.calls[0][1];
-    expect(JSON.stringify(request.messages)).not.toContain("ORIGINAL_REQUEST_SENTINEL");
+    expect(JSON.stringify(request.messages)).toContain("ORIGINAL_REQUEST_SENTINEL");
+    expect(JSON.stringify(request.messages)).not.toContain("answer 0");
     expect(JSON.stringify(request.messages)).toContain("new request");
     expect(saved!.messages[0].content).toBe("ORIGINAL_REQUEST_SENTINEL");
     expect(saved!.messages.at(-1)?.content).toBe("new answer");
@@ -5064,7 +5134,7 @@ describe("steering an active turn", () => {
     expect(requests[1].messages[0]).toEqual(requests[0].messages[0]);
     expect(latestUserContext(requests[1])).toContain(`User request time: ${new Date(record.messages[0].ts).toISOString()}`);
     expect(requests[1].tools).toEqual(requests[0].tools);
-    expect(requests[1].reasoning_effort).toEqual(requests[0].reasoning_effort);
+    expect(requests[1].generation?.reasoning).toEqual(requests[0].generation?.reasoning);
     expect(requests[1].messages.filter(m => m.role === "system")).toHaveLength(1);
     expect(requests[1].messages.slice(-2)).toEqual([
       expect.objectContaining({ role: "assistant", content: "Initial approach." }),

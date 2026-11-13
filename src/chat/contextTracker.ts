@@ -5,6 +5,9 @@ import type { LlmContent } from "../llm/client.js";
 import { withUserContext } from "../llm/prompt.js";
 import { VISION_TOKEN_RESERVE, modelMessages } from "./storage.js";
 import type { ChatMessage, ChatRecord } from "./types.js";
+import type { ChatCompletionRequest } from "../llm/client.js";
+import { countServerPrompt } from "../llm/server.js";
+import type { PromptMeasurement } from "../llm/requestPolicy.js";
 
 /**
  * Exact token counts keyed by the exact string tokenized. Repeated guard and
@@ -39,19 +42,22 @@ export async function countTokens(endpoint: string, text: string, model?: string
 export async function recomputeTokens(
   endpoint: string,
   rec: ChatRecord,
-  model?: string
+  model?: string,
+  signal?: AbortSignal
 ): Promise<number> {
-  if (rec.tokenizerIdentity !== connectionIdentity(endpoint, model)) {
+  const identity = `${connectionIdentity(endpoint, model)}:history-v2`;
+  if (rec.tokenizerIdentity !== identity) {
     for (const message of modelMessages(rec)) delete message.tokens;
     rec.tokenizerModel = model;
-    rec.tokenizerIdentity = connectionIdentity(endpoint, model);
+    rec.tokenizerIdentity = identity;
   }
   let total = 0;
   for (const m of modelMessages(rec)) {
+    signal?.throwIfAborted();
     let tokens = m.tokens;
     if (typeof tokens !== "number") {
       let estimated = false;
-      tokens = await countTokens(endpoint, formatForCounting(m), model, { onEstimate: () => { estimated = true; } })
+      tokens = await countTokens(endpoint, formatForCounting(m), model, { signal, onEstimate: () => { estimated = true; } })
         + (m.attachments?.filter(isImageAttachment).length ?? 0) * VISION_TOKEN_RESERVE;
       if (!estimated) m.tokens = tokens;
     }
@@ -62,13 +68,10 @@ export async function recomputeTokens(
 }
 
 /**
- * Exact token count of the *rendered* prompt actually sent to the model, not
- * the sum of stored messages. buildPromptMessages transforms the transcript
- * (re-renders tool calls, wraps tool results, prepends the system prompt), so
- * the rendered messages are the only faithful thing to count. llama.cpp adds a
- * few template/special tokens per message that /tokenize on the content does
- * not see; `overheadPerMessage` approximates them so the guard doesn't
- * under-count and let the server overflow.
+ * Estimate the assembled prompt using exact content tokenization and explicit
+ * template overhead. This includes reconstructed calls and tool results, but
+ * cannot claim the accuracy of a server-rendered chat-template count.
+ * measureRequestPrompt labels this fallback and the shared budget adds headroom.
  */
 export async function promptTokens(
   endpoint: string,
@@ -79,11 +82,12 @@ export async function promptTokens(
     tool_calls?: unknown[];
   }[],
   overheadPerMessage: number,
-  model?: string
+  model?: string,
+  signal?: AbortSignal
 ): Promise<number> {
   let total = 0;
   for (const m of messages) {
-    total += await countTokens(endpoint, formatPromptMessageForCounting(m), model);
+    total += await countTokens(endpoint, formatPromptMessageForCounting(m), model, { signal, exact: true });
     if (Array.isArray(m.content)) {
       total += m.content.filter(part => part.type === "image_url").length * VISION_TOKEN_RESERVE;
     }
@@ -111,9 +115,10 @@ export async function truncateToTokenBudget(
   endpoint: string,
   text: string,
   maxTokens: number,
-  model?: string
+  model?: string,
+  signal?: AbortSignal
 ): Promise<TruncationResult> {
-  const total = await countTokens(endpoint, text, model);
+  const total = await countTokens(endpoint, text, model, { signal });
   if (maxTokens <= 0) {
     const marker = elisionMarker(total, countNewlines(text));
     return { text: marker, truncated: true, elidedTokens: total, elidedLines: countNewlines(text) };
@@ -136,13 +141,13 @@ export async function truncateToTokenBudget(
     elidedLines = countNewlines(elidedMiddle);
     const approxElidedTokens = Math.max(1, total - keepTokens);
     out = head + elisionMarker(approxElidedTokens, elidedLines) + tail;
-    const measured = await countTokens(endpoint, out, model);
+    const measured = await countTokens(endpoint, out, model, { signal });
     if (measured <= maxTokens) break;
     // Overshot the budget — shrink proportionally and try again.
     keepTokens = Math.max(1, Math.floor(keepTokens * (maxTokens / measured)) - 4);
   }
 
-  const finalTokens = await countTokens(endpoint, out, model);
+  const finalTokens = await countTokens(endpoint, out, model, { signal });
   return { text: out, truncated: true, elidedTokens: Math.max(0, total - finalTokens), elidedLines };
 }
 
@@ -157,7 +162,16 @@ function countNewlines(s: string): number {
 }
 
 function formatForCounting(m: ChatMessage): string {
-  return `<|${m.role}|>${m.reasoningContent ? `<|reasoning|>${m.reasoningContent}` : ""}${withUserContext(m.content, m.requestContext)}`;
+  return `<|${m.role}|>${m.reasoningContent ? `<|reasoning|>${m.reasoningContent}` : ""}${withUserContext(m.content, m.requestContext)}${m.toolCall ? `<|tool_call|>${m.toolCall.name}\n${m.toolCall.argsJson}` : ""}`;
+}
+
+/** One measurement path for every task; only the adapter knows the backend. */
+export async function measureRequestPrompt(endpoint: string, request: ChatCompletionRequest, overhead: number, signal?: AbortSignal): Promise<PromptMeasurement> {
+  const exact = await countServerPrompt(endpoint, request, signal, false);
+  if (exact !== undefined) return { tokens: exact, accuracy: "exact" };
+  const messages = [...request.messages];
+  if (request.tools?.length) messages.push({ role: "system", content: JSON.stringify(request.tools) });
+  return { tokens: await promptTokens(endpoint, messages, overhead, request.model, signal), accuracy: "estimated" };
 }
 
 function formatPromptMessageForCounting(m: {

@@ -1,13 +1,16 @@
 import { isImageAttachment } from "./attachments.js";
-import { complete } from "../llm/client.js";
+import { complete, type ChatCompletionRequest } from "../llm/client.js";
 import { withUserContext } from "../llm/prompt.js";
-import { countTokens, recomputeTokens, truncateToTokenBudget } from "./contextTracker.js";
-import { VISION_TOKEN_RESERVE, modelMessages } from "./storage.js";
+import { countTokens, recomputeTokens, measureRequestPrompt } from "./contextTracker.js";
+import { modelMessages } from "./storage.js";
 import type { ChatRecord, ChatMessage } from "./types.js";
+import { GenerationLengthError, StreamFailure } from "../llm/completion.js";
+import { promptBudget } from "../llm/requestPolicy.js";
+import { messageContainsToolCall } from "./messageOrder.js";
 
 /** Nominal minimum tail; the real tail is chosen by token budget (see CompactConfig). */
 export const KEEP_TAIL = 4;
-export const MIN_COMPACT_MESSAGES = KEEP_TAIL + 2;
+export const MIN_COMPACT_MESSAGES = 2;
 
 const SUMMARY_SYSTEM =
   "You are summarizing a coding-assistant conversation so the assistant can keep working with less context. " +
@@ -22,254 +25,223 @@ const SUMMARY_SYSTEM =
   "Be specific — keep exact paths, names, and line numbers. Do not restate tool output or file contents verbatim.";
 
 export interface CompactConfig {
-  /** Effective context window in tokens (min of configured size and server n_ctx). */
+  /** Room for retained history, after reserving the live prompt and generation. */
   limit: number;
-  /** Compact down toward this fraction of the limit. */
+  /** Full window available to standalone summary requests. */
+  summaryContextLimit?: number;
   thresholdPercent: number;
-  /** Token budget for the verbatim recent tail. */
   tailBudgetPercent: number;
-  /** Per-message truncation cap, as a fraction of the limit. */
   maxMessageTokensPercent: number;
-  /** Template/special-token overhead llama.cpp adds per message. */
   overheadPerMessage: number;
+  validate?: (messages: ChatMessage[]) => Promise<boolean>;
+  commit?: (candidate: ChatRecord, assertCurrent: () => void, publish: () => void) => Promise<void>;
 }
 
-export interface CompactResult {
-  /** How many recent messages were kept verbatim after compaction. */
-  keptTail: number;
-}
+export interface CompactResult { keptTail: number }
 
 export function compactAvailableForMessageCount(messageCount: number): boolean {
   return messageCount >= MIN_COMPACT_MESSAGES;
 }
 
-/**
- * Replace the bulk of history with a model-generated summary while keeping the
- * most recent messages that fit a token budget verbatim. Unlike a fixed tail,
- * this guarantees the result fits: oversized recent messages are middle-
- * truncated with a marker, the head is summarized in chunks so no single
- * summarization request overflows, and a final fit loop drops or truncates
- * anything still over budget. The summary becomes a leading `system` message.
- */
-export async function compact(
-  endpoint: string,
-  rec: ChatRecord,
-  signal: AbortSignal,
-  cfg: CompactConfig,
-  model?: string
-): Promise<CompactResult> {
+export function compactAvailableForMessages(messages: ChatMessage[]): boolean {
+  if (!compactAvailableForMessageCount(messages.length)) return false;
+  const latest = messages.reduce((index, message, i) => message.role === "user" && !message.steering ? i : index, -1);
+  return messages.some((message, i) => message.role !== "user" || i < latest);
+}
+
+/** Compare actual context, including in-place edits, but ignore token caches. */
+export function contextRevision(rec: ChatRecord): string {
+  return JSON.stringify(modelMessages(rec).map(({ tokens: _tokens, ...message }) => message));
+}
+
+/** Prepare and validate privately; publish only after successful persistence. */
+export async function compact(endpoint: string, rec: ChatRecord, signal: AbortSignal, cfg: CompactConfig, model?: string): Promise<CompactResult> {
+  signal.throwIfAborted();
   const context = modelMessages(rec);
-  const contextLength = context.length;
-  if (!compactAvailableForMessageCount(context.length)) return { keptTail: context.length };
-  // Work on a detached context so truncation and failed summaries cannot
-  // mutate the transcript or the last successfully saved model context.
+  if (!compactAvailableForMessages(context)) return { keptTail: context.length };
+  const revision = contextRevision(rec);
+  const assertCurrent = () => {
+    signal.throwIfAborted();
+    if (modelMessages(rec) !== context || contextRevision(rec) !== revision) {
+      throw new Error("Conversation changed during compaction. Retry after the current response finishes.");
+    }
+  };
   const working: ChatRecord = { ...rec, messages: structuredClone(context), contextMessages: undefined };
   const result = await compactContext(endpoint, working, signal, cfg, model);
-  if (modelMessages(rec) !== context || context.length !== contextLength) {
-    throw new Error("Conversation changed during compaction. Retry after the current response finishes.");
-  }
-  rec.contextMessages = working.messages;
-  rec.totalTokens = working.totalTokens;
-  rec.tokenizerModel = working.tokenizerModel;
-  rec.tokenizerIdentity = working.tokenizerIdentity;
+  assertCurrent();
+  const candidate = { ...rec, contextMessages: working.messages, totalTokens: working.totalTokens,
+    tokenizerModel: working.tokenizerModel, tokenizerIdentity: working.tokenizerIdentity };
+  let published = false;
+  const publish = () => {
+    assertCurrent();
+    rec.contextMessages = candidate.contextMessages;
+    rec.totalTokens = candidate.totalTokens;
+    rec.tokenizerModel = candidate.tokenizerModel;
+    rec.tokenizerIdentity = candidate.tokenizerIdentity;
+    rec.compactions = candidate.compactions;
+    published = true;
+  };
+  if (cfg.commit) await cfg.commit(candidate, assertCurrent, publish);
+  else publish();
+  if (!published) throw new Error("The compacted context was not committed.");
   return result;
 }
 
-async function compactContext(
-  endpoint: string,
-  rec: ChatRecord,
-  signal: AbortSignal,
-  cfg: CompactConfig,
-  model?: string
-): Promise<CompactResult> {
-  if (!compactAvailableForMessageCount(rec.messages.length)) {
-    return { keptTail: rec.messages.length };
-  }
-  await recomputeTokens(endpoint, rec, model);
-
-  const limit = Number.isFinite(cfg.limit) ? cfg.limit : Math.max(rec.totalTokens, 4096);
-  const perMsgCap = Math.max(256, Math.floor((limit * cfg.maxMessageTokensPercent) / 100));
-  const tailBudget = Math.max(perMsgCap, Math.floor((limit * cfg.tailBudgetPercent) / 100));
-
-  // 1) Adaptive tail: the newest messages that fit within tailBudget.
-  const split = selectTailStart(rec.messages, tailBudget, perMsgCap);
-  const tail = rec.messages.slice(split);
-  const head = rec.messages.slice(0, split);
-
-  // 2) Truncate oversized verbatim-tail messages down to the per-message cap.
-  for (const m of tail) {
-    if ((m.tokens ?? 0) > perMsgCap) {
-      // Summarize oversized historical context as data. The session restores
-      // the current turn's complete context from the untouched transcript.
-      if (m.requestContext) {
-        head.push({ role: "system", content: `[historical harness context]\n${m.requestContext}`, ts: m.ts });
-        delete m.requestContext;
-      }
-      // Historical reasoning is expendable once a message itself no longer
-      // fits verbatim; do not retain an oversized hidden field while
-      // truncating only the visible content.
-      delete m.reasoningContent;
-      const imageCost = (m.attachments?.filter(isImageAttachment).length ?? 0) * VISION_TOKEN_RESERVE;
-      if (imageCost >= perMsgCap) delete m.attachments;
-      const r = await truncateToTokenBudget(endpoint, m.content, Math.max(1, perMsgCap - (m.attachments?.filter(isImageAttachment).length ?? 0) * VISION_TOKEN_RESERVE), model);
-      m.content = r.text;
-      delete (m as { tokens?: number }).tokens;
+/** Tool results and their recorded assistant preamble form indivisible exchanges. */
+function historyGroups(messages: ChatMessage[]): ChatMessage[][] {
+  const groups: ChatMessage[][] = [];
+  for (let i = 0; i < messages.length; i++) {
+    const group = [messages[i]];
+    if (messages[i].role === "tool") {
+      while (messages[i + 1]?.role === "tool") group.push(messages[++i]);
+      if (messages[i + 1]?.role === "assistant" && messageContainsToolCall(messages[i + 1])) group.push(messages[++i]);
     }
+    groups.push(group);
   }
-
-  // 3) Summarize the head with map-reduce so no single request overflows.
-  const summaryText = head.length > 0 ? await summarizeHead(endpoint, head, signal, cfg, limit, perMsgCap, model) : "";
-
-  // 4) Assemble: [summary?] + verbatim tail.
-  const next: ChatMessage[] = [];
-  if (summaryText.trim()) {
-    next.push({ role: "system", content: "[context summary]\n" + summaryText.trim(), ts: Date.now() });
-  }
-  next.push(...tail);
-  rec.messages = next;
-  for (const m of rec.messages) delete (m as { tokens?: number }).tokens;
-  await recomputeTokens(endpoint, rec, model);
-
-  // 5) Guarantee fit even if the summary + tail is still too big.
-  await enforceFit(endpoint, rec, cfg, limit, perMsgCap, model);
-
-  return { keptTail: rec.messages.length - (summaryText.trim() ? 1 : 0) };
+  return groups;
 }
 
-/**
- * Index where the verbatim tail begins. Walks from the newest message, costing
- * oversized messages at the per-message cap (they'll be truncated to it), and
- * stops once the budget is spent — always keeping at least the last message and
- * always leaving at least one message in the head to summarize.
- */
-function selectTailStart(messages: ChatMessage[], tailBudget: number, perMsgCap: number): number {
-  let used = 0;
-  let start = messages.length;
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const cost = Math.min(messages[i].tokens ?? 0, perMsgCap) + 1;
-    const firstPicked = start === messages.length;
-    if (!firstPicked && used + cost > tailBudget) break;
-    used += cost;
-    start = i;
-    if (used >= tailBudget) break;
-  }
-  // Never let the tail swallow the whole transcript — leave the oldest message
-  // for the summary so compaction always reduces something.
-  if (start === 0 && messages.length > 1) start = 1;
-  return start;
-}
-
-/**
- * Summarize `head` in sequential windows that each fit the model's context,
- * carrying the running summary forward (map-reduce). A single oversized message
- * is truncated before chunking so it can't blow a window on its own.
- */
-async function summarizeHead(
-  endpoint: string,
-  head: ChatMessage[],
-  signal: AbortSignal,
-  cfg: CompactConfig,
-  limit: number,
-  perMsgCap: number,
-  model?: string
-): Promise<string> {
-  // Reserve room for the instruction + the model's summary output; the rest is
-  // the budget for the transcript portion of one summarization request.
-  const outputReserve = Math.floor(limit * 0.25);
-  const inputBudget = Math.max(512, Math.floor((limit * cfg.thresholdPercent) / 100) - outputReserve);
-
-  // Demote every head message to `user` (content already prefixed with its
-  // original role) so the only system message is the instruction — chat
-  // templates like qwen3 raise on a later system message.
-  const demoted: { content: string; tokens: number }[] = [];
-  for (const m of head) {
-    const imageMarker = (m.attachments ?? []).map(attachment =>
-      `[${isImageAttachment(attachment) ? "image" : "text"} attachment: ${attachment.fileName} (${attachment.mimeType})]`
-    ).join("\n");
-    let content = `[${m.role}] ${[imageMarker, withUserContext(m.content, m.requestContext)].filter(Boolean).join("\n")}`;
-    let tokens = await countTokens(endpoint, `<|user|>${content}`, model);
-    if (tokens > perMsgCap) {
-      const r = await truncateToTokenBudget(endpoint, content, perMsgCap, model);
-      content = r.text;
-      tokens = await countTokens(endpoint, `<|user|>${content}`, model);
-    }
-    demoted.push({ content, tokens });
-  }
-
-  let running = "";
-  let chunk: { content: string }[] = [];
-  let chunkTokens = 0;
-  const flush = async () => {
-    if (chunk.length === 0) return;
-    running = await summarizeChunk(endpoint, running, chunk, signal, model, Math.min(2048, outputReserve));
-    chunk = [];
-    chunkTokens = 0;
+async function compactContext(endpoint: string, rec: ChatRecord, signal: AbortSignal, cfg: CompactConfig, model?: string): Promise<CompactResult> {
+  if (!Number.isFinite(cfg.limit) || cfg.limit <= 0) throw new Error("The current instructions leave no room for compacted history. Reduce the request or increase the context window.");
+  await recomputeTokens(endpoint, rec, model, signal);
+  const groups = historyGroups(rec.messages);
+  let latestUser = -1;
+  rec.messages.forEach((message, i) => { if (message.role === "user" && !message.steering) latestUser = i; });
+  const protectedMessages = new Set(rec.messages.filter((message, i) => message.role === "user" && i >= latestUser));
+  const pinned = (group: ChatMessage[]) => group.some(message => protectedMessages.has(message));
+  const cost = async (group: ChatMessage[]) => {
+    const temp = { ...rec, messages: group };
+    return await recomputeTokens(endpoint, temp, model, signal) + group.length * cfg.overheadPerMessage;
   };
-  for (const m of demoted) {
-    const runningCost = running ? await countTokens(endpoint, running, model) : 0;
-    const cost = m.tokens + cfg.overheadPerMessage;
-    if (chunk.length > 0 && chunkTokens + cost + runningCost > inputBudget) {
-      await flush();
+  const protectedCost = await cost(groups.filter(pinned).flat());
+  if (protectedCost >= cfg.limit) throw new Error("The current user request and required context do not fit. Reduce the request or increase the context window; compaction will not truncate them.");
+  const target = Math.min(cfg.limit, Math.max(protectedCost + 64, Math.floor(cfg.limit * cfg.thresholdPercent / 100)));
+  const tailBudget = Math.max(0, Math.floor(cfg.limit * cfg.tailBudgetPercent / 100) - protectedCost);
+  const tail: ChatMessage[][] = [];
+  const head: ChatMessage[][] = [];
+  let used = 0;
+  for (let i = groups.length - 1; i >= 0; i--) {
+    const group = groups[i];
+    const tokens = await cost(group);
+    if (pinned(group) || (used + tokens <= tailBudget && i > 0)) {
+      tail.unshift(group);
+      if (!pinned(group)) used += tokens;
+    } else head.unshift(group);
+  }
+  if (!head.length) {
+    const index = tail.findIndex(group => !pinned(group));
+    if (index < 0) return { keptTail: rec.messages.length };
+    head.push(...tail.splice(index, 1));
+  }
+  let summary = "";
+  let summaryCeiling = Number.POSITIVE_INFINITY;
+  let fitRetries = 0;
+  // Each failed fit moves an entire unprotected exchange into the summary.
+  for (;;) {
+    signal.throwIfAborted();
+    const retained = tail.flat();
+    const summaryBudget = Math.floor(Math.min(summaryCeiling, target - await cost(retained) - cfg.overheadPerMessage - 16));
+    if (summaryBudget < 32) throw new Error("The current request leaves insufficient room for a context summary.");
+    summary = await summarizeHead(endpoint, head.flat(), summary, signal, cfg, summaryBudget, model);
+    const messages: ChatMessage[] = [{ role: "system", content: "[context summary]\n" + summary, ts: Date.now() }, ...retained];
+    const candidate = { ...rec, messages };
+    await recomputeTokens(endpoint, candidate, model, signal);
+    if (candidate.totalTokens + messages.length * cfg.overheadPerMessage <= target
+      && (!cfg.validate || await cfg.validate(messages))) {
+      rec.messages = messages;
+      rec.totalTokens = candidate.totalTokens;
+      return { keptTail: retained.length };
     }
-    chunk.push({ content: m.content });
-    chunkTokens += cost;
+    const index = tail.findIndex(group => !pinned(group));
+    if (index < 0) {
+      if (fitRetries++ >= 2) throw new Error("The compacted prompt still exceeds the context window. The previous context was preserved.");
+      summaryCeiling = Math.floor(Math.min(summaryBudget, await countTokens(endpoint, summary, model, { signal })) / 2);
+      head.splice(0, head.length, [{ role: "system", content: summary, ts: Date.now() }]);
+      summary = "";
+      continue;
+    }
+    head.splice(0, head.length, ...tail.splice(index, 1));
   }
-  await flush();
+}
+
+function historicalContent(message: ChatMessage): string {
+  const attachments = (message.attachments ?? []).map(a => `[${isImageAttachment(a) ? "image" : "text"} attachment: ${a.fileName} (${a.mimeType})]`).join("\n");
+  const tool = message.toolCall ? `[${message.toolCall.name}: ${message.toolCall.status ?? "completed"}]\nArguments: ${message.toolCall.argsJson}\nResult:\n` : "";
+  return `[${message.role}, timestamp ${message.ts}] ${attachments}\n${tool}${withUserContext(message.content, message.requestContext)}`;
+}
+
+/** Split data without dropping the middle or treating partial tool JSON as executable. */
+async function splitText(endpoint: string, text: string, budget: number, model: string | undefined, signal: AbortSignal): Promise<string[]> {
+  const parts: string[] = [];
+  while (text) {
+    signal.throwIfAborted();
+    if (await countTokens(endpoint, text, model, { signal }) <= budget) { parts.push(text); break; }
+    let lo = 1, hi = text.length, best = 0;
+    while (lo <= hi) {
+      const mid = Math.floor((lo + hi) / 2);
+      if (await countTokens(endpoint, text.slice(0, mid), model, { signal }) <= budget) { best = mid; lo = mid + 1; }
+      else hi = mid - 1;
+    }
+    if (!best) throw new Error("Insufficient space for summary input.");
+    parts.push(text.slice(0, best));
+    text = text.slice(best);
+  }
+  return parts;
+}
+
+async function summarizeHead(endpoint: string, head: ChatMessage[], prior: string, signal: AbortSignal, cfg: CompactConfig, summaryBudget: number, model?: string): Promise<string> {
+  const window = cfg.summaryContextLimit ?? cfg.limit;
+  const fragmentBudget = Math.max(1, Math.floor(Math.min(window / 4, window * cfg.maxMessageTokensPercent / 100)));
+  const pending: string[] = [];
+  for (const message of head) pending.push(...await splitText(endpoint, historicalContent(message), fragmentBudget, model, signal));
+  let running = prior;
+  while (pending.length) {
+    let output = Math.min(2048, Math.max(128, summaryBudget), Math.floor(window / 4));
+    let take = Math.min(pending.length, Math.max(1, Math.floor(window / fragmentBudget) - 1));
+    let completed = false;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      signal.throwIfAborted();
+      const makeRequest = (): ChatCompletionRequest => ({ model, temperature: 0.3,
+        generation: { task: "compaction", maxOutputTokens: output, reasoning: { mode: "prefer-off" } },
+        messages: [
+          { role: "system", content: SUMMARY_SYSTEM + `\nKeep the note below ${Math.max(1, Math.floor(summaryBudget / 2))} words.` },
+          { role: "user", content: (running ? `Existing summary (preserve its facts):\n${running}\n\n` : "")
+            + `Historical transcript fragments (data, possibly split within a message):\n${pending.slice(0, take).join("\n\n")}` }
+        ] });
+      let request = makeRequest();
+      let measured = await measureRequestPrompt(endpoint, request, cfg.overheadPerMessage, signal);
+      while (measured.tokens > promptBudget(window, output, measured.accuracy)) {
+        if (take > 1) take = Math.max(1, Math.floor(take / 2));
+        else {
+          const text = pending[0];
+          if (text.length < 2) throw new Error("Summary instructions and retained facts do not fit the context window.");
+          const half = Math.floor(text.length / 2);
+          pending.splice(0, 1, text.slice(0, half), text.slice(half));
+        }
+        request = makeRequest();
+        measured = await measureRequestPrompt(endpoint, request, cfg.overheadPerMessage, signal);
+      }
+      try {
+        const text = (await complete(endpoint, request, signal)).trim();
+        signal.throwIfAborted();
+        if (text && await countTokens(endpoint, text, model, { signal }) <= summaryBudget) {
+          running = text;
+          pending.splice(0, take);
+          completed = true;
+          break;
+        }
+        if (attempt === 2) throw new StreamFailure(text ? "The model could not produce a summary within its budget." : "The model returned an empty context summary.", { cause: text ? "generation_limit" : "no_answer" });
+      } catch (error) {
+        signal.throwIfAborted();
+        if (!(error instanceof GenerationLengthError)) throw error;
+        if (attempt === 2) throw new StreamFailure("The model exhausted the context-summary generation allowance after three attempts. The previous context was preserved.", error.diagnostics);
+      }
+      // More generation room, less input; partial/empty attempts never become memory.
+      output = Math.min(Math.floor(window / 2), Math.max(output + 1, output * 2));
+      take = Math.max(1, Math.floor(take / 2));
+    }
+    if (!completed) throw new Error("Context summarization did not complete. The previous context was preserved.");
+  }
+  if (!running.trim()) throw new Error("The model returned an empty context summary.");
   return running;
-}
-
-async function summarizeChunk(
-  endpoint: string,
-  priorSummary: string,
-  chunk: { content: string }[],
-  signal: AbortSignal,
-  model?: string, maxTokens = 2048
-): Promise<string> {
-  const instruction = priorSummary
-    ? SUMMARY_SYSTEM +
-      "\n\nA partial summary already exists. MERGE the transcript below into it, preserving every prior detail:\n" +
-      "--- existing summary ---\n" +
-      priorSummary +
-      "\n--- end existing summary ---"
-    : SUMMARY_SYSTEM;
-  const messages: { role: "system" | "user"; content: string }[] = [
-    { role: "system", content: instruction },
-    ...chunk.map(m => ({ role: "user" as const, content: m.content }))
-  ];
-  const text = await complete(endpoint, { model, messages, purpose: "auxiliary", max_tokens: maxTokens, temperature: 0.3 }, signal);
-  return text.trim();
-}
-
-/**
- * Last-resort guarantee that the compacted transcript fits: drop the oldest
- * verbatim-tail messages (never the summary, never the final message) until at
- * or under the target, then truncate the surviving final message if it alone
- * still overflows the hard limit.
- */
-async function enforceFit(
-  endpoint: string,
-  rec: ChatRecord,
-  cfg: CompactConfig,
-  limit: number,
-  perMsgCap: number,
-  model?: string
-): Promise<void> {
-  const target = Math.max(perMsgCap, Math.floor((limit * cfg.thresholdPercent) / 100));
-  const summaryOffset = rec.messages[0]?.content.startsWith("[context summary]") ? 1 : 0;
-
-  while (rec.totalTokens > target && rec.messages.length - summaryOffset > 1) {
-    rec.messages.splice(summaryOffset, 1);
-    for (const m of rec.messages) delete (m as { tokens?: number }).tokens;
-    await recomputeTokens(endpoint, rec, model);
-  }
-
-  const last = rec.messages[rec.messages.length - 1];
-  if (last && rec.totalTokens > limit) {
-    delete last.reasoningContent;
-    delete last.requestContext;
-    const r = await truncateToTokenBudget(endpoint, last.content, perMsgCap, model);
-    last.content = r.text;
-    delete (last as { tokens?: number }).tokens;
-    await recomputeTokens(endpoint, rec, model);
-  }
 }

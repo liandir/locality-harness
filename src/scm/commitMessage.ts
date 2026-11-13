@@ -148,7 +148,7 @@ async function generateCommitMessage(diff: string): Promise<string> {
   const text = await withServerConnection(settings, () => complete(
     settings.endpoint,
     {
-      model: settings.model, purpose: "auxiliary", max_tokens: 512,
+      model: settings.model, generation: { task: "commit", maxOutputTokens: 512, reasoning: { mode: "prefer-off" } },
       temperature: settings.temperature,
       top_k: settings.topK,
       top_p: settings.topP,

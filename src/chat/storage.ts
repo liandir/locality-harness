@@ -238,6 +238,7 @@ export class ChatStorage {
     forked.mode = rec.mode;
     forked.reasoningEffort = normalizeReasoningEffort(rec.reasoningEffort);
     forked.messages = structuredClone(rec.messages.slice(0, end));
+    forked.compactions = rec.compactions?.filter(outcome => end === rec.messages.length || outcome.ts <= (forked.messages.at(-1)?.ts ?? 0)).map(outcome => ({ ...outcome }));
     if (rec.turnSystemPrompt && forked.messages.some(message => message.ts === rec.turnSystemPrompt?.messageTs)) {
       forked.turnSystemPrompt = { ...rec.turnSystemPrompt };
     }
@@ -333,6 +334,11 @@ export class ChatStorage {
       mode: normalizeChatMode(rec.mode),
       reasoningEffort: normalizeReasoningEffort(rec.reasoningEffort),
       messages,
+      compactions: Array.isArray(rec.compactions) ? rec.compactions.filter(outcome => outcome
+        && typeof outcome.compactId === "string" && Number.isFinite(outcome.ts)
+        && ["manual", "auto"].includes(outcome.source) && ["executed", "failed"].includes(outcome.status)
+        && Number.isFinite(outcome.beforeTokens) && Number.isFinite(outcome.beforeMessages) && Number.isFinite(outcome.keepTail)
+        && (outcome.error === undefined || typeof outcome.error === "string")) : undefined,
       turnSystemPrompt: rec.turnSystemPrompt && Number.isFinite(rec.turnSystemPrompt.messageTs)
         && messages.some(message => message.role === "user" && !message.steering && message.ts === rec.turnSystemPrompt?.messageTs)
         && ["native", "legacy"].includes(rec.turnSystemPrompt.protocol) && typeof rec.turnSystemPrompt.content === "string"

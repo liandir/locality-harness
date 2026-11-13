@@ -11,6 +11,7 @@ import type { FileChangeSummary } from "./fileChanges.js";
 /** Model-context size sent with chatLoaded, independently of the visible transcript. */
 export interface ChatContextState {
   contextMessageCount?: number;
+  contextCompactionAvailable?: boolean;
 }
 
 export interface ChatUserMessage {
@@ -122,7 +123,7 @@ export type UiEvent =
   | { kind: "chatClosed" }
   | { kind: "compactStatus"; currentMessages: number; minMessages: number; available: boolean }
   | { kind: "compactStart"; compactId: string; source: "manual" | "auto"; beforeTokens: number; beforeMessages: number; keepTail: number }
-  | { kind: "compactEnd"; compactId: string; source: "manual" | "auto"; status: "executed" | "failed"; beforeTokens: number; afterTokens?: number; beforeMessages: number; afterMessages?: number; keepTail: number; error?: string }
+  | { kind: "compactEnd"; compactId: string; source: "manual" | "auto"; status: "executed" | "failed"; beforeTokens: number; afterTokens?: number; beforeMessages: number; afterMessages?: number; keepTail: number; error?: string; diagnostics?: CompletionDiagnostics }
   | { kind: "chatModeChanged"; mode: ChatMode }
   | { kind: "reasoningEffortChanged"; effort: ReasoningEffort };
 

@@ -18,6 +18,18 @@ afterEach(async () => {
 });
 
 describe("ChatStorage", () => {
+  it("restores compaction failures and excludes future outcomes from historical forks", async () => {
+    const storage = new ChatStorage(ws, chatsRoot);
+    const rec = storage.newRecord("native");
+    rec.messages = [{ role: "user", content: "first", ts: 1 }, { role: "assistant", content: "answer", ts: 2 }, { role: "user", content: "next", ts: 4 }];
+    rec.compactions = [{ compactId: "compact", ts: 3, source: "manual", status: "failed", beforeTokens: 5000, beforeMessages: 2, keepTail: 1,
+      error: "Output limit", diagnostics: { cause: "generation_limit", finishReason: "length" } }];
+    await storage.save(rec);
+    const loaded = (await storage.load(rec.id))!;
+    expect(loaded.compactions).toEqual(rec.compactions);
+    expect((await storage.fork(loaded)).compactions).toEqual(rec.compactions);
+    expect((await storage.fork(loaded, 1)).compactions).toEqual([]);
+  });
   it("retains accepted turn prompts on reload and full forks, excluding them from earlier forks", async () => {
     const storage = new ChatStorage(ws, chatsRoot);
     const rec = storage.newRecord("native");

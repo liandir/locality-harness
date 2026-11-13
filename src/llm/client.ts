@@ -1,13 +1,14 @@
 import { GenerationLengthError, StreamFailure, serverErrorMessage, type CompletionDiagnostics } from "./completion.js";
 export { GenerationLengthError, StreamFailure } from "./completion.js";
 import { connectionHeaders, redactServerError, serverUrl } from "./connection.js";
-import { countServerPrompt, isUnsupportedImage, resolvedConnection, serializeRequest, serverFailure, setImageSupport, VisionUnsupportedError } from "./server.js";
+import { allowReasoningFallback, countServerPrompt, isUnsupportedImage, resolvedConnection, serializeRequest, serverFailure, setImageSupport, VisionUnsupportedError } from "./server.js";
 export { fetchServerMetadata, fetchServerModels, fetchServerContextSize, tokenize, VisionUnsupportedError } from "./server.js";
 export type { ServerMetadata, ServerModel } from "./serverTypes.js";
 import { beginForeground } from "./activity.js";
 import { safeFetch, NetworkPolicyError } from "../network/safeFetch.js";
 import { progressSignature, writeProgressFromJsonToolBody } from "./toolProgress.js";
 import type { OpenAiTool } from "../tools/toolDefinitions.js";
+import type { GenerationPolicy } from "./requestPolicy.js";
 
 export interface LlmToolCall {
   id: string;
@@ -30,11 +31,12 @@ export interface LlmMessage {
 }
 
 export interface ChatCompletionRequest {
+  generation?: GenerationPolicy;
   /** OpenAI-compatible model id; required for llama.cpp router mode. */
   model?: string;
   /** Internal scheduling flag, never sent to the server. */
   background?: boolean;
-  /** Auxiliary tasks disable optional reasoning on servers without a parser. */
+  /** Legacy shorthand; new consumers select an explicit generation policy. */
   purpose?: "auxiliary";
   messages: LlmMessage[];
   temperature?: number;
@@ -52,7 +54,7 @@ export interface ChatCompletionRequest {
   parallel_tool_calls?: boolean;
   /** llama.cpp extension: report prompt processing before generation starts. */
   return_progress?: boolean;
-  /** Called once llama.cpp has accepted this generation request. Not sent over the wire. */
+  /** Called once the server accepts this generation request. Not sent over the wire. */
   onResponseAccepted?: () => void;
 }
 
@@ -123,7 +125,13 @@ export async function* streamChat(
 ): AsyncGenerator<LlmStreamChunk, void, void> {
   const end = req.background ? () => undefined : beginForeground();
   try {
-    yield* streamChatRequest(endpoint, req, signal);
+    try { yield* streamChatRequest(endpoint, req, signal); }
+    catch (error) {
+      signal.throwIfAborted();
+      const connection = await resolvedConnection(endpoint, req.model, signal);
+      if (!allowReasoningFallback(req, connection, error)) throw error;
+      yield* streamChatRequest(endpoint, req, signal);
+    }
   } catch (error) {
     if (signal.aborted || error instanceof StreamFailure || error instanceof NetworkPolicyError || error instanceof NativeToolsUnsupportedError
       || error instanceof MalformedNativeToolCallError || error instanceof VisionUnsupportedError) throw error;

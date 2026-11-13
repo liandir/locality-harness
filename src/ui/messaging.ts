@@ -16,7 +16,7 @@ export type {
   ChatTurnPreparation, ChatTurnWorkStarted, ChatMemoryCreations,
   ChatContextActivity, ChatTurnEnd, ChatTurnAbort, ChatResponseDiscarded
 } from "../chat/events.js";
-export type { ChatToolResultDisplay, ChatToolProcess } from "../chat/types.js";
+export type { ChatToolResultDisplay, ChatToolProcess, CompactHistory } from "../chat/types.js";
 
 export interface UiQueuedMessage {
   id: string;

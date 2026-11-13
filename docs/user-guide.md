@@ -364,6 +364,15 @@ message asks for confirmation before removing later messages, tool results,
 and thinking from both the chat and model context. Canceling keeps your edit
 draft. Workspace file changes remain.
 
+Compaction uses the same policy with llama.cpp and vLLM. It requests reasoning
+off when supported and adjusts its generation allowance when a summary reaches
+the output limit. Empty or incomplete summaries never replace the active
+context. Failed attempts retain the previous context and their explanation is
+saved with the chat. Compaction is available when there is older work to
+summarize, including short conversations with large tool results. The current
+request and its steering remain intact; if those alone exceed the available
+window, reduce the request or increase the server context size.
+
 Editing or deleting a message preserves any compacted context preceding it.
 If the message was itself summarized, context is rebuilt from the retained
 transcript so the discarded messages cannot survive in a summary. Context

@@ -9,6 +9,33 @@ inherit the current turn. Backend adapters own discovery, tokenization, request
 translation and errors. The streaming parser and terminal-evidence handling stay
 shared. All HTTP calls continue through `safeFetch` in every edition.
 
+Generation consumers use `GenerationPolicy`: task, output allowance, reasoning
+intent, and optional progress reporting. Server adapters translate that policy
+into wire parameters. Compaction, titles, and commit messages prefer reasoning
+off on both backends; a specific HTTP rejection of that preference allows one
+fallback to the model default, cached per connection/model. Explicit user
+reasoning choices in chat do not take that fallback. Older wire-shaped client
+arguments remain supported for existing integrations.
+
+`measureRequestPrompt` counts the full request, including tools. It reports
+exact rendered counts where supported and estimated template counts otherwise;
+the shared budget reserves generation plus 1% or 5% headroom respectively.
+Estimated template counting requires a functioning tokenizer: character-count
+fallbacks remain display estimates, not permission to send an oversized prompt.
+Main chat generation can use the remaining measured window; it has no fixed
+auxiliary output ceiling.
+
+Compaction works on a detached candidate. It pins the current request and its
+steering, groups completed tool exchanges, and splits historical data without
+dropping the middle. Summary generation starts with at most 2,048 output tokens,
+then allows up to three attempts per chunk with smaller input and more generation
+room. Only complete, nonempty summaries within the retained-context budget can
+be committed. The final rendered chat request must fit too. Cancellation and
+revision checks guard publication, and failed saves leave the active context
+unchanged. Outcomes and diagnostics live in `ChatRecord.compactions` and restore
+through the shared activity cards. Fixture coverage is separate from the optional
+live compaction tests in `test/serverLive.test.ts`.
+
 Backend detection is automatic; the old `serverType` setting is ignored and is
 no longer exposed. vLLM metadata comes from `/v1/models` and `/tokenize`;
 llama.cpp uses `/props`. Connection checks send an in-memory 28×28 RGB PNG

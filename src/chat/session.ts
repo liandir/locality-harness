@@ -1,7 +1,7 @@
 import { capturedConnectionSettings, connectionIdentity, withServerConnection } from "../llm/connection.js";
-import { countServerPrompt, outputTokenReserve } from "../llm/server.js";
+import { outputTokenReserve, promptBudget, promptSafetyMargin, type PromptMeasurement } from "../llm/requestPolicy.js";
+import { serverGuidance } from "../llm/serverGuidance.js";
 import type { ChatCompletionRequest } from "../llm/client.js";
-import type { ServerBackend } from "../llm/serverTypes.js";
 import { pendingPlanTimestamp } from "./planning.js";
 import { StreamFailure, type CompletionDiagnostics } from "../llm/completion.js";
 import { unresolvedInterruption } from "./interruption.js";
@@ -64,17 +64,17 @@ import {
 import { assertInsideWorkspace } from "../tools/workspaceGuard.js";
 import { onSettingsChange, readSettings, writeSetting, type AutoApprovalSetting, type HarnessSettings } from "../config/settings.js";
 import { ChatStorage, VISION_TOKEN_RESERVE, modelMessages, appendChatMessage } from "./storage.js";
-import type { ChatAttachment, ChatMessage, ChatRecord } from "./types.js";
+import type { ChatAttachment, ChatMessage, ChatRecord, CompactHistory } from "./types.js";
 import { attachmentFileType, isImageAttachment, synthesizeAttachmentPrompt } from "./attachments.js";
 import { MAX_ATTACHMENTS_PER_MESSAGE } from "./attachmentLimits.js";
 import {
   REASONING_NONE,
-  reasoningRequestOverrides,
+  generationReasoning,
   type ReasoningEffort
 } from "./reasoningEffort.js";
 import { normalizeTodos, renderTodosMarkdown, todoCounts } from "./todos.js";
-import { compact, compactAvailableForMessageCount, KEEP_TAIL, MIN_COMPACT_MESSAGES, type CompactConfig } from "./compactor.js";
-import { countTokens, promptTokens, recomputeTokens, truncateToTokenBudget } from "./contextTracker.js";
+import { compact, compactAvailableForMessages, KEEP_TAIL, MIN_COMPACT_MESSAGES, type CompactConfig } from "./compactor.js";
+import { countTokens, measureRequestPrompt, recomputeTokens, truncateToTokenBudget } from "./contextTracker.js";
 import { buildLineDiff, lineDiffStats, renderLineDiff } from "./diffPreview.js";
 import { fileUndoPlan, turnFileEdits, undoFiles, type FileUndoSnapshot } from "./fileUndo.js";
 import { rememberFileWrite, summarizeFileChanges, type FileChangeSummary, type TrackedFileWrite } from "./fileChanges.js";
@@ -200,7 +200,8 @@ export class ChatSession {
   // effective limit is min(configured, server). Refreshed before each request.
   private serverContextSize?: number;
   private supportsVision = false;
-  private serverBackend: ServerBackend = "llama.cpp";
+  private serverHelp = serverGuidance();
+  private promptAccuracy: PromptMeasurement["accuracy"] = "estimated";
   private serverMetadataError = "";
   private untrackedUserContextTokens = 0;
   private systemPromptTokenCache?: { text: string; identity: string; tokens: number };
@@ -294,7 +295,7 @@ export class ChatSession {
 
   getRecord(): ChatRecord { return this.record; }
 
-  isTurnActive(): boolean { return this.activeTurn !== undefined; }
+  isTurnActive(): boolean { return this.activeTurn !== undefined || this.compactTasks.size > 0; }
 
   async undoResponseFiles(userTs: number, check: (absolute: string) => void | Promise<void>, filePath?: string): Promise<void> {
     if (this.isTurnActive()) throw new Error("Wait for the response to finish before undoing its edits.");
@@ -336,21 +337,24 @@ export class ChatSession {
 
   /**
    * Budget handed to the compactor. Its `limit` is the room left for the
-   * message transcript AFTER reserving the system prompt (tool catalog) and a
-   * small margin for generation priming — the system prompt is not a stored
+   * message transcript AFTER reserving the system prompt (tool catalog),
+   * generation allowance, and measurement headroom — the system prompt is not a stored
    * message, so compaction must leave space for it or the assembled prompt
    * overflows even though the messages fit their own budget.
    */
-  private async compactConfig(s: HarnessSettings): Promise<CompactConfig> {
+  private async compactConfig(s: HarnessSettings, signal?: AbortSignal): Promise<CompactConfig> {
     const limit = this.contextLimit();
-    const sysTokens = await this.promptOverheadTokens(s);
-    // The current context is restored even if its user message leaves the tail.
-    const userContext = this.currentUserContext();
-    const contextReserve = userContext && !this.untrackedUserContextTokens
-      ? await countTokens(s.endpoint, withUserContext("", userContext), s.model) : 0;
-    const messageBudget = Math.max(1024, limit - sysTokens - contextReserve - 256);
+    const sysTokens = await this.promptOverheadTokens(s, true, signal);
+    // Stored current context stays pinned; untracked context is already in sysTokens.
+    const messageBudget = promptBudget(limit, outputTokenReserve(limit), this.promptAccuracy) - sysTokens;
     return {
       limit: messageBudget,
+      summaryContextLimit: limit,
+      validate: async messages => {
+        const request = await this.buildPromptMessages(this.systemPrompt(), this.currentUserContext(), messages);
+        const tokens = await this.countRequestPrompt(s, request, signal);
+        return tokens <= promptBudget(limit, outputTokenReserve(limit), this.promptAccuracy);
+      },
       thresholdPercent: s.autoCompactThresholdPercent,
       tailBudgetPercent: s.tailBudgetPercent,
       maxMessageTokensPercent: s.maxMessageTokensPercent,
@@ -363,7 +367,7 @@ export class ChatSession {
    * in model history (pending acceptance or removed by compaction). Keep
    * their caches separate so changing turn context never retokenizes the base.
    */
-  private async promptOverheadTokens(s: HarnessSettings, refreshAgentsMd = true): Promise<number> {
+  private async promptOverheadTokens(s: HarnessSettings, refreshAgentsMd = true, signal?: AbortSignal): Promise<number> {
     const nativeTools = this.toolProtocol === "native";
     if (refreshAgentsMd) await this.currentAgentsMd();
     const text = this.systemPrompt();
@@ -371,7 +375,7 @@ export class ChatSession {
     const stored = modelMessages(this.record).find(message => message.role === "user" && message.ts === user?.ts);
     const context = this.currentUserContext();
     this.untrackedUserContextTokens = context && !stored?.requestContext
-      ? await countTokens(s.endpoint, withUserContext("", context), s.model) : 0;
+      ? await countTokens(s.endpoint, withUserContext("", context), s.model, { signal }) : 0;
     const catalog = nativeTools
       ? `\n<tools>${JSON.stringify(asOpenAiTools(toolsForPrompt("native", readSettings().memoryEnabled, this.supportsVision, readSettings())))}</tools>`
       : "";
@@ -379,7 +383,7 @@ export class ChatSession {
     const identity = connectionIdentity(s.endpoint, s.model);
     if (this.systemPromptTokenCache?.text !== countedText || this.systemPromptTokenCache.identity !== identity) {
       let estimated = false;
-      const tokens = await tokenize(s.endpoint, `<|system|>${countedText}`, s.model, { onEstimate: () => { estimated = true; } });
+      const tokens = await tokenize(s.endpoint, `<|system|>${countedText}`, s.model, { signal, onEstimate: () => { estimated = true; } });
       this.systemPromptTokenCache = estimated ? undefined : { text: countedText, identity, tokens };
       return tokens + this.untrackedUserContextTokens;
     }
@@ -413,8 +417,7 @@ export class ChatSession {
   }
 
   /** Restore the current mode even when compaction removed the original request. */
-  private promptContextMessages(userContext = this.currentUserContext()): ChatMessage[] {
-    const context = modelMessages(this.record);
+  private promptContextMessages(userContext = this.currentUserContext(), context = modelMessages(this.record)): ChatMessage[] {
     const user = this.turnUserMessage();
     if (!user || !userContext) return context;
     if (context.some(message => message.role === "user" && message.ts === user.ts)) {
@@ -461,11 +464,11 @@ export class ChatSession {
     return undefined;
   }
 
-  private async refreshServerContextSize(s: HarnessSettings): Promise<boolean> {
+  private async refreshServerContextSize(s: HarnessSettings, signal?: AbortSignal): Promise<boolean> {
     try {
-      const metadata = await fetchServerMetadata(s.endpoint, { model: s.model, force: this.serverContextSize === undefined });
+      const metadata = await fetchServerMetadata(s.endpoint, { model: s.model, force: this.serverContextSize === undefined, signal });
       this.serverContextSize = metadata.contextSize;
-      this.serverBackend = metadata.backend ?? "llama.cpp";
+      this.serverHelp = serverGuidance(metadata.backend);
       this.serverMetadataError = "";
       this.supportsVision = metadata.supportsVision;
       this.emit({ kind: "visionCapability", supported: this.supportsVision, endpoint: s.endpoint, model: s.model, serverType: s.serverType });
@@ -550,6 +553,12 @@ export class ChatSession {
 
   private async runCompact(source: "manual" | "auto", options: { reload: boolean }): Promise<boolean> {
     if (this.disposed) return false;
+    const existing = this.compactTasks.values().next().value;
+    if (existing) return existing;
+    if (source === "manual" && this.activeTurn) {
+      this.emit({ kind: "notice", text: "Wait for the response to finish, or interrupt it before compacting." });
+      return false;
+    }
     const end = beginForeground();
     const task = withServerConnection(readSettings(), () => this.runCompactForeground(source, options));
     this.compactTasks.add(task);
@@ -557,65 +566,61 @@ export class ChatSession {
   }
 
   private async runCompactForeground(source: "manual" | "auto", options: { reload: boolean }): Promise<boolean> {
-    try { await this.prepareTextAttachments(); } catch (error) {
-      this.emit({ kind: "notice", text: `Could not read an attached text file: ${(error as Error).message}` });
-      return false;
-    }
-    if (!compactAvailableForMessageCount(modelMessages(this.record).length)) {
+    if (!compactAvailableForMessages(modelMessages(this.record))) {
       this.emitCompactStatus();
       return false;
     }
-    const s = capturedConnectionSettings(readSettings());
-    if (!(await this.refreshServerContextSize(s))) {
-      this.emit({ kind: "notice", text: this.serverMetadataError || "Could not read the server context length. Verify the endpoint in Settings." });
-      return false;
-    }
-    await recomputeTokens(s.endpoint, this.record, s.model);
-    const before = this.record.totalTokens;
-    const beforeMessages = modelMessages(this.record).length;
-    const compactId = `compact_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     if (this.disposed || (source === "auto" && this.abort?.signal.aborted)) return false;
     const ac = new AbortController();
     this.compactAborts.add(ac);
+    const s = capturedConnectionSettings(readSettings());
+    const compactId = `compact_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const base = { compactId, ts: Date.now(), source, beforeTokens: this.record.totalTokens,
+      beforeMessages: modelMessages(this.record).length, keepTail: KEEP_TAIL };
     this.completeContextIngestion();
-    this.emit({ kind: "compactStart", compactId, source, beforeTokens: before, beforeMessages, keepTail: KEEP_TAIL });
+    this.emit({ kind: "compactStart", ...base });
+    let saved: CompactHistory | undefined;
     try {
-      const cfg = await this.compactConfig(s);
-      const { keptTail } = await compact(s.endpoint, this.record, ac.signal, cfg, s.model);
-      // The rewritten prompt must be cached again on the next model request.
-      // Keep this pending across cancellation or failure until prefill completes.
+      await this.prepareTextAttachments();
+      ac.signal.throwIfAborted();
+      if (!(await this.refreshServerContextSize(s, ac.signal))) throw new Error(this.serverMetadataError || "Could not read the server context length.");
+      await recomputeTokens(s.endpoint, this.record, s.model, ac.signal);
+      base.beforeTokens = this.record.totalTokens;
+      const cfg = await this.compactConfig(s, ac.signal);
+      cfg.commit = async (candidate, assertCurrent, publish) => {
+        const completion: CompactHistory = { ...base, status: "executed", afterTokens: candidate.totalTokens,
+          afterMessages: modelMessages(candidate).length, keepTail: modelMessages(candidate).length - 1 };
+        candidate.compactions = [...(this.record.compactions ?? []), completion];
+        const save = this.saveChain.then(async () => {
+          assertCurrent();
+          await this.storage.save(candidate);
+          // Publish while still holding the save queue. Later ordinary saves
+          // must see the new context, not overwrite it with the old snapshot.
+          try { publish(); }
+          catch (error) { await this.storage.save(this.record); throw error; }
+        });
+        this.saveChain = save.catch(() => undefined);
+        await save;
+        saved = completion;
+      };
+      await compact(s.endpoint, this.record, ac.signal, cfg, s.model);
+      if (!saved) throw new Error("There is no reducible history beyond the current request.");
       this.loadedChatContextPending = true;
-      await this.saveRecord();
-      await this.promptOverheadTokens(s, false);
       if (options.reload) this.emit({ kind: "chatLoaded", record: this.record });
       this.emit({ kind: "tokens", total: this.record.totalTokens + this.cachedPromptOverheadTokens(), limit: this.contextLimit() });
       this.emitCompactStatus();
-      const completion: Extract<UiEvent, { kind: "compactEnd" }> = {
-        kind: "compactEnd",
-        compactId,
-        source,
-        status: "executed",
-        beforeTokens: before,
-        afterTokens: this.record.totalTokens,
-        beforeMessages,
-        afterMessages: modelMessages(this.record).length,
-        keepTail: keptTail
-      };
+      const completion = { kind: "compactEnd" as const, ...saved };
       this.emit(completion);
       this.contextActivities.clear();
-      this.trackContextActivity(compactId, completion, this.isTurnActive() && !this.abort?.signal.aborted);
+      this.trackContextActivity(compactId, completion, this.activeTurn !== undefined && !this.abort?.signal.aborted);
       return true;
     } catch (err) {
-      this.emit({
-        kind: "compactEnd",
-        compactId,
-        source,
-        status: "failed",
-        beforeTokens: before,
-        beforeMessages,
-        keepTail: KEEP_TAIL,
-        error: (err as Error).message
-      });
+      const failure: CompactHistory = { ...base, status: "failed", error: ac.signal.aborted ? "Compaction stopped by user." : (err as Error).message,
+        diagnostics: err instanceof StreamFailure ? err.diagnostics : undefined };
+      this.record.compactions = [...(this.record.compactions ?? []), failure];
+      try { await this.saveRecord(); }
+      catch { failure.error += " The failure could not be saved; the previous context remains active."; }
+      this.emit({ kind: "compactEnd", ...failure });
       return false;
     } finally { this.compactAborts.delete(ac); }
   }
@@ -1208,7 +1213,7 @@ export class ChatSession {
 
   private async prepareContextForModelRequest(
     s: HarnessSettings,
-    options: { reload: boolean }
+    _options: { reload: boolean }
   ): Promise<boolean> {
     try { await this.prepareTextAttachments(); } catch (error) {
       this.emit({ kind: "abort", reason: `Could not read an attached text file: ${(error as Error).message}` });
@@ -1232,20 +1237,10 @@ export class ChatSession {
     // Fit optional notes against the same fresh project instructions as the request.
     await this.currentAgentsMd();
     await this.fitQueryMemories(s);
-    let sysTokens = await this.promptOverheadTokens(s, false);
+    const sysTokens = await this.promptOverheadTokens(s, false);
     const limit = this.contextLimit();
     this.emit({ kind: "tokens", total: this.record.totalTokens + sysTokens, limit });
     this.emitCompactStatus();
-
-    if (this.serverBackend !== "vllm" && s.autoCompact && this.record.totalTokens + sysTokens >= autoCompactTriggerTokens(limit, s.autoCompactThresholdPercent)) {
-      await this.runCompact("auto", options);
-      sysTokens = this.cachedPromptOverheadTokens();
-    }
-
-    if (this.serverBackend !== "vllm" && this.record.totalTokens + sysTokens >= limit) {
-      this.emit({ kind: "abort", reason: contextWindowOverflowMessage(this.record.totalTokens + sysTokens, limit) });
-      return false;
-    }
 
     return true;
   }
@@ -1268,12 +1263,10 @@ export class ChatSession {
     const userContext = this.currentUserContext();
     let messages = await this.buildPromptMessages(systemPrompt, userContext);
     if (options.repairNote) messages = withPromptRepair(messages, options.repairNote);
-    // Count the tokens of the prompt that is ACTUALLY sent (system prompt +
-    // re-rendered tool calls + wrapped results), not the sum of stored
-    // messages, using llama.cpp's tokenizer. This is the number the server
-    // sees, so the guard no longer passes while the server overflows.
+    // Budget the assembled request, including reconstructed tool calls and
+    // wrapped results, using the adapter's reported measurement accuracy.
     let promptTok = await this.countRequestPrompt(s, messages);
-    const promptLimit = limit - (this.serverBackend === "vllm" ? outputTokenReserve(limit) : 0);
+    const promptLimit = promptBudget(limit, outputTokenReserve(limit), this.promptAccuracy);
     if (s.autoCompact && promptTok >= Math.min(promptLimit, autoCompactTriggerTokens(limit, s.autoCompactThresholdPercent))) {
       const compacted = await this.runCompact("auto", options);
       if (compacted) {
@@ -1295,29 +1288,16 @@ export class ChatSession {
   private generationRequest(s: HarnessSettings, messages: PromptMessage[]): ChatCompletionRequest {
     return {
       model: s.model, messages, temperature: s.temperature, top_k: s.topK, top_p: s.topP,
-      thinking_budget_tokens: this.turnReasoningEffort() === REASONING_NONE ? 0 : s.reasoningBudget ?? -1,
-      ...reasoningRequestOverrides(this.turnReasoningEffort(), s.reasoningEfforts),
+      generation: { task: "chat", reasoning: generationReasoning(this.turnReasoningEffort(), s.reasoningEfforts, s.reasoningBudget), reportProgress: true },
       tools: this.toolProtocol === "native" ? asOpenAiTools(toolsForPrompt("native", readSettings().memoryEnabled, this.supportsVision, readSettings())) : undefined,
-      tool_choice: "auto", parallel_tool_calls: false, return_progress: true
+      tool_choice: "auto", parallel_tool_calls: false
     };
   }
 
-  private async countRequestPrompt(s: HarnessSettings, messages: PromptMessage[]): Promise<number> {
-    if (this.serverBackend === "vllm") {
-      return (await countServerPrompt(s.endpoint, this.generationRequest(s, messages), this.abort?.signal, false))!;
-    }
-    return await promptTokens(s.endpoint, this.messagesForTokenCount(messages), s.templateOverheadTokensPerMessage, s.model);
-  }
-
-  private messagesForTokenCount(messages: PromptMessage[]): PromptMessage[] {
-    if (this.toolProtocol !== "native") return messages;
-    return [
-      ...messages,
-      {
-        role: "system",
-        content: `<tools>${JSON.stringify(asOpenAiTools(toolsForPrompt("native", readSettings().memoryEnabled, this.supportsVision, readSettings())))}</tools>`
-      }
-    ];
+  private async countRequestPrompt(s: HarnessSettings, messages: PromptMessage[], signal?: AbortSignal): Promise<number> {
+    const measurement = await measureRequestPrompt(s.endpoint, this.generationRequest(s, messages), s.templateOverheadTokensPerMessage, signal ?? this.abort?.signal);
+    this.promptAccuracy = measurement.accuracy;
+    return measurement.tokens;
   }
 
   /**
@@ -1631,18 +1611,18 @@ export class ChatSession {
       };
 
       const generationRequest = this.generationRequest(s, messages);
+      generationRequest.generation!.maxOutputTokens = Math.max(1,
+        this.contextLimit() - promptTokenCount - promptSafetyMargin(this.contextLimit(), this.promptAccuracy));
       // Compare only the reusable prefix, not appended user context or tool
       // results. A changed system prompt/catalog requires loading context again
       // even on transports (vLLM) without live prefill progress. This is a local
       // invalidation hint, not a claim about the server's cache residency.
       const promptPrefix = createHash("sha256").update(JSON.stringify({
-        connection: connectionIdentity(s.endpoint, s.model), backend: this.serverBackend,
+        connection: connectionIdentity(s.endpoint, s.model),
         protocol: this.toolProtocol,
         system: messages.filter(message => message.role === "system"),
         tools: generationRequest.tools,
-        reasoningEffort: generationRequest.reasoning_effort,
-        template: generationRequest.chat_template_kwargs,
-        thinkingDisabled: generationRequest.thinking_budget_tokens === 0
+        reasoning: generationRequest.generation?.reasoning
       })).digest("hex");
       this.loadedChatContextPending ||= this.processedPromptPrefix !== undefined && this.processedPromptPrefix !== promptPrefix;
       const loadingChatContext = this.loadedChatContextPending;
@@ -1747,7 +1727,7 @@ export class ChatSession {
               this.emit({
                 kind: "notice",
                 text: "The model emitted reasoning even though Activate Reasoning is off. " +
-                  (this.serverBackend === "llama.cpp" ? "If llama-server was started with a positive --reasoning-budget, that fixed server value overrides per-request budgets; " : "Server reasoning configuration may override this request; ") +
+                  this.serverHelp.reasoning +
                   "otherwise this model's chat template may not support disabling reasoning."
               });
             }
@@ -1880,7 +1860,7 @@ export class ChatSession {
           completedEventCount = 0;
           serverUsageTotal = undefined;
           this.emitLiveTokenEstimate("");
-          const canCompact = compactAvailableForMessageCount(modelMessages(this.record).length);
+          const canCompact = compactAvailableForMessages(modelMessages(this.record));
           this.emit({
             kind: "notice",
             text: canCompact
@@ -1899,11 +1879,11 @@ export class ChatSession {
           }
         }
         if (e instanceof VisionUnsupportedError) {
-          const muse = this.serverBackend === "llama.cpp" && compatibilityFamily(this.record.toolCallingMode) === "muse-glimmer";
+          const muse = compatibilityFamily(this.record.toolCallingMode) === "muse-glimmer";
           this.emit({
             kind: "abort",
             reason: muse
-              ? "Muse Glimmer image input requires llama.cpp b10353 or newer, --jinja, and --mmproj mmproj-Muse-Glimmer-30B-Q4_K_M.gguf. Verify that the projector matches the loaded model."
+              ? this.serverHelp.museVision
               : "The server rejected image input. Choose a vision-capable model and verify its server configuration."
           });
           aborted = true;
@@ -1918,7 +1898,7 @@ export class ChatSession {
             this.toolProtocol = "legacy";
             this.emit({
               kind: "notice",
-              text: `This server rejected native tool calling. Using the ${compatibilityFamilyLabel(fallbackFamily)} legacy adapter for this chat; ${this.serverBackend === "vllm" ? "configure --enable-auto-tool-choice and --tool-call-parser" : "start llama-server with --jinja and a tool-aware template"} to restore structured calls.`
+              text: `This server rejected native tool calling. Using the ${compatibilityFamilyLabel(fallbackFamily)} legacy adapter for this chat; ${this.serverHelp.tools} to restore structured calls.`
             });
             continue;
           }
@@ -1926,8 +1906,8 @@ export class ChatSession {
           this.emit({
             kind: "abort",
             reason: muse
-              ? (this.serverBackend === "llama.cpp" ? "Muse Glimmer requires native server tool support. Use llama.cpp build b10353 or newer, start llama-server with --jinja, and do not configure <|eom|> as a stop token." : "Muse Glimmer requires native server tool support. Configure the vLLM tool parser and preserve end-of-message tokens.")
-              : `The server rejected structured tool calling required by Native server only. ${this.serverBackend === "vllm" ? "Configure --enable-auto-tool-choice and --tool-call-parser" : "Start llama-server with --jinja and a tool-aware chat template"}, or select a compatibility profile.`
+              ? this.serverHelp.museTools
+              : `The server rejected structured tool calling required by Native server only. ${this.serverHelp.tools}, or select a compatibility profile.`
           });
           aborted = true;
           break;
@@ -2158,7 +2138,7 @@ export class ChatSession {
       kind: "compactStatus",
       currentMessages,
       minMessages: MIN_COMPACT_MESSAGES,
-      available: compactAvailableForMessageCount(currentMessages)
+      available: compactAvailableForMessages(modelMessages(this.record))
     });
   }
 
@@ -2819,12 +2799,12 @@ export class ChatSession {
     }
   }
 
-  private async buildPromptMessages(sys = this.systemPrompt(), userContext = this.currentUserContext()): Promise<PromptMessage[]> {
-    if (this.toolProtocol === "native") return this.buildNativePromptMessages(sys, userContext);
+  private async buildPromptMessages(sys = this.systemPrompt(), userContext = this.currentUserContext(), context = modelMessages(this.record)): Promise<PromptMessage[]> {
+    if (this.toolProtocol === "native") return this.buildNativePromptMessages(sys, userContext, context);
     const msgs: { role: "system" | "user" | "assistant" | "tool"; content: string }[] = [
       { role: "system", content: sys }
     ];
-    for (const { message: m } of chronologicalMessages(this.promptContextMessages(userContext))) {
+    for (const { message: m } of chronologicalMessages(this.promptContextMessages(userContext, context))) {
       if (m.role === "tool") {
         const name = m.toolCall?.name ?? "tool";
         const call = renderToolCallForPrompt(this.compatibilityFamily(), name, m.toolCall?.argsJson ?? "{}");
@@ -2846,13 +2826,13 @@ export class ChatSession {
     return coalesceSameRole(msgs);
   }
 
-  private async buildNativePromptMessages(systemPrompt: string, userContext?: string): Promise<PromptMessage[]> {
+  private async buildNativePromptMessages(systemPrompt: string, userContext?: string, storedContext = modelMessages(this.record)): Promise<PromptMessage[]> {
     // Compaction stores its summary as a leading system message. Native chat
     // templates commonly permit exactly one system message, at index zero, so
     // fold any leading stored system context into the harness prompt instead
     // of replaying it as a second system message.
     const storedSystemContext: string[] = [];
-    const context = this.promptContextMessages(userContext);
+    const context = this.promptContextMessages(userContext, storedContext);
     let transcriptStart = 0;
     while (context[transcriptStart]?.role === "system") {
       storedSystemContext.push(context[transcriptStart].content);
@@ -3001,14 +2981,6 @@ function newToolCallId(): string {
 
 function autoCompactTriggerTokens(contextSize: number, thresholdPercent: number): number {
   return Math.max(1, Math.floor(contextSize * (thresholdPercent / 100)));
-}
-
-function contextWindowOverflowMessage(tokens: number, limit: number): string {
-  return [
-    `Context window guard: context is ${tokens} / ${limit} tokens.`,
-    `The request was not sent to the model because it would exceed the context window.`,
-    `Compact context, reduce recent tool output, or increase the server context (--ctx-size for llama.cpp; --max-model-len for vLLM) before continuing.`
-  ].join("\n");
 }
 
 function looksLikeLeakedNativeProtocol(text: string): boolean {

@@ -160,6 +160,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       payload = {
         ...msg,
         contextMessageCount: contextMessages?.length ?? transcript.messages.length,
+        contextCompactionAvailable: compactAvailableForMessages(contextMessages ?? transcript.messages),
         record: {
           ...transcript,
           messages: msg.record.messages.map(message => {
@@ -1279,3 +1280,4 @@ function isInside(root: string, candidate: string): boolean {
 function sameFsPath(a: string, b: string): boolean {
   return path.resolve(a) === path.resolve(b);
 }
+import { compactAvailableForMessages } from "../../chat/compactor.js";

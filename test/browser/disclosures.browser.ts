@@ -3,7 +3,7 @@ import type { ChatRecord } from "../../src/chat/types.js";
 import type { MemoryCreation } from "../../src/chat/memory.js";
 import { hostMessage, webview, type Theme } from "./harness.js";
 
-type Row = "memory-created" | "memory-failed" | "memory-generating" | "tool-executed" | "tool-failed" | "tool-rejected" | "future-tool" | "plan-submitted" | "plan-failed";
+type Row = "memory-created" | "memory-failed" | "memory-generating" | "tool-executed" | "tool-failed" | "tool-rejected" | "future-tool" | "plan-submitted" | "plan-failed" | "compact-executed" | "compact-failed";
 
 async function chatRow(page: Page, theme: Theme, row: Row): Promise<Locator> {
   await webview(page, theme);
@@ -18,6 +18,9 @@ async function chatRow(page: Page, theme: Theme, row: Row): Promise<Locator> {
     const status = row.slice("memory-".length) as MemoryCreation["status"];
     record.memoryCreations = [{ messageTs: 3, operation: "update", status,
       text: "Parser decisions.", generatedAt: 4, error: status === "failed" ? "Memory generation failed." : undefined }];
+  } else if (row.startsWith("compact-")) {
+    record.compactions = [{ compactId: "restored-compact", ts: 3, source: "manual", status: row === "compact-failed" ? "failed" : "executed",
+      beforeTokens: 7000, afterTokens: 2000, beforeMessages: 8, afterMessages: 3, keepTail: 2, error: row === "compact-failed" ? "Summary exhausted its generation budget." : undefined }];
   } else {
     const status = row.endsWith("-failed") ? "failed" : row === "tool-rejected" ? "rejected" : "executed";
     record.messages.push({ role: "tool", content: status === "executed" ? "Parser contents" : "Could not read parser", ts: 2,
@@ -58,7 +61,7 @@ async function foreground(head: Locator): Promise<string[]> {
 
 for (const theme of ["light", "dark"] as const) {
   test.describe(theme, () => {
-    for (const row of ["memory-created", "memory-failed", "tool-executed", "tool-failed", "tool-rejected", "future-tool", "plan-submitted", "plan-failed"] as const) {
+    for (const row of ["memory-created", "memory-failed", "tool-executed", "tool-failed", "tool-rejected", "future-tool", "plan-submitted", "plan-failed", "compact-executed", "compact-failed"] as const) {
       test(`${row}: pointer focus does not latch emphasis; keyboard focus remains visible`, async ({ page }) => {
         const head = await chatRow(page, theme, row);
         const icon = head.locator(":scope > .disclosure-icon");
@@ -101,6 +104,26 @@ for (const theme of ["light", "dark"] as const) {
       await expect(head).toBeFocused();
       await expect(page.locator("details[data-memory-creation]")).toHaveAttribute("open", "");
       await expect(page.getByRole("button", { name: "Retry", exact: true })).toHaveCount(0);
+    });
+
+    test("active compaction remains pending until its terminal outcome", async ({ page }) => {
+      await webview(page, theme);
+      const activity = { compactId: "active-compact", source: "manual" as const, beforeTokens: 7000, beforeMessages: 8, keepTail: 2 };
+      await hostMessage(page, { kind: "compactStart", ...activity });
+      await expect(page.locator("#compact")).toHaveAttribute("aria-busy", "true");
+      await expect(page.locator("#compact")).toHaveAttribute("aria-disabled", "true");
+      await hostMessage(page, { kind: "compactEnd", ...activity, status: "failed", error: "The model returned an empty context summary." });
+      await expect(page.locator("#compact")).toHaveAttribute("aria-busy", "false");
+      const head = page.locator(".tool-card > .tool-head").first();
+      for (let depth = 0; depth < 3 && !await head.count(); depth++) await page.locator('.work-head[aria-expanded="false"]').first().click();
+      await head.click();
+      await expect(page.getByText("The model returned an empty context summary.", { exact: false })).toBeVisible();
+      await page.mouse.move(990, 5);
+      await keyboardFocus(page, head);
+      await page.keyboard.press("Space");
+      await expect(head).toBeFocused();
+      await page.keyboard.press("Enter");
+      await expect(page.getByText("The model returned an empty context summary.", { exact: false })).toBeVisible();
     });
 
     test("active disclosure remains readable with reduced motion", async ({ page }) => {

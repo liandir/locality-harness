@@ -97,6 +97,8 @@ export interface ChatMessage {
 }
 
 export interface ChatRecord {
+  /** Host-owned compaction outcomes, restored with their diagnostics on reload. */
+  compactions?: CompactHistory[];
   id: string;
   workspaceRoot: string;
   createdAt: number;
@@ -132,4 +134,18 @@ export interface ChatRecord {
   /** Model whose tokenizer produced the cached per-message token counts. */
   tokenizerModel?: string;
   tokenizerIdentity?: string;
+}
+
+export interface CompactHistory {
+  compactId: string;
+  ts: number;
+  source: "manual" | "auto";
+  status: "executed" | "failed";
+  beforeTokens: number;
+  afterTokens?: number;
+  beforeMessages: number;
+  afterMessages?: number;
+  keepTail: number;
+  error?: string;
+  diagnostics?: CompletionDiagnostics;
 }

@@ -212,6 +212,7 @@ type ComposerDecision =
 
 interface CompactActivity {
   id: string;
+  ts?: number;
   source: "manual" | "auto";
   status: "pending" | "executed" | "failed";
   beforeTokens: number;
@@ -325,7 +326,7 @@ const state: State = {
   planning: false,
   compactAvailable: false,
   compactCurrentMessages: 0,
-  compactMinMessages: 6,
+  compactMinMessages: 2,
   compactNudge: false,
   compactMenuOpen: false,
   recentChats: [],
@@ -492,18 +493,20 @@ function upsertCompactActivityMessage(activity: CompactActivity): void {
   // assistant turn so it appears as an item in that timeline rather than as a
   // visually separate message block. Idle (manual) compaction keeps its own
   // dedicated message.
-  let message = [...state.messages].reverse().find(m => m.role === "assistant" && isAssistantTurnLive(m));
+  let message = activity.ts === undefined ? [...state.messages].reverse().find(m => m.role === "assistant" && isAssistantTurnLive(m)) : undefined;
   if (!message) {
     const messageId = compactActivityMessageId(activity);
     message = state.messages.find(m => m.id === messageId);
     if (!message) {
-      message = { id: messageId, role: "assistant", parts: [], text: "", thought: "", toolCards: [] };
-      state.messages.push(message);
+      message = { id: messageId, role: "assistant", recordTs: activity.ts, parts: [], text: "", thought: "", toolCards: [] };
+      const next = activity.ts === undefined ? -1 : state.messages.findIndex(m => (m.recordTs ?? 0) > activity.ts!);
+      if (next < 0) state.messages.push(message);
+      else state.messages.splice(next, 0, message);
     }
   }
   const card = compactActivityToolCard(activity, false);
   message.toolCards.push(card);
-  message.parts.push({ id: partId, kind: "tool", card, startedAt: Date.now() });
+  message.parts.push({ id: partId, kind: "tool", card, startedAt: activity.ts ?? Date.now() });
 }
 
 function renderFenceCode(tokens: Parameters<RenderRule>[0], idx: number): string {
@@ -2339,7 +2342,7 @@ function updateModeMenuOption(option: HTMLElement, selected: boolean): void {
 
 function showCompactUnavailable(): void {
   state.compactNudge = true;
-  state.compactHintOverride = `Compaction is available after ${state.compactMinMessages} saved messages.`;
+  state.compactHintOverride = "Compaction needs older conversation history to summarize.";
   if (compactNudgeTimer) clearTimeout(compactNudgeTimer);
   compactNudgeTimer = setTimeout(() => {
     state.compactNudge = false;
@@ -4059,12 +4062,17 @@ function handleHostMessage(msg: ExtToChat): void {
         ? state.compactActivity : undefined;
       if (!pendingCompactActivity) state.compactActivity = undefined;
       loadFromRecord(msg.record);
+      for (const outcome of msg.record.compactions ?? []) {
+        const activity: CompactActivity = { ...outcome, id: outcome.compactId };
+        state.compactActivity = activity;
+        upsertCompactActivityMessage(activity);
+      }
       if (pendingCompactActivity) {
         state.compactActivity = pendingCompactActivity;
         upsertCompactActivityMessage(pendingCompactActivity);
       }
       const contextMessages = msg.contextMessageCount ?? msg.record.messages.length;
-      applyCompactStatus(contextMessages, state.compactMinMessages, contextMessages >= state.compactMinMessages);
+      applyCompactStatus(contextMessages, state.compactMinMessages, msg.contextCompactionAvailable ?? contextMessages >= state.compactMinMessages);
       render();
       break;
     }

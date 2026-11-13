@@ -4,12 +4,15 @@ import { connectionFor, connectionCacheKey, connectionHeaders, redactServerError
 import type { ServerMetadata, ServerModel, ImageSupport } from "./serverTypes.js";
 import type { ChatCompletionRequest } from "./client.js";
 import { imageProbeDataUrl } from "./imageProbe.js";
+import { outputTokenReserve } from "./requestPolicy.js";
+export { outputTokenReserve } from "./requestPolicy.js";
 
 export type { ServerMetadata, ServerModel } from "./serverTypes.js";
 const metadataCache = new Map<string, { at: number; value: ServerMetadata }>();
 const modelsCache = new Map<string, { at: number; value: ServerModel[] }>();
 const imageCapabilities = new Map<string, ImageSupport>();
 const imageProbes = new Map<string, Promise<ImageSupport>>();
+const reasoningOffUnsupported = new Set<string>();
 let cacheGeneration = 0;
 const TTL = 60_000;
 const capabilityListeners = new Set<(connection: ServerConnection) => void>();
@@ -33,6 +36,7 @@ function remember<T>(map: Map<string, { at: number; value: T }>, key: string, va
 export function clearServerCaches(): void {
   cacheGeneration++;
   metadataCache.clear(); modelsCache.clear(); imageCapabilities.clear(); imageProbes.clear();
+  reasoningOffUnsupported.clear();
 }
 
 async function request(c: ServerConnection, route: string, signal?: AbortSignal, body?: unknown): Promise<Response> {
@@ -251,29 +255,39 @@ export async function tokenize(endpoint: string, text: string, model?: string, o
 
 export function serializeRequest(req: ChatCompletionRequest, c: ServerConnection): Record<string, unknown> {
   const vllm = c.backend === "vllm";
-  const disabled = req.chat_template_kwargs?.enable_thinking === false || req.thinking_budget_tokens === 0;
-  const auxiliary = req.purpose === "auxiliary";
-  const effort = vllm && (disabled || auxiliary) ? "none" : req.reasoning_effort;
+  const policy = req.generation;
+  const reasoning = policy?.reasoning;
+  const preferOff = reasoning?.mode === "prefer-off" || (!policy && req.purpose === "auxiliary");
+  const disabled = reasoning?.mode === "off" || (preferOff && !reasoningOffUnsupported.has(connectionCacheKey(c)))
+    || (!reasoning && !preferOff && (req.chat_template_kwargs?.enable_thinking === false || req.thinking_budget_tokens === 0));
+  const effort = disabled ? (vllm ? "none" : undefined) : reasoning?.effort ?? req.reasoning_effort;
+  const budget = disabled ? 0 : reasoning ? reasoning.budgetTokens ?? -1 : req.thinking_budget_tokens;
   if (vllm && effort !== undefined && !["none", "minimal", "low", "medium", "high", "xhigh", "max"].includes(effort)) {
     throw new StreamFailure(`vLLM does not support reasoning effort "${effort}". Update Reasoning efforts in Settings.`, { cause: "protocol_error" });
   }
   return {
     model: c.model ?? req.model ?? "local", messages: vllm ? req.messages.map(({ reasoning_content, ...m }) => ({ ...m, ...(reasoning_content !== undefined ? { reasoning: reasoning_content } : {}) })) : req.messages,
     stream: true, temperature: req.temperature ?? 0.8, top_k: req.top_k, top_p: req.top_p,
-    [vllm ? "max_completion_tokens" : "max_tokens"]: req.max_tokens,
-    ...(vllm ? { thinking_token_budget: !disabled && !auxiliary && (req.thinking_budget_tokens ?? -1) > 0 ? req.thinking_budget_tokens : undefined }
-      : { thinking_budget_tokens: req.thinking_budget_tokens, return_progress: req.return_progress,
+    [vllm ? "max_completion_tokens" : "max_tokens"]: policy?.maxOutputTokens ?? req.max_tokens,
+    ...(vllm ? { thinking_token_budget: !disabled && !preferOff && (budget ?? -1) > 0 ? budget : undefined }
+      : { thinking_budget_tokens: budget, return_progress: policy?.reportProgress ?? req.return_progress,
         parallel_tool_calls: req.tools?.length ? req.parallel_tool_calls ?? false : undefined }),
     reasoning_effort: effort,
-    chat_template_kwargs: vllm && (disabled || auxiliary) ? { ...req.chat_template_kwargs, enable_thinking: false } : req.chat_template_kwargs,
+    chat_template_kwargs: disabled ? { ...req.chat_template_kwargs, enable_thinking: false } : req.chat_template_kwargs,
     tools: req.tools, tool_choice: req.tools?.length ? req.tool_choice ?? "auto" : undefined,
     stream_options: { include_usage: true }
   };
 }
 
 /** Count the actual vLLM chat template and multimodal input before generation. */
-export function outputTokenReserve(contextSize: number, maxTokens?: number): number {
-  return maxTokens ?? Math.max(1, Math.min(4096, Math.floor(contextSize / 4)));
+export function allowReasoningFallback(req: ChatCompletionRequest, c: ServerConnection, error: unknown): boolean {
+  if (req.generation?.reasoning?.mode !== "prefer-off" && !(req.purpose === "auxiliary" && !req.generation)) return false;
+  if (reasoningOffUnsupported.has(connectionCacheKey(c)) || !(error instanceof StreamFailure)) return false;
+  if (![400, 422].includes(error.diagnostics.httpStatus ?? 0)
+    || !/reasoning_effort|enable_thinking|thinking_budget_tokens/i.test(error.message)
+    || !/unsupported|not support|invalid|must be|cannot|not allowed|unknown/i.test(error.message)) return false;
+  reasoningOffUnsupported.add(connectionCacheKey(c));
+  return true;
 }
 
 export async function countServerPrompt(endpoint: string, req: ChatCompletionRequest, signal?: AbortSignal, checkLimit = true): Promise<number | undefined> {
@@ -287,11 +301,18 @@ export async function countServerPrompt(endpoint: string, req: ChatCompletionReq
     ...(body.reasoning_effort !== undefined && template?.enable_thinking === undefined ? { enable_thinking: body.reasoning_effort !== "none" } : {}),
     ...(body.reasoning_effort !== undefined ? { reasoning_effort: body.reasoning_effort } : {}),
     ...(body.tools ? { tool_choice: body.tool_choice } : {}) };
-  const result = await vllmTokenize(c, { model: body.model, messages: body.messages, tools: body.tools,
-    chat_template_kwargs: kwargs, add_generation_prompt: true, add_special_tokens: false }, signal, images);
+  let result: { count: number; max_model_len: number };
+  try {
+    result = await vllmTokenize(c, { model: body.model, messages: body.messages, tools: body.tools,
+      chat_template_kwargs: kwargs, add_generation_prompt: true, add_special_tokens: false }, signal, images);
+  } catch (error) {
+    signal?.throwIfAborted();
+    if (!allowReasoningFallback(req, c, error)) throw error;
+    return countServerPrompt(endpoint, req, signal, checkLimit);
+  }
   const contextSize = Math.min(result.max_model_len, metadataCache.get(connectionCacheKey(c))?.value.contextSize ?? result.max_model_len);
   if (!result.count) throw new StreamFailure("vLLM returned an empty chat prompt.", { cause: "protocol_error" });
-  if (checkLimit && result.count + outputTokenReserve(contextSize, req.max_tokens) > contextSize) {
+  if (checkLimit && result.count + outputTokenReserve(contextSize, req.generation?.maxOutputTokens ?? req.max_tokens) > contextSize) {
     throw new StreamFailure(`The prompt and output budget exceed the server context of ${contextSize} tokens. Compact context or increase vLLM --max-model-len.`, { cause: "protocol_error" });
   }
   return result.count;
