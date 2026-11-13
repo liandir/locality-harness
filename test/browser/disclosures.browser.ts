@@ -150,19 +150,38 @@ for (const theme of ["light", "dark"] as const) {
       await expect.poll(() => foreground(head)).not.toEqual(resting);
     });
 
-    test("settings use the same disclosure interaction", async ({ page }) => {
+    test("settings retain keyboard interaction without a Shift-triggered fill", async ({ page }) => {
       await webview(page, theme, "side");
       await hostMessage(page, { type: "focusTab", tab: "settings" });
       const head = page.locator(".settings-section-heading").first();
       const resting = await foreground(head);
-      await head.click();
-      await expect(head).toHaveAttribute("aria-expanded", "true");
-      await page.mouse.move(990, 5);
-      await expect.poll(() => foreground(head)).toEqual(resting);
+      const background = await head.evaluate(element => getComputedStyle(element).backgroundColor);
+      for (const expanded of ["true", "false"]) {
+        // Start each scenario with fresh pointer focus after the prior Shift.
+        await page.mouse.click(990, 5);
+        await head.click();
+        await expect(head).toHaveAttribute("aria-expanded", expanded);
+        await page.mouse.move(990, 5);
+        await expect.poll(() => foreground(head)).toEqual(resting);
+        await expect(head).toBeFocused();
+        // Chromium promotes retained pointer focus to :focus-visible on Shift.
+        await page.keyboard.down("Shift");
+        await expect.poll(() => head.evaluate(element => element.matches(":focus-visible"))).toBe(true);
+        await expect(head).toHaveCSS("background-color", background);
+        await page.keyboard.up("Shift");
+        await expect(head).toHaveCSS("background-color", background);
+        await expect(head).toBeFocused();
+        await expect(head).toHaveAttribute("aria-expanded", expanded);
+      }
       await keyboardFocus(page, head);
       await expect.poll(() => foreground(head)).not.toEqual(resting);
+      await expect(head.locator(".disclosure-icon")).toHaveCSS("opacity", "1");
+      await expect(head).toHaveCSS("background-color", background);
+      await page.keyboard.press("Enter");
+      await expect(head).toHaveAttribute("aria-expanded", "true");
       await page.keyboard.press("Space");
       await expect(head).toHaveAttribute("aria-expanded", "false");
+      await expect(head).toBeFocused();
     });
   });
 }
