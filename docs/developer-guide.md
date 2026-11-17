@@ -40,19 +40,21 @@ finite budgets fail with guidance to use unlimited reasoning or Chat Completions
 llama.cpp Responses carries backend controls in `extra_params`. Function tools
 explicitly use `strict: false`, preserving the existing schemas' optional fields.
 
-`measureRequestPrompt` counts the full request, including tools. It reports
-exact rendered counts where supported and estimated template counts otherwise;
-the shared budget reserves generation plus 1% or 5% headroom respectively.
-Responses counts the actual serialized input using llama.cpp's
-`/v1/responses/input_tokens` or vLLM's `/v1/responses/render`. vLLM requires
-`--enable-scale-out` to expose that optional renderer route. A missing counting
-route (404/405/501) uses estimated template counting; authentication, malformed
-responses and other failures remain errors. Chat Completions tokenization is
-never reported as an exact Responses count.
-Estimated template counting requires a functioning tokenizer: character-count
-fallbacks remain display estimates, not permission to send an oversized prompt.
-Main chat generation can use the remaining measured window; it has no fixed
-auxiliary output ceiling.
+`measureRequestPrompt` requires exact counting of the full request, including
+tools and images. Counting and generation share the prepared serialized request.
+Responses uses llama.cpp's `/v1/responses/input_tokens` or vLLM's
+`/v1/responses/render`. **Start `vllm serve` with `--enable-scale-out` when using
+Locality's default Responses protocol** to enable that renderer route.
+Chat Completions uses llama.cpp's `/v1/chat/completions/input_tokens` or vLLM's
+chat `/tokenize` endpoint and does not require `--enable-scale-out`.
+
+Connection validation checks exact-count support. Missing counting routes
+(404/405/501), malformed responses and authentication failures remain errors;
+there is no estimation fallback. A vLLM 403 reporting “Scale-out endpoints are
+disabled” provides guidance to enable the flag. The shared budget reserves
+generation plus 1% of the context window. Main chat uses the shared output
+allowance, capped at 4,096 tokens or a quarter of the window; auxiliary requests
+reserve their explicit output limits.
 
 Compaction works on a detached candidate. It pins the current request and its
 steering, groups completed tool exchanges, and splits historical data without
@@ -87,8 +89,13 @@ Live model acceptance is separate: no live results should be claimed from fixtur
 implementation. The three vLLM model cases and the llama.cpp smoke test below
 must pass, with their configurations recorded, before publishing v2.2.0.
 
-`test/serverLive.test.ts` runs both protocols and is skipped unless endpoints are supplied. Provision the
-servers externally, then set the following variables in the invoking shell:
+`test/serverLive.test.ts` runs both protocols and is skipped unless endpoints are supplied.
+
+Start the vLLM test servers with `--enable-scale-out` so the Responses cases can
+count their prompts exactly. The [setup example](user-guide.md#vllm-setup-v220)
+includes this flag and the Qwen3 parser options.
+
+Provision the servers externally, then set the following variables in the invoking shell:
 
 | Endpoint variable | Default model | Coverage |
 | --- | --- | --- |

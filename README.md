@@ -44,6 +44,11 @@ model that supports tool calling. The server can run on the same computer or
 another machine on your local network. Installing the extension does not install
 a model or server, and does not require Node.js.
 
+For **vLLM with Locality's default Responses protocol**, start `vllm serve` with
+`--enable-scale-out`. This enables the renderer endpoint required for exact token
+counting. **Chat Completions** does not require this flag. See the
+[vLLM setup example](docs/user-guide.md#vllm-setup-v220) for a complete command.
+
 1. Choose an edition from the table below and download its `.vsix` file from the
    [latest release](https://github.com/liandir/locality/releases/latest).
 2. In VS Code, open the Command Palette (`Ctrl+Shift+P` / `Cmd+Shift+P`) and run

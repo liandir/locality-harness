@@ -62,9 +62,14 @@ For a reasoning and tool-capable Qwen3 server, the vLLM 0.32.0 setup is:
 
 ```bash
 vllm serve Qwen/Qwen3-4B --host 127.0.0.1 --port 8000 \
-  --max-model-len 32768 --enable-auto-tool-choice \
+  --max-model-len 32768 --enable-scale-out --enable-auto-tool-choice \
   --tool-call-parser hermes --reasoning-parser qwen3
 ```
+
+**`--enable-scale-out` is required for Locality's default Responses protocol.**
+It enables `/v1/responses/render`, which Locality uses for exact prompt token
+counting. Without it, vLLM returns HTTP 403 with “Scale-out endpoints are disabled.”
+If you select **Chat Completions** in Locality, this flag is not required.
 
 Choose **Native server only** in Locality. Other models need their corresponding
 [tool parser](https://docs.vllm.ai/en/v0.32.0/features/tool_calling/) and
@@ -108,7 +113,9 @@ Connection troubleshooting:
 
 - **Responses unavailable:** select **Chat Completions** under **Protocol**, or
   upgrade the server to a version with Responses support.
-- **401/403:** set or replace the API key for this server.
+- **403 — “Scale-out endpoints are disabled”:** restart `vllm serve` with
+  `--enable-scale-out`, or select **Chat Completions** under **Protocol**.
+- **Authentication errors (401/403):** set or replace the API key for this server.
 - **Could not identify:** check the server URL and proxy routing. llama.cpp must
   expose `/props`; vLLM must expose `/v1/models` and `/tokenize`. A missing
   `/props` alone does not identify a server as vLLM.
