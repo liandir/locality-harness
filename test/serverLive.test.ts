@@ -24,10 +24,10 @@ for (const target of targets) for (const protocol of ["responses", "chat-complet
         const rec: ChatRecord = { id: "live-compact", title: "Compaction", workspaceRoot: "/workspace", createdAt: 1, updatedAt: 1,
           toolCallingMode: "native", mode: "act", reasoningEffort: "default", totalTokens: 0,
           messages: [{ role: "user", content: "Update parser.ts and test the parser. Preserve public exports.", ts: 1 },
-            { role: "assistant", content: "Updated parser.ts to validate empty inputs. Parser tests passed; documentation remains to be updated.", ts: 2 }] };
+            { role: "assistant", content: "Updated parser.ts to validate empty inputs. Parser tests passed; documentation remains to be updated. ".repeat(100), ts: 2 }] };
         const original = structuredClone(rec.messages);
         await compact(url, rec, AbortSignal.timeout(120_000), { limit: Math.floor(metadata.contextSize / 2), summaryContextLimit: metadata.contextSize,
-          thresholdPercent: 80, tailBudgetPercent: 30, maxMessageTokensPercent: 25, overheadPerMessage: 4 }, model);
+          thresholdPercent: 80, tailBudgetPercent: 30, maxMessageTokensPercent: 25, request: async messages => ({ model, messages }) }, model);
         expect(rec.messages).toEqual(original);
         expect(rec.contextMessages?.[0].content).toMatch(/^\[context summary\]\n\S/);
         expect(rec.contextMessages?.some(message => message.content === original[0].content)).toBe(true);

@@ -84,3 +84,13 @@ describe("stream completion contract", () => {
 // These fixtures exercise the retained Chat Completions contract.
 beforeEach(() => configureServerConnections(() => ({ endpoint: "http://127.0.0.1:8080", serverType: "llama.cpp", protocol: "chat-completions" })));
 afterEach(() => configureServerConnections());
+
+// Transport tests isolate preflight; real counting/serialization contracts live in responses/vllm tests.
+vi.mock("../src/llm/server.js", async importOriginal => {
+  const actual = await importOriginal<typeof import("../src/llm/server.js")>();
+  return { ...actual, prepareServerRequest: async (endpoint: string, request: import("../src/llm/client.js").ChatCompletionRequest, signal?: AbortSignal) => {
+    signal?.throwIfAborted();
+    const connection = await actual.resolvedConnection(endpoint, request.model);
+    return { connection, body: JSON.stringify(actual.serializeRequest(request, connection)), inputTokens: 10 };
+  } };
+});

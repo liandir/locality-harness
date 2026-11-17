@@ -200,3 +200,39 @@ describe("chat headers and workspace indexes", () => {
     expect(new Set(chats.map(chat => chat.id)).size).toBe(18);
   }, 20_000);
 });
+
+it("rejects a compaction when another window saves a newer chat", async () => {
+  const rec = storage.newRecord("native");
+  rec.messages = [{ role: "user", content: "original", ts: 1 }];
+  await storage.save(rec);
+  const revision = await storage.captureRevision(rec.id);
+  const other = new ChatStorage(workspace, root);
+  const changed = (await other.load(rec.id))!;
+  changed.messages.push({ role: "user", content: "newer request", ts: 2 });
+  await other.save(changed);
+  const publish = vi.fn();
+  await expect(storage.saveCompaction({ ...rec, contextMessages: [] }, revision, () => undefined, publish)).rejects.toThrow("changed on disk");
+  expect(publish).not.toHaveBeenCalled();
+  expect((await storage.load(rec.id))?.messages.at(-1)?.content).toBe("newer request");
+});
+
+it.each(["index", "publish"])("restores the previous record if compaction fails during %s", async stage => {
+  const rec = storage.newRecord("native");
+  rec.messages = [{ role: "user", content: "original", ts: 1 }];
+  await storage.save(rec);
+  const original = await fs.readFile(chatPath(rec.id), "utf8");
+  const revision = await storage.captureRevision(rec.id);
+  const rename = vi.mocked(fs.rename).getMockImplementation()!;
+  if (stage === "index") {
+    vi.mocked(fs.rename).mockImplementationOnce(async (from, to) => rename(from, to));
+    vi.mocked(fs.rename).mockImplementationOnce(async () => { throw new Error("Index write failed"); });
+  }
+  let checks = 0;
+  const assertCurrent = () => { if (stage === "publish" && ++checks >= 3) throw new Error("Context changed before publication"); };
+  const publish = vi.fn();
+  await expect(storage.saveCompaction({ ...rec, contextMessages: [] }, revision, assertCurrent, publish)).rejects.toThrow();
+  expect(publish).not.toHaveBeenCalled();
+  expect(await fs.readFile(chatPath(rec.id), "utf8")).toBe(original);
+  expect((await storage.load(rec.id))?.contextMessages).toBeUndefined();
+  expect(await storage.list()).toEqual([expect.objectContaining({ id: rec.id })]);
+});

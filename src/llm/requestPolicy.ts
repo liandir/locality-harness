@@ -12,16 +12,16 @@ export interface GenerationPolicy {
 
 export interface PromptMeasurement {
   tokens: number;
-  accuracy: "exact" | "estimated";
+  accuracy: "exact";
 }
 
 export function outputTokenReserve(contextSize: number, maxTokens?: number): number {
   return maxTokens ?? Math.max(1, Math.min(4096, Math.floor(contextSize / 4)));
 }
 
-/** Estimates need headroom, but never manufacture space in a small context. */
-export function promptSafetyMargin(contextSize: number, accuracy: PromptMeasurement["accuracy"]): number {
-  return Math.max(1, Math.ceil(contextSize * (accuracy === "exact" ? 0.01 : 0.05)));
+/** Keep a small explicit reserve in addition to the exact input and output budgets. */
+export function promptSafetyMargin(contextSize: number, _accuracy: PromptMeasurement["accuracy"]): number {
+  return Math.max(1, Math.ceil(contextSize * 0.01));
 }
 
 export function promptBudget(contextSize: number, outputTokens: number, accuracy: PromptMeasurement["accuracy"]): number {

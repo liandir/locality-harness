@@ -1,3 +1,4 @@
+import { StreamFailure } from "./completion.js";
 import type { LlmMessage } from "./client.js";
 
 export type ResponseOutputItem =
@@ -77,5 +78,8 @@ export function replayResponseHistory(message: LlmMessage, source: string): Resp
     return call.call_id !== expected.id || call.name !== expected.function.name
       || canonicalArguments(call.arguments) !== canonicalArguments(expected.function.arguments);
   })) return;
+  if (message.replayContextChanged && history.output.some(item => item.type === "reasoning" && item.encrypted_content)) {
+    throw new StreamFailure("This retained response contains encrypted reasoning tied to the original context. It cannot be replayed safely after compaction. The previous context was preserved.", { cause: "protocol_error" });
+  }
   return history.output;
 }

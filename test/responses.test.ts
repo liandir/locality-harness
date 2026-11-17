@@ -24,7 +24,7 @@ beforeEach(() => {
   vi.stubGlobal("fetch", vi.fn(async (url: string, init: RequestInit) => {
     const body = JSON.parse(String(init.body ?? "{}"));
     requests.push({ url, body, headers: new Headers(init.headers) });
-    if (url.endsWith("/input_tokens") || url.endsWith("/render")) return new Response("Not found", { status: 404 });
+    if (url.endsWith("/input_tokens") || url.endsWith("/render")) return Response.json({ input_tokens: 20, token_ids: Array(20).fill(1) });
     if (url.endsWith("/tokenize")) return Response.json({ tokens: [1, 2], count: 2, max_model_len: 8192 });
     if (url.endsWith("/v1/responses")) return generation();
     if (url.includes("/props")) return Response.json({ model_alias: "local", default_generation_settings: { n_ctx: 8192 }, modalities: { vision: false } });
@@ -226,9 +226,9 @@ describe("Responses history and counting", () => {
     expect(result).toEqual({ tokens: 3, accuracy: "exact" });
   });
 
-  it("uses tokenizer estimates only when the optional count route is unavailable", async () => {
-    const measurement = await measureRequestPrompt(endpoint, req, 4);
-    expect(measurement).toEqual({ tokens: 6, accuracy: "estimated" });
+  it("fails clearly when exact counting is unavailable", async () => {
+    vi.mocked(fetch).mockImplementationOnce(async () => new Response("Not found", { status: 404 }));
+    await expect(measureRequestPrompt(endpoint, req, 4)).rejects.toThrow("Exact prompt counting");
     vi.mocked(fetch).mockImplementationOnce(async () => new Response("Unauthorized", { status: 401 }));
     clearServerCaches();
     await expect(measureRequestPrompt(endpoint, req, 4)).rejects.toThrow("HTTP 401");
@@ -242,4 +242,38 @@ describe("Responses history and counting", () => {
     expect(metadata.imageSupport).toBe("supported");
     expect(requests.at(-1)!.body.input).toEqual(expect.arrayContaining([expect.objectContaining({ content: expect.arrayContaining([expect.objectContaining({ type: "input_image" })]) })]));
   });
+});
+
+it("sends the payload measured during preflight and invalidates it after a request edit", async () => {
+  const request = structuredClone(req);
+  await measureRequestPrompt(endpoint, request, 0);
+  await complete(endpoint, request, new AbortController().signal);
+  expect(requests.filter(r => r.url.endsWith("/input_tokens"))).toHaveLength(1);
+  expect(requests.at(-1)!.body).toEqual({ ...requests[0].body, stream: true });
+  request.messages.push({ role: "user", content: "Follow-up" });
+  await complete(endpoint, request, new AbortController().signal);
+  expect(requests.filter(r => r.url.endsWith("/input_tokens"))).toHaveLength(2);
+});
+
+it("explains vLLM renderer permissions without diagnosing an API-key error", async () => {
+  vi.mocked(fetch).mockResolvedValueOnce(new Response(JSON.stringify({ error: { message: "Scale-out endpoints are disabled. Restart vllm serve with --enable-scale-out to enable them." } }), { status: 403 }));
+  const failure = await withServerConnection({ endpoint, serverType: "vllm" }, () => measureRequestPrompt(endpoint, req, 0)).catch(error => error as Error);
+  expect((failure as Error).message).toContain("--enable-scale-out");
+  expect((failure as Error).message).not.toContain("Check the server API key");
+});
+
+it("rejects prefix-dependent encrypted reasoning after compaction while preserving raw native items", () => {
+  const c: ServerConnection = { endpoint, model: "local", serverType: "llama.cpp", backend: "llama.cpp", protocol: "responses" };
+  const history = { source: responseSource(c), output: [reason(), message()] };
+  const assistant: ChatCompletionRequest["messages"][number] = { role: "assistant", content: "Hello", responseHistory: history, replayContextChanged: true };
+  expect(serializeRequest({ messages: [assistant] }, c).input).toEqual(history.output);
+  assistant.responseHistory = { ...history, output: [{ type: "reasoning", id: "encrypted", encrypted_content: "opaque", summary: [] }, message()] };
+  expect(() => serializeRequest({ messages: [assistant] }, c)).toThrow("encrypted reasoning");
+  const chat = serializeRequest({ messages: [assistant] }, { ...c, protocol: "chat-completions" });
+  expect(JSON.stringify(chat)).not.toMatch(/encrypted_content|replayContextChanged|responseHistory/);
+});
+
+it.each(["commentary", "tool"])("does not accept %s endings as compaction summaries", async ending => {
+  generation = () => sse([terminal(ending === "tool" ? [call()] : [{ ...message(), phase: "commentary" } as ResponseOutputItem])]);
+  await expect(complete(endpoint, { ...req, generation: { task: "compaction", maxOutputTokens: 100 } }, new AbortController().signal)).rejects.toThrow("complete final answer");
 });

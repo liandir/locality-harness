@@ -298,7 +298,8 @@
           "default": 4,
           "minimum": 0,
           "maximum": 64,
-          "description": "Estimated chat-template overhead per message for llama.cpp. vLLM counts the complete server-rendered prompt instead."
+          "description": "Legacy setting; exact full-request counting is now required for both backends.",
+          "deprecationMessage": "No longer used. Locality obtains exact prompt counts from the server."
         },
         "locality.autoapproveReads": {
           "type": "boolean",

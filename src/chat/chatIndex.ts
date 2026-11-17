@@ -76,7 +76,7 @@ export class WorkspaceChatIndex {
   }
 
   /** Hold the workspace lock across the record change and index replacement. */
-  async change<T>(id: string, task: () => Promise<T>): Promise<T> {
+  async change<T>(id: string, task: () => Promise<T>, transaction?: { publish(): void; rollback(): Promise<void> }): Promise<T> {
     return this.exclusive(async () => {
       this.invalidate();
       try {
@@ -86,10 +86,11 @@ export class WorkspaceChatIndex {
         index.chats = index.chats.filter(chat => chat.header.id !== id);
         if (entry?.header.workspaceRoot === this.workspaceRoot) index.chats.push(entry);
         await this.persist(index);
+        transaction?.publish();
         return result;
       } catch (error) {
-        // The record may already have been replaced. Never leave a trusted stale index.
-        await fs.unlink(this.file).catch(() => undefined);
+        try { await transaction?.rollback(); }
+        finally { await fs.unlink(this.file).catch(() => undefined); }
         throw error;
       } finally { this.invalidate(); }
     });

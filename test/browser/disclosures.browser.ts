@@ -3,7 +3,7 @@ import type { ChatRecord } from "../../src/chat/types.js";
 import type { MemoryCreation } from "../../src/chat/memory.js";
 import { hostMessage, webview, type Theme } from "./harness.js";
 
-type Row = "memory-created" | "memory-failed" | "memory-generating" | "tool-executed" | "tool-failed" | "tool-rejected" | "future-tool" | "plan-submitted" | "plan-failed" | "compact-executed" | "compact-failed";
+type Row = "memory-created" | "memory-failed" | "memory-generating" | "tool-executed" | "tool-failed" | "tool-rejected" | "future-tool" | "plan-submitted" | "plan-failed" | "compact-executed" | "compact-failed" | "compact-skipped" | "compact-limited";
 
 async function chatRow(page: Page, theme: Theme, row: Row): Promise<Locator> {
   await webview(page, theme);
@@ -19,7 +19,7 @@ async function chatRow(page: Page, theme: Theme, row: Row): Promise<Locator> {
     record.memoryCreations = [{ messageTs: 3, operation: "update", status,
       text: "Parser decisions.", generatedAt: 4, error: status === "failed" ? "Memory generation failed." : undefined }];
   } else if (row.startsWith("compact-")) {
-    record.compactions = [{ compactId: "restored-compact", ts: 3, source: "manual", status: row === "compact-failed" ? "failed" : "executed",
+    record.compactions = [{ compactId: "restored-compact", ts: 3, source: "manual", status: row === "compact-failed" ? "failed" : row === "compact-skipped" ? "skipped" : "executed", targetReached: row !== "compact-limited",
       beforeTokens: 7000, afterTokens: 2000, beforeMessages: 8, afterMessages: 3, keepTail: 2, error: row === "compact-failed" ? "Summary exhausted its generation budget." : undefined }];
   } else {
     const status = row.endsWith("-failed") ? "failed" : row === "tool-rejected" ? "rejected" : "executed";
@@ -61,7 +61,7 @@ async function foreground(head: Locator): Promise<string[]> {
 
 for (const theme of ["light", "dark"] as const) {
   test.describe(theme, () => {
-    for (const row of ["memory-created", "memory-failed", "tool-executed", "tool-failed", "tool-rejected", "future-tool", "plan-submitted", "plan-failed", "compact-executed", "compact-failed"] as const) {
+    for (const row of ["memory-created", "memory-failed", "tool-executed", "tool-failed", "tool-rejected", "future-tool", "plan-submitted", "plan-failed", "compact-executed", "compact-failed", "compact-skipped", "compact-limited"] as const) {
       test(`${row}: pointer focus does not latch emphasis; keyboard focus remains visible`, async ({ page }) => {
         const head = await chatRow(page, theme, row);
         const icon = head.locator(":scope > .disclosure-icon");
@@ -71,6 +71,11 @@ for (const theme of ["light", "dark"] as const) {
         await expect(head.locator(".tool-name")).toHaveCSS("color", await head.evaluate(element => getComputedStyle(element).color));
         const hovered = await foreground(head);
         await head.locator(".tool-name").click();
+        if (row === "compact-skipped") {
+          await expect(head).toContainText("Compaction skipped");
+          await expect(page.getByText("no useful reduction", { exact: false })).toBeVisible();
+        }
+        if (row === "compact-limited") await expect(page.getByText("protected context prevented", { exact: false })).toBeVisible();
         await page.mouse.move(990, 5);
         await expect.poll(() => foreground(head)).toEqual(resting);
         // Native summaries retain pointer focus; custom history rows activate

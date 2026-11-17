@@ -123,7 +123,7 @@ export type UiEvent =
   | { kind: "chatClosed" }
   | { kind: "compactStatus"; currentMessages: number; minMessages: number; available: boolean }
   | { kind: "compactStart"; compactId: string; source: "manual" | "auto"; beforeTokens: number; beforeMessages: number; keepTail: number }
-  | { kind: "compactEnd"; compactId: string; source: "manual" | "auto"; status: "executed" | "failed"; beforeTokens: number; afterTokens?: number; beforeMessages: number; afterMessages?: number; keepTail: number; error?: string; diagnostics?: CompletionDiagnostics }
+  | { kind: "compactEnd"; compactId: string; source: "manual" | "auto"; status: "executed" | "failed" | "skipped"; targetReached?: boolean; failureCause?: string; beforeTokens: number; afterTokens?: number; beforeMessages: number; afterMessages?: number; keepTail: number; error?: string; diagnostics?: CompletionDiagnostics }
   | { kind: "chatModeChanged"; mode: ChatMode }
   | { kind: "reasoningEffortChanged"; effort: ReasoningEffort };
 

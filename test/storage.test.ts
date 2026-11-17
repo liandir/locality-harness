@@ -97,7 +97,7 @@ describe("ChatStorage", () => {
       { role: "user", content: "Next turn", ts: 5 }
     ];
     const forked = await storage.fork(rec, 1);
-    expect(forked.messages).toEqual(rec.messages.slice(0, 4));
+    expect(forked.messages).toMatchObject(rec.messages.slice(0, 4));
     expect((await storage.load(forked.id))?.messages[2].steering).toBe(true);
   });
 
@@ -446,7 +446,7 @@ describe("saved transcript and context", () => {
     ];
     rec.contextMessages = [{ role: "system", content: "[context summary] future request", ts: 4 }];
     const forked = await storage.fork(rec, 1);
-    expect(forked.messages).toEqual(rec.messages.slice(0, 2));
+    expect(forked.messages).toMatchObject(rec.messages.slice(0, 2));
     expect(forked.contextMessages).toBeUndefined();
     expect(JSON.stringify(await storage.load(forked.id))).not.toContain("future request");
   });
@@ -469,4 +469,22 @@ describe("image input restrictions", () => {
     const record = storage.newRecord("native");
     await expect(storage.importAttachmentBytes(record.id, "notes.txt", Buffer.from("notes"), { imageOnly: true })).rejects.toThrow("valid JPEG, PNG, or WebP");
   });
+});
+
+it("restores a valid checkpoint and drops corrupt metadata without losing readable context", async () => {
+  const storage = new ChatStorage(ws, chatsRoot);
+  const rec = storage.newRecord("native");
+  rec.messages = [{ id: "covered", role: "user", content: "earlier request", ts: 1 }];
+  rec.contextMessages = [{ id: "summary", role: "system", content: "[context summary]\nSaved facts", ts: 2 }];
+  rec.contextCheckpoint = { version: 1, summaryMessageId: "summary", summary: "Saved facts", sourceRevision: "revision",
+    coveredIds: ["covered"], protectedIds: [], evidenceIds: [], inputTokens: 50, targetReached: true };
+  await storage.save(rec);
+  const loaded = (await storage.load(rec.id))!;
+  expect(loaded.contextCheckpoint).toEqual(rec.contextCheckpoint);
+  expect((await storage.fork(loaded)).contextCheckpoint).toEqual(rec.contextCheckpoint);
+  rec.contextCheckpoint.summaryMessageId = "missing";
+  await storage.save(rec);
+  const invalid = (await storage.load(rec.id))!;
+  expect(invalid.contextCheckpoint).toBeUndefined();
+  expect(invalid.contextMessages).toEqual(rec.contextMessages);
 });

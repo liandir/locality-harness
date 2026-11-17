@@ -20,70 +20,18 @@ beforeEach(() => {
   mocks.tokenize.mockImplementation(fakeTokenize);
 });
 
-describe("promptTokens", () => {
-  it("sums exact per-message counts plus per-message overhead", async () => {
-    const { promptTokens } = await import("../src/chat/contextTracker.js");
-    const messages = [
-      { role: "system", content: "abcd" }, // <|system|>abcd => 12 chars => 3 tokens
-      { role: "user", content: "hello world" }
-    ];
-    const overhead = 5;
-    const expected =
-      Math.ceil("<|system|>abcd".length / 4) +
-      Math.ceil("<|user|>hello world".length / 4) +
-      overhead * 2;
-    expect(await promptTokens("http://x", messages, overhead)).toBe(expected);
-  });
-
-  it("counts native reasoning and structured tool calls", async () => {
-    const { promptTokens } = await import("../src/chat/contextTracker.js");
-    const messages = [{
-      role: "assistant",
-      content: "",
-      reasoning_content: "I should inspect the file.",
-      tool_calls: [{
-        id: "call_1",
-        type: "function",
-        function: { name: "read_file", arguments: '{"path":"a.ts"}' }
-      }]
-    }];
-    const rendered = `<|assistant|><|reasoning|>I should inspect the file.`
-      + `<|tool_calls|>${JSON.stringify(messages[0].tool_calls)}`;
-    expect(await promptTokens("http://x", messages, 0)).toBe(Math.ceil(rendered.length / 4));
-  });
-
-  it("counts text normally and reserves 4,096 tokens for each image part", async () => {
-    const { promptTokens } = await import("../src/chat/contextTracker.js");
-    const messages = [{
-      role: "user",
-      content: [
-        { type: "image_url" as const, image_url: { url: "data:image/png;base64,very-large-data-is-not-tokenized" } },
-        { type: "text" as const, text: "describe" }
-      ]
-    }];
-    const textTokens = Math.ceil("<|user|>describe".length / 4);
-    expect(await promptTokens("http://x", messages, 0)).toBe(textTokens + 4096);
-    expect(mocks.tokenize.mock.calls.some(call => String(call[1]).includes("base64"))).toBe(false);
-  });
-});
-
 describe("countTokens caching", () => {
-  it("separates backend identities and never persists a fallback as an exact count", async () => {
-    const { countTokens, recomputeTokens } = await import("../src/chat/contextTracker.js");
-    const { ChatStorage } = await import("../src/chat/storage.js");
+  it("separates backend identities and does not cache tokenizer failures", async () => {
+    const { countTokens } = await import("../src/chat/contextTracker.js");
     const unique = `backend-count-${Math.random()}`;
     for (const serverType of ["llama.cpp", "vllm"] as const) {
       await withServerConnection({ endpoint: "http://x", model: "same", serverType }, () => countTokens("http://x", unique, "same"));
     }
     expect(mocks.tokenize.mock.calls.filter(call => call[1] === unique)).toHaveLength(2);
-    const record = new ChatStorage("/tmp/workspace").newRecord("native");
-    record.messages = [{ role: "user", content: unique + " fallback", ts: 1, tokens: 999 }];
-    mocks.tokenize.mockImplementationOnce((_endpoint, _text, _model, options) => { options.onEstimate(); return 13; });
-    expect(await recomputeTokens("http://x", record, "same")).toBe(13);
-    expect(record.messages[0].tokens).toBeUndefined();
+    mocks.tokenize.mockRejectedValueOnce(new Error("Tokenizer unavailable"));
+    await expect(countTokens("http://x", unique + " failure")).rejects.toThrow("Tokenizer unavailable");
     mocks.tokenize.mockResolvedValueOnce(17);
-    expect(await recomputeTokens("http://x", record, "same")).toBe(17);
-    expect(record.messages[0].tokens).toBe(17);
+    expect(await countTokens("http://x", unique + " failure")).toBe(17);
   });
   it("tokenizes a given string only once", async () => {
     const { countTokens } = await import("../src/chat/contextTracker.js");
@@ -124,34 +72,5 @@ describe("truncateToTokenBudget", () => {
     // Keeps a head and a tail of the original.
     expect(r.text.startsWith("line 0")).toBe(true);
     expect(await countTokens("http://x", r.text)).toBeLessThanOrEqual(budget);
-  });
-});
-
-describe("model context token accounting", () => {
-  it("counts persisted harness context without changing the visible user request", async () => {
-    const { ChatStorage } = await import("../src/chat/storage.js");
-    const { recomputeTokens } = await import("../src/chat/contextTracker.js");
-    const { withUserContext } = await import("../src/llm/prompt.js");
-    const rec = new ChatStorage("/tmp/workspace").newRecord("native");
-    const context = "<locality_context>Current chat mode: review. Memory snapshot: dated reference</locality_context>";
-    rec.messages = [{ role: "user", content: "Review this", requestContext: context, ts: 1 }];
-    const expected = Math.ceil(("<|user|>" + withUserContext("Review this", context)).length / 4);
-    expect(await recomputeTokens("http://context-count", rec)).toBe(expected);
-    expect(rec.messages[0].content).toBe("Review this");
-    expect(rec.messages[0].tokens).toBe(expected);
-  });
-
-  it("counts compacted context only, including after changing tokenizer models", async () => {
-    const { ChatStorage } = await import("../src/chat/storage.js");
-    const { recomputeTokens } = await import("../src/chat/contextTracker.js");
-    const rec = new ChatStorage("/tmp/workspace").newRecord("native");
-    rec.messages = [{ role: "user", content: "old prompt".repeat(1000), tokens: 99999, ts: 1 }];
-    rec.contextMessages = [{ role: "system", content: "short summary", tokens: 999, ts: 2 }];
-    rec.tokenizerModel = "old-model";
-    const total = await recomputeTokens("http://x", rec, "new-model");
-    expect(total).toBe(Math.ceil("<|system|>short summary".length / 4));
-    expect(rec.messages[0].tokens).toBe(99999);
-    expect(rec.totalTokens).toBe(total);
-    expect(rec.tokenizerModel).toBe("new-model");
   });
 });

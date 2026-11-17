@@ -87,10 +87,12 @@ With Chat Completions, vLLM only preprocesses the image and llama.cpp generates
 at most one token. Authentication, invalid responses and server outages
 remain connection errors instead of marking the model as text-only. Clicking
 **Set** checks again. Responses token counts use llama.cpp's
-`/v1/responses/input_tokens` or vLLM's `/v1/responses/render` when available.
-The latter requires vLLM's `--enable-scale-out` option. When these optional
-routes are unavailable, Locality uses tokenizer-based estimates with additional
-context headroom. Chat Completions retains vLLM's exact chat-tokenizer counting.
+`/v1/responses/input_tokens` or vLLM's `/v1/responses/render`.
+The latter requires vLLM's `--enable-scale-out` option. Chat Completions uses
+llama.cpp's `/v1/chat/completions/input_tokens` or vLLM's chat `/tokenize` endpoint.
+Exact counting is required: **Set** checks it before accepting the connection.
+If the route is missing, upgrade the server or select a supported protocol;
+Locality does not substitute estimates.
 The context guard reserves output space; auxiliary requests reserve their
 explicit output limits.
 vLLM uses the normal waiting indicator without llama.cpp's
@@ -354,16 +356,17 @@ The implementation is in the [AGENTS.md loader](../src/llm/agentsMd.ts),
 ## Managing context
 
 A small ring on the composer toggle bar shows how full the model's context
-window is. It updates during streaming with an estimate for incoming thinking,
-text, and tool content, then uses server-reported usage when available. These
-live estimates do not trigger compaction. When it gets close to full:
+window is. It shows the last measured full-request count and updates from
+server-reported prompt progress and usage. Streamed text does not create an
+estimated count. When it gets close to full:
 
 - **Auto-compact** (on by default) summarizes older parts of the
-  conversation when context reaches the configured threshold (80% by
-  default).
+  conversation before a model request reaches the configured threshold (80%
+  by default), or earlier if the reserved output budget requires it.
 - If auto-compact is off, the context ring turns red at that threshold so
   you can compact manually before the next request gets too large.
-- You can also click the context ring at any time to compact immediately.
+- You can also click the context ring to compact manually. During a response,
+  the request waits for a completed tool exchange or the end of the response.
 
 With **Auto-compact** enabled, a response cut short by a generation limit gets
 one recovery attempt per turn. The harness discards that unfinished response,
@@ -381,8 +384,22 @@ message asks for confirmation before removing later messages, tool results,
 and thinking from both the chat and model context. Canceling keeps your edit
 draft. Workspace file changes remain.
 
-Compaction uses the same policy with llama.cpp and vLLM. It requests reasoning
-off when supported and adjusts its generation allowance when a summary reaches
+Compaction uses the same policy with both backends and protocols. Each accepted
+checkpoint stores its summary, covered message IDs, protected-message IDs, and
+references to original tool evidence. Later compactions summarize the prior
+checkpoint plus newly removed history. The target is 20 percentage points below
+the trigger and at most 80% of the hard input limit, subject to protected context. Whole tool
+exchanges, the current request, steering, and tool results not yet consumed by
+the model remain intact. Large historical write payloads are represented by
+bounded evidence; the saved transcript remains complete.
+
+Only an exactly measured candidate that fits and reduces context is committed.
+The commit checks conversation/settings and disk revisions under the workspace
+storage lock. Generation, validation, cancellation, conflict, and save failures
+keep the preceding context. Encrypted native reasoning that cannot safely be
+replayed after a prefix change also prevents compaction.
+
+Compaction requests reasoning off when supported and adjusts its generation allowance when a summary reaches
 the output limit. Empty or incomplete summaries never replace the active
 context. Failed attempts retain the previous context and their explanation is
 saved with the chat. Compaction is available when there is older work to

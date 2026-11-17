@@ -16,6 +16,7 @@ export type {
   ChatTurnPreparation, ChatTurnWorkStarted, ChatMemoryCreations,
   ChatContextActivity, ChatTurnEnd, ChatTurnAbort, ChatResponseDiscarded
 } from "../chat/events.js";
+/** CompactHistory includes skipped outcomes and exact-count target/failure details. */
 export type { ChatToolResultDisplay, ChatToolProcess, CompactHistory } from "../chat/types.js";
 
 export interface UiQueuedMessage {

@@ -144,6 +144,7 @@ function replaceMarkdownLinkLabel(tokens: Parameters<RenderRule>[0], openIndex: 
 }
 
 interface ToolCard extends ChatToolProcess {
+  skipped?: boolean;
   toolId: string;
   toolName: string;
   argsJson: string;
@@ -214,7 +215,8 @@ interface CompactActivity {
   id: string;
   ts?: number;
   source: "manual" | "auto";
-  status: "pending" | "executed" | "failed";
+  status: "pending" | "executed" | "failed" | "skipped";
+  targetReached?: boolean;
   beforeTokens: number;
   afterTokens?: number;
   beforeMessages: number;
@@ -1547,6 +1549,7 @@ function workActivities(parts: MessagePart[]): WorkActivity[] {
         resource,
         createsNewFile: part.card.createsNewFile,
         status: part.card.status,
+        skipped: part.card.skipped,
         active: isActiveToolCard(part.card)
       }];
     }
@@ -2518,7 +2521,8 @@ function compactActivityToolCard(activity: CompactActivity, expanded: boolean): 
     toolName: "compact_context",
     argsJson: "{}",
     category: "compact",
-    status: activity.status,
+    status: activity.status === "skipped" ? "executed" : activity.status,
+    skipped: activity.status === "skipped",
     resultPreview: activity.status === "pending" ? undefined : compactActivityOutput(activity),
     expanded
   };
@@ -2527,11 +2531,12 @@ function compactActivityToolCard(activity: CompactActivity, expanded: boolean): 
 function compactActivityOutput(activity: CompactActivity): string {
   const source = activity.source === "auto" ? "Automatic compaction" : "Manual compaction";
   const kept = Math.min(activity.keepTail, activity.beforeMessages);
+  if (activity.status === "skipped") return `${source} skipped: no useful reduction is available. The existing context was preserved.`;
   if (activity.status === "pending") {
     return [
       `${source} is summarizing older conversation history.`,
-      `Messages before compaction: ${activity.beforeMessages}. Keeping the latest ${kept} message${kept === 1 ? "" : "s"} verbatim.`,
-      `Token estimate before compaction: ${activity.beforeTokens}.`
+      `Messages before compaction: ${activity.beforeMessages}. Retention is selected by token budget.`,
+      `Last measured token count: ${activity.beforeTokens}.`
     ].join("\n");
   }
   if (activity.status === "failed") {
@@ -2543,10 +2548,10 @@ function compactActivityOutput(activity: CompactActivity): string {
   const afterTokens = activity.afterTokens ?? activity.beforeTokens;
   const pct = Math.round((afterTokens / Math.max(1, activity.beforeTokens)) * 100);
   return [
-    `${source} completed.`,
+    `${source} completed.${activity.targetReached === false ? " The prompt fits, but protected context prevented reaching the preferred target." : ""}`,
     `Messages: ${activity.beforeMessages} -> ${activity.afterMessages ?? activity.beforeMessages}.`,
-    `Tokens: ${activity.beforeTokens} -> ${afterTokens} (${pct}% of the previous estimate).`,
-    `Older turns were summarized; the latest ${kept} message${kept === 1 ? "" : "s"} were kept verbatim.`
+    `Tokens: ${activity.beforeTokens} -> ${afterTokens} (${pct}% of the previous count).`,
+    `Older turns were summarized; ${kept} message${kept === 1 ? "" : "s"} were kept verbatim.`
   ].join("\n");
 }
 
@@ -2660,6 +2665,7 @@ function parseDiffLine(line: string): { kind: "add" | "del" | "neutral"; oldLine
 
 /** Header name for a tool card. */
 function toolCardHeadName(tc: ToolCard): string {
+  if (tc.skipped && tc.toolName === "compact_context") return "Compaction skipped";
   if (tc.status === "pending" && tc.toolName !== "compact_context") return waitingToolLabel(tc.toolName);
   const featureLabel = chatFeature.headerLabel?.(tc, isActiveToolCard(tc));
   if (featureLabel) return featureLabel;
@@ -4486,6 +4492,7 @@ function handleHostMessage(msg: ExtToChat): void {
           status: msg.status,
           beforeTokens: msg.beforeTokens,
           afterTokens: msg.afterTokens,
+          targetReached: msg.targetReached,
           beforeMessages: msg.beforeMessages,
           afterMessages: msg.afterMessages,
           keepTail: msg.keepTail,

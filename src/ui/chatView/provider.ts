@@ -157,6 +157,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       delete transcript.initialMemories;
       delete transcript.memorySources;
       delete transcript.turnSystemPrompt;
+      delete transcript.contextCheckpoint;
+      delete transcript.unconsumedExchangeId;
       payload = {
         ...msg,
         contextMessageCount: contextMessages?.length ?? transcript.messages.length,
@@ -168,6 +170,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             if (toolCall) delete toolCall.fileUndo;
             const visible = { ...message };
             delete visible.responseHistory;
+            delete visible.replayContextChanged;
             return { ...visible, toolCall, attachments: message.attachments?.map(attachment => this.toUiAttachment(attachment)) };
           })
         }

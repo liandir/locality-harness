@@ -86,7 +86,7 @@ export async function withConnectionDraft<T>(settings: ConnectionSettings, apiKe
 
 export function connectionIdentity(endpoint: string, model?: string): string {
   const c = scope.getStore() ?? settingsProvider?.();
-  return JSON.stringify([serverRoot(c?.endpoint ?? endpoint), c?.model ?? model ?? "", (c && "backend" in c ? c.backend : undefined) ?? c?.serverType ?? "llama.cpp", normalizeModelProtocol(c?.protocol)]);
+  return JSON.stringify([serverRoot(c?.endpoint ?? endpoint), c?.model ?? model ?? "", (c && "backend" in c ? c.backend : undefined) ?? c?.serverType ?? "llama.cpp", normalizeModelProtocol(c?.protocol), credentialRevision]);
 }
 
 export function connectionCacheKey(c: ServerConnection): string {

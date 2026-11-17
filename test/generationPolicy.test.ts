@@ -30,6 +30,7 @@ describe.each(["llama.cpp", "vllm"] as const)("%s generation policy", backend =>
   function serve(generation: (body: Record<string, unknown>) => Response) {
     vi.stubGlobal("fetch", vi.fn(async (url: string, init: RequestInit) => {
       const body = JSON.parse(String(init.body ?? "{}"));
+      if (url.endsWith("/input_tokens")) return Response.json({ input_tokens: 12 });
       if (url.endsWith("tokenize")) return Response.json({ count: 12, max_model_len: 32768, tokens: Array.from({ length: 12 }, (_, i) => i) });
       return generation(body);
     }));
@@ -75,7 +76,7 @@ describe.each(["llama.cpp", "vllm"] as const)("%s generation policy", backend =>
   it("reports the accuracy of full-prompt measurement", async () => {
     serve(() => response());
     const result = await withServerConnection(connection, () => measureRequestPrompt(endpoint, request, 4));
-    expect(result.accuracy).toBe(backend === "vllm" ? "exact" : "estimated");
+    expect(result.accuracy).toBe("exact");
     expect(result.tokens).toBeGreaterThan(0);
   });
 });

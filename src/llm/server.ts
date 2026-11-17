@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { safeFetch } from "../network/safeFetch.js";
 import { StreamFailure, serverErrorMessage } from "./completion.js";
 import { connectionFor, connectionCacheKey, connectionHeaders, redactServerError, serverUrl, type ServerConnection } from "./connection.js";
@@ -14,7 +15,7 @@ const modelsCache = new Map<string, { at: number; value: ServerModel[] }>();
 const imageCapabilities = new Map<string, ImageSupport>();
 const imageProbes = new Map<string, Promise<ImageSupport>>();
 const reasoningOffUnsupported = new Set<string>();
-const responseCountingUnsupported = new Set<string>();
+const preparedRequests = new WeakMap<ChatCompletionRequest, { key: string; generation: number; at: number; value: PreparedRequest }>();
 let cacheGeneration = 0;
 const TTL = 60_000;
 const capabilityListeners = new Set<(connection: ServerConnection) => void>();
@@ -35,11 +36,12 @@ function remember<T>(map: Map<string, { at: number; value: T }>, key: string, va
   map.set(key, { at: Date.now(), value });
   return value;
 }
+export function serverCacheRevision(): number { return cacheGeneration; }
+
 export function clearServerCaches(): void {
   cacheGeneration++;
   metadataCache.clear(); modelsCache.clear(); imageCapabilities.clear(); imageProbes.clear();
   reasoningOffUnsupported.clear();
-  responseCountingUnsupported.clear();
 }
 
 async function request(c: ServerConnection, route: string, signal?: AbortSignal, body?: unknown): Promise<Response> {
@@ -58,6 +60,8 @@ export async function serverFailure(res: Response, c: ServerConnection, operatio
   const text = redactServerError(await res.text().catch(() => ""), c);
   const hint = c.protocol !== "chat-completions" && [404, 405, 501].includes(res.status) && /model server|protocol|image support/i.test(operation)
     ? " Responses is unavailable on this server. Select Chat Completions in Protocol or upgrade the server."
+    : c.backend === "vllm" && res.status === 403 && /Scale-out endpoints are disabled/i.test(text)
+      ? " Exact Responses counting requires vLLM --enable-scale-out. Restart the server with that flag, then click Set in Model settings."
     : res.status === 401 || res.status === 403 ? " Check the server API key in Settings."
     : text.includes("thinking_token_budget") && /reasoning.config|reasoning.parser/.test(text)
       ? " Configure vLLM --reasoning-parser/--reasoning-config, or leave the reasoning budget unlimited."
@@ -106,10 +110,12 @@ export async function verifyServerProtocol(endpoint: string, model?: string, sig
     if (!res.ok) throw await serverFailure(res, c, "Protocol check");
     validateProbeResult(await readJson(res), responses);
   };
+  await prepareServerRequest(endpoint, req, signal);
   try { await run(); } catch (error) { if (!allowReasoningFallback(req, c, error)) throw error; await run(); }
 }
 
 export async function fetchServerMetadata(endpoint: string, options: MetadataOptions = {}): Promise<ServerMetadata> {
+  if (options.force) cacheGeneration++;
   const metadata = await discoverServerMetadata(endpoint, options);
   if (!options.probeImages) return metadata;
   const c = await connectionFor(endpoint, options.model);
@@ -274,8 +280,7 @@ export async function tokenize(endpoint: string, text: string, model?: string, o
     return obj.tokens.length;
   } catch (error) {
     options.signal?.throwIfAborted();
-    if (options.exact) throw error;
-    options.onEstimate?.(); return Math.ceil(text.length / 4);
+    throw error;
   }
 }
 
@@ -297,7 +302,7 @@ export function serializeChatRequest(req: ChatCompletionRequest, c: ServerConnec
     throw new StreamFailure(`vLLM does not support reasoning effort "${effort}". Update Reasoning efforts in Settings.`, { cause: "protocol_error" });
   }
   return {
-    model: c.model ?? req.model ?? "local", messages: req.messages.map(({ responseHistory: _history, reasoning_content, ...m }) => ({ ...m,
+    model: c.model ?? req.model ?? "local", messages: req.messages.map(({ responseHistory: _history, replayContextChanged: _prefixChanged, reasoning_content, ...m }) => ({ ...m,
       ...(reasoning_content !== undefined ? { [vllm ? "reasoning" : "reasoning_content"]: reasoning_content } : {}) })),
     stream: true, temperature: req.temperature ?? 0.8, top_k: req.top_k, top_p: req.top_p,
     [vllm ? "max_completion_tokens" : "max_tokens"]: policy?.maxOutputTokens ?? req.max_tokens,
@@ -322,59 +327,81 @@ export function allowReasoningFallback(req: ChatCompletionRequest, c: ServerConn
   return true;
 }
 
-export async function countServerPrompt(endpoint: string, req: ChatCompletionRequest, signal?: AbortSignal, checkLimit = true): Promise<number | undefined> {
+/** Immutable wire payload shared by counting and generation. No estimated counts. */
+export interface PreparedRequest {
+  readonly connection: ServerConnection;
+  readonly body: string;
+  readonly inputTokens: number;
+  readonly contextSize?: number;
+}
+
+export async function prepareServerRequest(endpoint: string, req: ChatCompletionRequest, signal?: AbortSignal): Promise<PreparedRequest> {
   signal?.throwIfAborted();
   const c = await resolvedConnection(endpoint, req.model, signal);
-  if (c.protocol !== "chat-completions") return countResponsesPrompt(c, req, signal, checkLimit);
-  if (c.backend !== "vllm") return undefined;
-  const body = serializeRequest(req, c);
-  const images = req.messages.some(m => Array.isArray(m.content) && m.content.some(p => p.type === "image_url"));
-  const template = body.chat_template_kwargs as Record<string, unknown> | undefined;
-  const kwargs = { ...template,
-    ...(body.reasoning_effort !== undefined && template?.enable_thinking === undefined ? { enable_thinking: body.reasoning_effort !== "none" } : {}),
-    ...(body.reasoning_effort !== undefined ? { reasoning_effort: body.reasoning_effort } : {}),
-    ...(body.tools ? { tool_choice: body.tool_choice } : {}) };
-  let result: { count: number; max_model_len: number };
+  const body = JSON.stringify(serializeRequest(req, c));
+  const key = createHash("sha256").update(connectionCacheKey(c)).update(body).digest("hex");
+  const previous = preparedRequests.get(req);
+  if (previous?.key === key && previous.generation === cacheGeneration && Date.now() - previous.at < TTL) return previous.value;
   try {
-    result = await vllmTokenize(c, { model: body.model, messages: body.messages, tools: body.tools,
-      chat_template_kwargs: kwargs, add_generation_prompt: true, add_special_tokens: false }, signal, images);
+    const measured = await countSerializedPrompt(c, JSON.parse(body) as Record<string, unknown>, signal);
+    signal?.throwIfAborted();
+    const value: PreparedRequest = Object.freeze({ connection: Object.freeze({ ...c }), body,
+      inputTokens: measured.count, contextSize: measured.contextSize });
+    preparedRequests.set(req, { key, generation: cacheGeneration, at: Date.now(), value });
+    return value;
   } catch (error) {
     signal?.throwIfAborted();
     if (!allowReasoningFallback(req, c, error)) throw error;
-    return countServerPrompt(endpoint, req, signal, checkLimit);
+    return prepareServerRequest(endpoint, req, signal);
   }
-  const contextSize = Math.min(result.max_model_len, metadataCache.get(connectionCacheKey(c))?.value.contextSize ?? result.max_model_len);
-  if (!result.count) throw new StreamFailure("vLLM returned an empty chat prompt.", { cause: "protocol_error" });
-  if (checkLimit && result.count + outputTokenReserve(contextSize, req.generation?.maxOutputTokens ?? req.max_tokens) > contextSize) {
-    throw new StreamFailure(`The prompt and output budget exceed the server context of ${contextSize} tokens. Compact context or increase vLLM --max-model-len.`, { cause: "protocol_error" });
-  }
-  return result.count;
 }
 
-async function countResponsesPrompt(c: ServerConnection, req: ChatCompletionRequest, signal?: AbortSignal, checkLimit = true): Promise<number | undefined> {
-  const key = connectionCacheKey(c);
-  const body = serializeRequest(req, c);
-  if (responseCountingUnsupported.has(key)) return undefined;
-  const res = await request(c, c.backend === "vllm" ? "v1/responses/render" : "v1/responses/input_tokens", signal, { ...body, stream: false });
+export async function countServerPrompt(endpoint: string, req: ChatCompletionRequest, signal?: AbortSignal, checkLimit = true): Promise<number> {
+  const prepared = await prepareServerRequest(endpoint, req, signal);
+  checkPreparedLimit(prepared, req, checkLimit);
+  return prepared.inputTokens;
+}
+
+export function checkPreparedLimit(prepared: PreparedRequest, req: ChatCompletionRequest, checkLimit = true): void {
+  const limit = prepared.contextSize;
+  if (checkLimit && limit && prepared.inputTokens + outputTokenReserve(limit, req.generation?.maxOutputTokens ?? req.max_tokens) > limit) {
+    throw new StreamFailure(`The prompt and output budget exceed the server context of ${limit} tokens. Compact context or increase the server context window.`, { cause: "protocol_error" });
+  }
+}
+
+async function countSerializedPrompt(c: ServerConnection, body: Record<string, unknown>, signal?: AbortSignal): Promise<{ count: number; contextSize?: number }> {
+  const responses = c.protocol !== "chat-completions";
+  const limit = metadataCache.get(connectionCacheKey(c))?.value.contextSize;
+  if (!responses && c.backend === "vllm") {
+    const template = body.chat_template_kwargs as Record<string, unknown> | undefined;
+    const kwargs = { ...template,
+      ...(body.reasoning_effort !== undefined && template?.enable_thinking === undefined ? { enable_thinking: body.reasoning_effort !== "none" } : {}),
+      ...(body.reasoning_effort !== undefined ? { reasoning_effort: body.reasoning_effort } : {}),
+      ...(body.tools ? { tool_choice: body.tool_choice } : {}) };
+    const result = await vllmTokenize(c, { model: body.model, messages: body.messages, tools: body.tools,
+      chat_template_kwargs: kwargs, add_generation_prompt: true, add_special_tokens: false }, signal, hasImages(body));
+    if (!result.count) throw new StreamFailure("vLLM returned an empty chat prompt.", { cause: "protocol_error" });
+    return { count: result.count, contextSize: Math.min(result.max_model_len, limit ?? result.max_model_len) };
+  }
+  const route = c.backend === "vllm" ? "v1/responses/render"
+    : responses ? "v1/responses/input_tokens" : "v1/chat/completions/input_tokens";
+  const res = await request(c, route, signal, { ...body, stream: false });
   if ([404, 405, 501].includes(res.status)) {
-    if (responseCountingUnsupported.size >= 128) responseCountingUnsupported.clear();
-    responseCountingUnsupported.add(key);
-    return undefined;
+    throw new StreamFailure(`Exact prompt counting is unavailable at /${route}. Upgrade the model server or select a protocol with exact counting support in Model settings.`, { cause: "protocol_error", httpStatus: res.status });
   }
   if (!res.ok) {
-    const error = await serverFailure(res, c, "Responses token counting");
+    const error = await serverFailure(res, c, responses ? "Responses token counting" : "Chat Completions token counting");
     if (isUnsupportedImage(res.status, error.message)) { setImageSupport(c, "unsupported"); throw new VisionUnsupportedError(error.message); }
-    if (allowReasoningFallback(req, c, error)) return countResponsesPrompt(c, req, signal, checkLimit);
     throw error;
   }
   const value = await readJson<{ input_tokens?: unknown; token_ids?: unknown[] }>(res);
   const count = c.backend === "vllm" && Array.isArray(value?.token_ids) && value.token_ids.every(token => Number.isSafeInteger(token) && Number(token) >= 0)
     ? value.token_ids.length : c.backend !== "vllm" ? value?.input_tokens : undefined;
-  if (!positive(count)) throw new StreamFailure("The server returned an invalid Responses token count.", { cause: "protocol_error" });
-  if (req.messages.some(message => Array.isArray(message.content) && message.content.some(part => part.type === "image_url"))) setImageSupport(c, "supported");
-  const limit = metadataCache.get(key)?.value.contextSize;
-  if (checkLimit && limit && count + outputTokenReserve(limit, req.generation?.maxOutputTokens ?? req.max_tokens) > limit) {
-    throw new StreamFailure("The prompt and output budget exceed the server context. Compact context or increase the server context window.", { cause: "protocol_error" });
-  }
-  return count;
+  if (!positive(count)) throw new StreamFailure("The server returned an invalid prompt token count.", { cause: "protocol_error" });
+  if (hasImages(body)) setImageSupport(c, "supported");
+  return { count, contextSize: limit };
+}
+
+function hasImages(body: Record<string, unknown>): boolean {
+  return JSON.stringify(body.input ?? body.messages).includes('"image_url"');
 }

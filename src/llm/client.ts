@@ -1,7 +1,7 @@
 import { GenerationLengthError, StreamFailure, serverErrorMessage, type CompletionDiagnostics } from "./completion.js";
 export { GenerationLengthError, StreamFailure } from "./completion.js";
 import { connectionHeaders, redactServerError, serverUrl } from "./connection.js";
-import { allowReasoningFallback, countServerPrompt, isUnsupportedImage, resolvedConnection, serializeRequest, serverFailure, setImageSupport, VisionUnsupportedError } from "./server.js";
+import { allowReasoningFallback, prepareServerRequest, checkPreparedLimit, isUnsupportedImage, resolvedConnection, serverFailure, setImageSupport, VisionUnsupportedError } from "./server.js";
 export { fetchServerMetadata, fetchServerModels, fetchServerContextSize, tokenize, VisionUnsupportedError } from "./server.js";
 export type { ServerMetadata, ServerModel } from "./serverTypes.js";
 import { beginForeground } from "./activity.js";
@@ -10,7 +10,7 @@ import { progressSignature, writeProgressFromJsonToolBody } from "./toolProgress
 import type { OpenAiTool } from "../tools/toolDefinitions.js";
 import type { GenerationPolicy } from "./requestPolicy.js";
 import { streamResponses } from "./responses.js";
-import type { ResponseHistory } from "./responseHistory.js";
+import { responseIsCommentary, type ResponseHistory } from "./responseHistory.js";
 
 export interface LlmToolCall {
   id: string;
@@ -28,6 +28,7 @@ export interface LlmMessage {
   content: LlmContent;
   reasoning_content?: string;
   responseHistory?: ResponseHistory;
+  replayContextChanged?: boolean;
   name?: string;
   tool_call_id?: string;
   tool_calls?: LlmToolCall[];
@@ -140,13 +141,14 @@ export async function* streamChat(
 async function* streamChatRequest(
   endpoint: string, req: ChatCompletionRequest, signal: AbortSignal
 ): AsyncGenerator<LlmStreamChunk, void, void> {
-  const connection = await resolvedConnection(endpoint, req.model, signal);
-  await countServerPrompt(endpoint, req, signal);
+  const prepared = await prepareServerRequest(endpoint, req, signal);
+  checkPreparedLimit(prepared, req);
+  const connection = prepared.connection;
   const responses = connection.protocol !== "chat-completions";
   const res = await safeFetch(connection.endpoint, serverUrl(connection.endpoint, responses ? "v1/responses" : "v1/chat/completions"), {
     method: "POST",
     headers: { ...connectionHeaders(connection), "Content-Type": "application/json", Accept: "text/event-stream" },
-    body: JSON.stringify(serializeRequest(req, connection)), signal
+    body: prepared.body, signal
   });
   if (!res.ok || !res.body) {
     const text = redactServerError(await res.clone().text().catch(() => ""), connection);
@@ -318,6 +320,10 @@ export async function complete(
   try {
     for await (const chunk of streamChat(endpoint, req, signal)) {
       if (chunk.kind === "text") out += chunk.text;
+      if (req.generation?.task === "compaction" && ((chunk.kind === "toolCall")
+        || (chunk.kind === "finish" && (chunk.reason !== "stop" || responseIsCommentary(chunk.responseHistory))))) {
+        throw new StreamFailure("Summary generation did not finish with a complete final answer.", { cause: "protocol_error" });
+      }
     }
   } catch (error) {
     // Tiny auxiliary completions intentionally use a hard output cap. Their
