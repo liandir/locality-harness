@@ -3812,11 +3812,11 @@ function startQueuedMessageEdit(id: string): void {
   state.editingQueuedMessageId = id;
   state.queuedMessageDraft = message.text;
   render();
-  requestAnimationFrame(() => {
-    const input = root.querySelector("[data-queued-edit-input]") as HTMLTextAreaElement | null;
-    input?.focus();
-    input?.setSelectionRange(input.value.length, input.value.length);
-  });
+  // render() mounts the editor synchronously. A later caret move could overwrite
+  // a selection made immediately after opening it, turning replacement into append.
+  const input = root.querySelector("[data-queued-edit-input]") as HTMLTextAreaElement | null;
+  input?.focus();
+  input?.setSelectionRange(input.value.length, input.value.length);
 }
 
 function cancelQueuedMessageEdit(): void {
