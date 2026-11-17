@@ -26,7 +26,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   let connectionSettings = readSettings();
   context.subscriptions.push(onSettingsChange(() => {
     const current = readSettings();
-    if (current.endpoint !== connectionSettings.endpoint || current.model !== connectionSettings.model) clearServerCaches();
+    if (current.endpoint !== connectionSettings.endpoint || current.model !== connectionSettings.model || current.protocol !== connectionSettings.protocol) clearServerCaches();
     connectionSettings = current;
   }));
   let ws = currentWorkspaceRoot();
@@ -68,7 +68,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     memory,
     onServerCapabilitiesChange(connection => {
       const current = readSettings();
-      if (connection.endpoint === current.endpoint && connection.model === current.model && connection.serverType === current.serverType) {
+      if (connection.endpoint === current.endpoint && connection.model === current.model && connection.serverType === current.serverType && connection.protocol === current.protocol) {
         sideProvider.refreshServerMetadata(); chatProvider.pushSettings();
       }
     }),

@@ -5,6 +5,7 @@ import type { ServerMetadata, ServerModel, ImageSupport } from "./serverTypes.js
 import type { ChatCompletionRequest } from "./client.js";
 import { imageProbeDataUrl } from "./imageProbe.js";
 import { outputTokenReserve } from "./requestPolicy.js";
+import { serializeResponses } from "./responses.js";
 export { outputTokenReserve } from "./requestPolicy.js";
 
 export type { ServerMetadata, ServerModel } from "./serverTypes.js";
@@ -13,6 +14,7 @@ const modelsCache = new Map<string, { at: number; value: ServerModel[] }>();
 const imageCapabilities = new Map<string, ImageSupport>();
 const imageProbes = new Map<string, Promise<ImageSupport>>();
 const reasoningOffUnsupported = new Set<string>();
+const responseCountingUnsupported = new Set<string>();
 let cacheGeneration = 0;
 const TTL = 60_000;
 const capabilityListeners = new Set<(connection: ServerConnection) => void>();
@@ -37,6 +39,7 @@ export function clearServerCaches(): void {
   cacheGeneration++;
   metadataCache.clear(); modelsCache.clear(); imageCapabilities.clear(); imageProbes.clear();
   reasoningOffUnsupported.clear();
+  responseCountingUnsupported.clear();
 }
 
 async function request(c: ServerConnection, route: string, signal?: AbortSignal, body?: unknown): Promise<Response> {
@@ -53,7 +56,9 @@ async function readJson<T>(res: Response): Promise<T> {
 }
 export async function serverFailure(res: Response, c: ServerConnection, operation: string): Promise<StreamFailure> {
   const text = redactServerError(await res.text().catch(() => ""), c);
-  const hint = res.status === 401 || res.status === 403 ? " Check the server API key in Settings."
+  const hint = c.protocol !== "chat-completions" && [404, 405, 501].includes(res.status) && /model server|protocol|image support/i.test(operation)
+    ? " Responses is unavailable on this server. Select Chat Completions in Protocol or upgrade the server."
+    : res.status === 401 || res.status === 403 ? " Check the server API key in Settings."
     : text.includes("thinking_token_budget") && /reasoning.config|reasoning.parser/.test(text)
       ? " Configure vLLM --reasoning-parser/--reasoning-config, or leave the reasoning budget unlimited."
       : /enable-auto-tool-choice|tool.call.parser/i.test(text) ? " Enable vLLM automatic tool choice and the model's tool parser." : "";
@@ -81,6 +86,28 @@ export async function fetchServerModels(endpoint: string, force = false, signal?
 }
 
 interface MetadataOptions { model?: string; force?: boolean; signal?: AbortSignal; probeImages?: boolean }
+
+function validateProbeResult(result: { status?: string; incomplete_details?: { reason?: string }; output?: unknown[]; choices?: { message?: { role?: unknown }; finish_reason?: unknown }[] }, responses: boolean): void {
+  const choice = result?.choices?.length === 1 ? result.choices[0] : undefined;
+  const valid = responses ? Array.isArray(result?.output) && (result.status === "completed"
+    || (result.status === "incomplete" && result.incomplete_details?.reason === "max_output_tokens"))
+    : choice?.message?.role === "assistant" && ["stop", "length"].includes(String(choice.finish_reason));
+  if (!valid) throw new StreamFailure("The protocol check returned an incomplete or invalid response.", { cause: "protocol_error" });
+}
+
+/** Explicit Set checks generation, even when discovery/tokenization succeeds. */
+export async function verifyServerProtocol(endpoint: string, model?: string, signal?: AbortSignal): Promise<void> {
+  const c = await resolvedConnection(endpoint, model, signal);
+  const req: ChatCompletionRequest = { model, messages: [{ role: "user", content: "Hi" }], temperature: 0,
+    generation: { task: "title", maxOutputTokens: 1, reasoning: { mode: "prefer-off" } } };
+  const run = async (): Promise<void> => {
+    const responses = c.protocol !== "chat-completions";
+    const res = await request(c, responses ? "v1/responses" : "v1/chat/completions", signal, { ...serializeRequest(req, c), stream: false });
+    if (!res.ok) throw await serverFailure(res, c, "Protocol check");
+    validateProbeResult(await readJson(res), responses);
+  };
+  try { await run(); } catch (error) { if (!allowReasoningFallback(req, c, error)) throw error; await run(); }
+}
 
 export async function fetchServerMetadata(endpoint: string, options: MetadataOptions = {}): Promise<ServerMetadata> {
   const metadata = await discoverServerMetadata(endpoint, options);
@@ -155,12 +182,15 @@ async function probeImageSupport(c: ServerConnection, model: string, options: Me
   if (pending) return pending;
   const generation = cacheGeneration;
   const probe = (async (): Promise<ImageSupport> => {
-    const messages = [{ role: "user", content: [
+    const messages: ChatCompletionRequest["messages"] = [{ role: "user", content: [
       { type: "image_url", image_url: { url: imageProbeDataUrl() } },
       { type: "text", text: "Hi" }
     ] }];
     const vllm = c.backend === "vllm";
-    const res = await request(c, vllm ? "tokenize" : "v1/chat/completions", options.signal, {
+    const responses = c.protocol !== "chat-completions";
+    const res = await request(c, responses ? "v1/responses" : vllm ? "tokenize" : "v1/chat/completions", options.signal, responses
+      ? { ...serializeRequest({ model, messages, temperature: 0, max_tokens: 1 }, c), stream: false }
+      : {
       model: c.model ?? model, messages,
       ...(vllm ? { add_generation_prompt: true, add_special_tokens: false }
         : { stream: false, max_tokens: 1, temperature: 0, chat_template_kwargs: { enable_thinking: false } })
@@ -171,15 +201,11 @@ async function probeImageSupport(c: ServerConnection, model: string, options: Me
       if (!isUnsupportedImage(res.status, failure.message)) throw failure;
       support = "unsupported";
     } else {
-      if (vllm) {
+      if (vllm && !responses) {
         const result = await readVllmTokens(res);
         if (!result.count) throw new StreamFailure("The image support check returned an empty prompt.", { cause: "protocol_error" });
       } else {
-        const result = await readJson<{ choices?: { message?: { role?: unknown }; finish_reason?: unknown }[] }>(res);
-        const choice = Array.isArray(result?.choices) && result.choices.length === 1 ? result.choices[0] : undefined;
-        if (choice?.message?.role !== "assistant" || !["stop", "length"].includes(String(choice.finish_reason))) {
-          throw new StreamFailure("The image support check returned an incomplete or invalid response.", { cause: "protocol_error" });
-        }
+        validateProbeResult(await readJson(res), responses);
       }
       support = "supported";
     }
@@ -254,6 +280,11 @@ export async function tokenize(endpoint: string, text: string, model?: string, o
 }
 
 export function serializeRequest(req: ChatCompletionRequest, c: ServerConnection): Record<string, unknown> {
+  const chat = serializeChatRequest(req, c);
+  return c.protocol === "chat-completions" ? chat : serializeResponses(req, c, chat);
+}
+
+export function serializeChatRequest(req: ChatCompletionRequest, c: ServerConnection): Record<string, unknown> {
   const vllm = c.backend === "vllm";
   const policy = req.generation;
   const reasoning = policy?.reasoning;
@@ -266,7 +297,8 @@ export function serializeRequest(req: ChatCompletionRequest, c: ServerConnection
     throw new StreamFailure(`vLLM does not support reasoning effort "${effort}". Update Reasoning efforts in Settings.`, { cause: "protocol_error" });
   }
   return {
-    model: c.model ?? req.model ?? "local", messages: vllm ? req.messages.map(({ reasoning_content, ...m }) => ({ ...m, ...(reasoning_content !== undefined ? { reasoning: reasoning_content } : {}) })) : req.messages,
+    model: c.model ?? req.model ?? "local", messages: req.messages.map(({ responseHistory: _history, reasoning_content, ...m }) => ({ ...m,
+      ...(reasoning_content !== undefined ? { [vllm ? "reasoning" : "reasoning_content"]: reasoning_content } : {}) })),
     stream: true, temperature: req.temperature ?? 0.8, top_k: req.top_k, top_p: req.top_p,
     [vllm ? "max_completion_tokens" : "max_tokens"]: policy?.maxOutputTokens ?? req.max_tokens,
     ...(vllm ? { thinking_token_budget: !disabled && !preferOff && (budget ?? -1) > 0 ? budget : undefined }
@@ -293,6 +325,7 @@ export function allowReasoningFallback(req: ChatCompletionRequest, c: ServerConn
 export async function countServerPrompt(endpoint: string, req: ChatCompletionRequest, signal?: AbortSignal, checkLimit = true): Promise<number | undefined> {
   signal?.throwIfAborted();
   const c = await resolvedConnection(endpoint, req.model, signal);
+  if (c.protocol !== "chat-completions") return countResponsesPrompt(c, req, signal, checkLimit);
   if (c.backend !== "vllm") return undefined;
   const body = serializeRequest(req, c);
   const images = req.messages.some(m => Array.isArray(m.content) && m.content.some(p => p.type === "image_url"));
@@ -316,4 +349,32 @@ export async function countServerPrompt(endpoint: string, req: ChatCompletionReq
     throw new StreamFailure(`The prompt and output budget exceed the server context of ${contextSize} tokens. Compact context or increase vLLM --max-model-len.`, { cause: "protocol_error" });
   }
   return result.count;
+}
+
+async function countResponsesPrompt(c: ServerConnection, req: ChatCompletionRequest, signal?: AbortSignal, checkLimit = true): Promise<number | undefined> {
+  const key = connectionCacheKey(c);
+  const body = serializeRequest(req, c);
+  if (responseCountingUnsupported.has(key)) return undefined;
+  const res = await request(c, c.backend === "vllm" ? "v1/responses/render" : "v1/responses/input_tokens", signal, { ...body, stream: false });
+  if ([404, 405, 501].includes(res.status)) {
+    if (responseCountingUnsupported.size >= 128) responseCountingUnsupported.clear();
+    responseCountingUnsupported.add(key);
+    return undefined;
+  }
+  if (!res.ok) {
+    const error = await serverFailure(res, c, "Responses token counting");
+    if (isUnsupportedImage(res.status, error.message)) { setImageSupport(c, "unsupported"); throw new VisionUnsupportedError(error.message); }
+    if (allowReasoningFallback(req, c, error)) return countResponsesPrompt(c, req, signal, checkLimit);
+    throw error;
+  }
+  const value = await readJson<{ input_tokens?: unknown; token_ids?: unknown[] }>(res);
+  const count = c.backend === "vllm" && Array.isArray(value?.token_ids) && value.token_ids.every(token => Number.isSafeInteger(token) && Number(token) >= 0)
+    ? value.token_ids.length : c.backend !== "vllm" ? value?.input_tokens : undefined;
+  if (!positive(count)) throw new StreamFailure("The server returned an invalid Responses token count.", { cause: "protocol_error" });
+  if (req.messages.some(message => Array.isArray(message.content) && message.content.some(part => part.type === "image_url"))) setImageSupport(c, "supported");
+  const limit = metadataCache.get(key)?.value.contextSize;
+  if (checkLimit && limit && count + outputTokenReserve(limit, req.generation?.maxOutputTokens ?? req.max_tokens) > limit) {
+    throw new StreamFailure("The prompt and output budget exceed the server context. Compact context or increase the server context window.", { cause: "protocol_error" });
+  }
+  return count;
 }

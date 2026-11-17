@@ -1,4 +1,5 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { configureServerConnections } from "../src/llm/connection.js";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChatRecord, ChatMessage } from "../src/chat/storage.js";
 import { GenerationLengthError } from "../src/llm/completion.js";
 
@@ -233,11 +234,16 @@ describe("compaction recovery", () => {
 
   it("summarizes oversized tool arguments and their results as an exchange", async () => {
     const { compact } = await import("../src/chat/compactor.js");
+    const args = JSON.stringify({ path: "a.ts", content: "X".repeat(30_000) + "LAST_SENTINEL" });
     const rec = record([msg("user", "write the file"), {
-      ...msg("tool", "written"), toolCall: { name: "write_file", argsJson: JSON.stringify({ path: "a.ts", content: "X".repeat(30_000) + "LAST_SENTINEL" }) }
+      ...msg("tool", "written"), toolCall: { id: "write", name: "write_file", argsJson: args }
+    }, {
+      ...msg("assistant", ""), events: [{ kind: "toolCall", name: "write_file", id: "write", argsJson: args }],
+      responseHistory: { source: "local-source", output: [{ type: "function_call", id: "fc_write", call_id: "write", name: "write_file", arguments: args }] }
     }]);
     await compact("http://arguments", rec, new AbortController().signal, cfg);
-    expect(rec.contextMessages!.every(message => !message.toolCall)).toBe(true);
+    expect(rec.contextMessages!.every(message => !message.toolCall && !message.responseHistory)).toBe(true);
+    expect(rec.messages.at(-1)?.responseHistory?.output[0].type).toBe("function_call");
     expect(JSON.stringify(mocks.complete.mock.calls)).toContain("LAST_SENTINEL");
     expect(rec.contextMessages!.some(message => message.content === "write the file")).toBe(true);
   });
@@ -277,3 +283,7 @@ describe("compaction recovery", () => {
     expect(rec.contextMessages).toBeUndefined();
   });
 });
+
+// These fixtures exercise the retained Chat Completions contract.
+beforeEach(() => configureServerConnections(() => ({ endpoint: "http://127.0.0.1:8080", serverType: "llama.cpp", protocol: "chat-completions" })));
+afterEach(() => configureServerConnections());

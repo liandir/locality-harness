@@ -4,7 +4,7 @@ import type { SideToExt } from "../src/ui/messaging.js";
 
 const mocks = vi.hoisted(() => ({
   settings: { endpoint: "http://127.0.0.1:8000/v1", model: "qwen", serverType: "auto" } as Record<string, unknown>,
-  metadata: vi.fn(), write: vi.fn()
+  metadata: vi.fn(), write: vi.fn(), verify: vi.fn()
 }));
 vi.mock("vscode", () => ({ Uri: { joinPath: (...parts: string[]) => parts.join("/") } }));
 vi.mock("../src/config/settings.js", () => ({
@@ -14,11 +14,15 @@ vi.mock("../src/config/settings.js", () => ({
 vi.mock("../src/llm/client.js", () => ({
   fetchServerModels: async () => [{ id: "qwen" }], fetchServerMetadata: mocks.metadata
 }));
+vi.mock("../src/llm/server.js", async importOriginal => ({
+  ...await importOriginal<typeof import("../src/llm/server.js")>(), verifyServerProtocol: mocks.verify
+}));
 import { SideViewProvider } from "../src/ui/sideView/provider.js";
 
 const metadata = { backend: "vllm", modelAlias: "qwen", contextSize: 8192, supportsVision: true, imageSupport: "supported" };
 beforeEach(() => {
   mocks.settings = { endpoint: "http://127.0.0.1:8000/v1", model: "qwen", serverType: "auto" };
+  mocks.verify.mockReset().mockResolvedValue(undefined);
   mocks.metadata.mockReset().mockResolvedValue(metadata);
   mocks.write.mockReset().mockImplementation(async (key: string, value: unknown) => { mocks.settings[key] = value; });
 });
@@ -35,6 +39,43 @@ function mount(entries = new Map<string, string>()) {
 }
 
 describe("host-owned connection state", () => {
+  it("waits for a pending protocol save before checking the connection", async () => {
+    let finish!: () => void;
+    mocks.write.mockImplementationOnce(async (key, value) => {
+      await new Promise<void>(resolve => { finish = resolve; });
+      mocks.settings[key] = value;
+    });
+    const view = mount();
+    const saving = view.receive({ type: "saveSetting", key: "protocol", value: "chat-completions" });
+    const checking = view.receive({ type: "validateEndpoint", url: "http://127.0.0.1:8000/v1", protocol: "chat-completions", requestId: 7 });
+    await vi.waitFor(() => expect(finish).toBeTypeOf("function"));
+    expect(mocks.metadata).not.toHaveBeenCalled();
+    finish(); await Promise.all([saving, checking]);
+    expect(mocks.verify).toHaveBeenCalledOnce();
+    expect(view.postMessage).toHaveBeenCalledWith(expect.objectContaining({ requestId: 7, protocol: "chat-completions", ok: true }));
+  });
+
+  it("invalidates pending validation when protocol changes", async () => {
+    let finish!: (value: typeof metadata) => void;
+    mocks.metadata.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    const view = mount();
+    const pending = view.receive({ type: "validateEndpoint", url: "http://127.0.0.1:8000/v1", protocol: "responses", requestId: 8 });
+    await vi.waitFor(() => expect(finish).toBeTypeOf("function"));
+    await view.receive({ type: "saveSetting", key: "protocol", value: "chat-completions" });
+    finish(metadata); await pending;
+    expect(view.postMessage.mock.calls.some(([message]) => message.requestId === 8)).toBe(false);
+    expect(mocks.write).not.toHaveBeenCalledWith("endpoint", expect.anything());
+  });
+
+  it("does not save a connection when its selected generation protocol fails", async () => {
+    mocks.verify.mockRejectedValueOnce(new Error("Responses is unavailable. Select Chat Completions in Protocol."));
+    const view = mount();
+    await view.receive({ type: "validateEndpoint", url: "http://127.0.0.1:8000/v1", protocol: "responses", apiKey: "key", requestId: 9 });
+    expect(mocks.write).not.toHaveBeenCalled();
+    expect(view.entries.size).toBe(0);
+    expect(view.postMessage).toHaveBeenCalledWith(expect.objectContaining({ requestId: 9, ok: false, error: expect.stringContaining("Select Chat Completions") }));
+  });
+
   it("rejects stale validation before saving settings or credentials", async () => {
     let finish!: (value: typeof metadata) => void;
     mocks.metadata.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
@@ -82,6 +123,6 @@ describe("host-owned connection state", () => {
     await view.receive({ type: "validateEndpoint", url: "http://127.0.0.1:8001", apiKey: "wrong", requestId: 4 });
     expect(mocks.write).not.toHaveBeenCalled();
     expect(view.entries.size).toBe(0);
-    expect(view.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "endpointValidation", requestId: 4, ok: false, error: expect.stringContaining("HTTP 401") }));
+    expect(view.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "endpointValidation", protocol: "responses", requestId: 4, ok: false, error: expect.stringContaining("HTTP 401") }));
   });
 });

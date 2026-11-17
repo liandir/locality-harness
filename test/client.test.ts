@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { configureServerConnections } from "../src/llm/connection.js";
+import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 import {
   complete,
   GenerationLengthError,
@@ -601,3 +602,7 @@ describe("server vision capabilities", () => {
     expect((await fetchServerMetadata(endpoint, { model: "vision-a" })).supportsVision).toBe(true);
   });
 });
+
+// These fixtures exercise the retained Chat Completions contract.
+beforeEach(() => configureServerConnections(() => ({ endpoint: "http://127.0.0.1:8080", serverType: "llama.cpp", protocol: "chat-completions" })));
+afterEach(() => configureServerConnections());

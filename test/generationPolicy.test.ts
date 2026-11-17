@@ -13,7 +13,7 @@ beforeEach(() => clearServerCaches());
 afterEach(() => vi.unstubAllGlobals());
 
 describe.each(["llama.cpp", "vllm"] as const)("%s generation policy", backend => {
-  const connection = { endpoint, model: request.model, serverType: backend, backend };
+  const connection = { protocol: "chat-completions" as const, endpoint, model: request.model, serverType: backend, backend };
   const outputField = backend === "vllm" ? "max_completion_tokens" : "max_tokens";
 
   it("translates the same compaction intent and preserves normal reasoning choices", () => {
@@ -90,7 +90,7 @@ it("handles a model rejecting reasoning-off during vLLM prompt measurement", asy
     }
     return Response.json({ count: 10, tokens: Array.from({ length: 10 }, (_, i) => i), max_model_len: 8192 });
   }));
-  const measured = await withServerConnection({ endpoint, model: request.model, serverType: "vllm" }, () => measureRequestPrompt(endpoint, request, 4));
+  const measured = await withServerConnection({ protocol: "chat-completions", endpoint, model: request.model, serverType: "vllm" }, () => measureRequestPrompt(endpoint, request, 4));
   expect(measured).toEqual({ tokens: 10, accuracy: "exact" });
   expect(attempts).toBe(1);
 });

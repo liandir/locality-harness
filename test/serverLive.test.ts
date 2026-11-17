@@ -13,13 +13,13 @@ const targets = [
   { name: "VISION", model: "Qwen/Qwen2.5-VL-3B-Instruct", backend: "vllm" as const },
   { name: "LLAMA", model: "local", backend: "llama.cpp" as const }
 ];
-for (const target of targets) {
+for (const target of targets) for (const protocol of ["responses", "chat-completions"] as const) {
   const endpoint = process.env[`LOCALITY_LIVE_${target.name}_ENDPOINT`];
-  describe.skipIf(!endpoint)(`live ${target.name} server`, () => {
+  describe.skipIf(!endpoint)(`live ${target.name} server (${protocol})`, () => {
     it("compacts completed work with the shared generation policy", async () => {
       const url = endpoint!;
       const model = process.env[`LOCALITY_LIVE_${target.name}_MODEL`] ?? target.model;
-      await withConnectionDraft({ endpoint: url, model, serverType: "auto" }, process.env[`LOCALITY_LIVE_${target.name}_API_KEY`], async () => {
+      await withConnectionDraft({ endpoint: url, model, protocol, serverType: "auto" }, process.env[`LOCALITY_LIVE_${target.name}_API_KEY`], async () => {
         const metadata = await fetchServerMetadata(url, { model, force: true });
         const rec: ChatRecord = { id: "live-compact", title: "Compaction", workspaceRoot: "/workspace", createdAt: 1, updatedAt: 1,
           toolCallingMode: "native", mode: "act", reasoningEffort: "default", totalTokens: 0,
@@ -38,7 +38,7 @@ for (const target of targets) {
       const url = endpoint!;
       const model = process.env[`LOCALITY_LIVE_${target.name}_MODEL`] ?? target.model;
       const key = process.env[`LOCALITY_LIVE_${target.name}_API_KEY`];
-      await withConnectionDraft({ endpoint: url, model, serverType: "auto" }, key, async () => {
+      await withConnectionDraft({ endpoint: url, model, protocol, serverType: "auto" }, key, async () => {
         const metadata = await fetchServerMetadata(url, { model, force: true, probeImages: true });
         expect(metadata.backend).toBe(target.backend);
         expect(metadata.contextSize).toBeGreaterThan(0);
@@ -59,15 +59,17 @@ for (const target of targets) {
           expect((await fetchServerMetadata(url, { model })).imageSupport).toBe("supported");
         } else if (target.name === "QWEN") {
           const chunks: LlmStreamChunk[] = [];
-          for await (const chunk of streamChat(url, { model, temperature: 0, max_tokens: 512, thinking_budget_tokens: 32,
+          for await (const chunk of streamChat(url, { model, temperature: 0, max_tokens: 512, ...(protocol === "chat-completions" ? { thinking_budget_tokens: 32 } : { reasoning_effort: "low" }),
             tools: [{ type: "function", function: { name: "read_status", description: "Read the current status", parameters: { type: "object", properties: {} } } }],
             messages: [{ role: "user", content: "Use read_status to check the current status." }] }, signal)) chunks.push(chunk);
           const tool = chunks.find(c => c.kind === "toolCall");
           expect(tool?.kind).toBe("toolCall");
           if (tool?.kind !== "toolCall") throw new Error("Model did not call the tool");
           expect(await complete(url, { model, purpose: "auxiliary", max_tokens: 256, messages: [
-            { role: "user", content: "Read the status." },
-            { role: "assistant", content: "", tool_calls: [{ id: tool.id!, type: "function", function: { name: tool.name, arguments: tool.argsJson } }] },
+            { role: "user", content: "Use read_status to check the current status." },
+            { role: "assistant", content: chunks.flatMap(chunk => chunk.kind === "text" ? [chunk.text] : []).join(""),
+              responseHistory: chunks.find(chunk => chunk.kind === "finish")?.responseHistory,
+              reasoning_content: chunks.flatMap(chunk => chunk.kind === "thought" ? [chunk.text] : []).join(""), tool_calls: [{ id: tool.id!, type: "function", function: { name: tool.name, arguments: tool.argsJson } }] },
             { role: "tool", content: "All checks passed.", tool_call_id: tool.id }
           ] }, signal)).toBeTruthy();
         } else {

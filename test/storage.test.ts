@@ -18,6 +18,24 @@ afterEach(async () => {
 });
 
 describe("ChatStorage", () => {
+  it("retains completed Responses history on reload and forks, filtering corrupt payloads", async () => {
+    const storage = new ChatStorage(ws, chatsRoot);
+    const rec = storage.newRecord("native");
+    const history = { source: "local-source", text: "Answer", output: [{ type: "message" as const, id: "msg_1", role: "assistant" as const, status: "completed", content: [{ type: "output_text" as const, text: "Answer", annotations: [] }] }] };
+    rec.messages = [{ role: "user", content: "Earlier", ts: -1 }, { role: "assistant", content: "Earlier answer", ts: 0 },
+      { role: "user", content: "First", ts: 1 }, { role: "assistant", content: "Answer", responseHistory: history, ts: 2 }, { role: "user", content: "Next", ts: 3 }];
+    await storage.save(rec);
+    const loaded = (await storage.load(rec.id))!;
+    expect(loaded.messages[3].responseHistory).toEqual(history);
+    const full = await storage.fork(loaded);
+    expect((await storage.load(full.id))?.messages[3].responseHistory).toEqual(history);
+    expect((await storage.fork(loaded, 1)).messages[3].responseHistory).toEqual(history);
+    expect((await storage.fork(loaded, -1)).messages.some(message => message.responseHistory)).toBe(false);
+    rec.messages[3].responseHistory = { source: "local-source", output: [{ type: "function_call", arguments: "partial" } as never] };
+    await storage.save(rec);
+    expect((await storage.load(rec.id, true))?.messages[3].responseHistory).toBeUndefined();
+  });
+
   it("restores compaction failures and excludes future outcomes from historical forks", async () => {
     const storage = new ChatStorage(ws, chatsRoot);
     const rec = storage.newRecord("native");

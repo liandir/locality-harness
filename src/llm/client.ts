@@ -9,6 +9,8 @@ import { safeFetch, NetworkPolicyError } from "../network/safeFetch.js";
 import { progressSignature, writeProgressFromJsonToolBody } from "./toolProgress.js";
 import type { OpenAiTool } from "../tools/toolDefinitions.js";
 import type { GenerationPolicy } from "./requestPolicy.js";
+import { streamResponses } from "./responses.js";
+import type { ResponseHistory } from "./responseHistory.js";
 
 export interface LlmToolCall {
   id: string;
@@ -25,6 +27,7 @@ export interface LlmMessage {
   role: "system" | "user" | "assistant" | "tool";
   content: LlmContent;
   reasoning_content?: string;
+  responseHistory?: ResponseHistory;
   name?: string;
   tool_call_id?: string;
   tool_calls?: LlmToolCall[];
@@ -75,7 +78,7 @@ export class MalformedNativeToolCallError extends Error {
 export type LlmStreamChunk =
   | { kind: "text"; text: string }
   | { kind: "thought"; text: string }
-  | { kind: "finish"; reason?: string; diagnostics?: CompletionDiagnostics }
+  | { kind: "finish"; reason?: string; diagnostics?: CompletionDiagnostics; responseHistory?: ResponseHistory }
   | { kind: "usage"; promptTokens: number; completionTokens?: number }
   | { kind: "promptProgress"; processedTokens: number; totalTokens: number }
   | { kind: "toolCallProgress"; name: string; path?: string; content?: string; contentBytes: number; contentLines: number; startLine?: number; endLine?: number; line?: number; id?: string }
@@ -108,15 +111,8 @@ interface StreamPayload {
 }
 
 /**
- * Streams text and thinking deltas from a llama.cpp /v1/chat/completions endpoint.
- * llama.cpp's OpenAI-compatible server returns SSE with lines `data: {json}`
- * where json.choices[0].delta.content is the next visible text chunk. Some
- * backends expose thinking as reasoning_content/reasoning/thought deltas; those
- * are forwarded separately so the UI can render them without showing raw tokens.
- *
- * Templates run with `--jinja` may instead return structured tool calls as
- * `delta.tool_calls` fragments. Those are accumulated by index across the stream
- * and emitted as `toolCall` chunks once complete, so they aren't silently lost.
+ * Streams the selected model protocol into shared text, reasoning and tool events.
+ * Each parser requires response-level terminal evidence before releasing calls.
  */
 export async function* streamChat(
   endpoint: string,
@@ -146,7 +142,8 @@ async function* streamChatRequest(
 ): AsyncGenerator<LlmStreamChunk, void, void> {
   const connection = await resolvedConnection(endpoint, req.model, signal);
   await countServerPrompt(endpoint, req, signal);
-  const res = await safeFetch(connection.endpoint, serverUrl(connection.endpoint, "v1/chat/completions"), {
+  const responses = connection.protocol !== "chat-completions";
+  const res = await safeFetch(connection.endpoint, serverUrl(connection.endpoint, responses ? "v1/responses" : "v1/chat/completions"), {
     method: "POST",
     headers: { ...connectionHeaders(connection), "Content-Type": "application/json", Accept: "text/event-stream" },
     body: JSON.stringify(serializeRequest(req, connection)), signal
@@ -166,6 +163,15 @@ async function* streamChatRequest(
     throw await serverFailure(res, connection, "The model server");
   }
   req.onResponseAccepted?.();
+  if (responses) {
+    for await (const chunk of streamResponses(res, connection, signal)) {
+      if (chunk.kind === "finish" && req.messages.some(message => Array.isArray(message.content) && message.content.some(part => part.type === "image_url"))) {
+        setImageSupport(connection, "supported");
+      }
+      yield chunk;
+    }
+    return;
+  }
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buf = "";

@@ -1,3 +1,4 @@
+import { normalizeModelProtocol } from "../../../llm/serverTypes.js";
 import { sideFeature } from "../../../build/side.js";
 import { escapeHtml as esc } from "../../html.js";
 import { chevronIcon } from "../../icons.js";
@@ -38,6 +39,11 @@ export function renderSettings(state: SideViewState, expandedSettings: ReadonlyS
           <input id="endpoint" type="text" value="${esc(endpoint)}" ${state.endpointTesting ? "readonly" : ""} />
           <button id="saveEndpoint" class="action-btn" ${state.endpointTesting ? "disabled" : ""}>${state.endpointTesting ? "Connecting…" : "Set"}</button>
         </div>
+        <label class="field-label" for="protocol">Protocol</label>
+        <select id="protocol">
+          <option value="responses" ${normalizeModelProtocol(s.protocol) === "responses" ? "selected" : ""}>Responses</option>
+          <option value="chat-completions" ${s.protocol === "chat-completions" ? "selected" : ""}>Chat Completions</option>
+        </select>
         <label class="field-label" for="serverApiKey">API-key (optional)</label>
         <input id="serverApiKey" type="password" autocomplete="off" value="${esc(state.serverApiKeyDraft ?? "")}" placeholder="${state.hasServerApiKey ? "Key saved — enter a replacement" : "No key"}" />
         <div class="validation ${validationCls}" role="${state.endpointMsg?.ok === false ? "alert" : "status"}">${esc(state.endpointMsg?.text ?? "")}</div>

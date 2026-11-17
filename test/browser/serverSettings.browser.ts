@@ -14,6 +14,34 @@ test("connection probe image decodes without a file asset", async ({ page }) => 
 });
 
 for (const theme of ["light", "dark"] as const) {
+  test(`${theme}: protocol defaults, keyboard selection, stale checks and reload`, async ({ page }) => {
+    await webview(page, theme, "side");
+    await hostMessage(page, { type: "settings", settings: { endpoint: "http://localhost:8000/v1" }, reasoningEffort: "default" });
+    await hostMessage(page, { type: "focusTab", tab: "settings" });
+    await page.locator('[data-settings-section="model"]').click();
+    const protocol = page.getByLabel("Protocol", { exact: true });
+    await expect(protocol).toHaveValue("responses");
+    await protocol.focus(); await page.keyboard.press("ArrowDown"); await page.keyboard.press("Tab");
+    await expect(protocol).toHaveValue("chat-completions");
+    expect(await page.evaluate(() => (window as unknown as { posted: SideToExt[] }).posted))
+      .toContainEqual({ type: "saveSetting", key: "protocol", value: "chat-completions" });
+    await page.locator("#saveEndpoint").click();
+    await protocol.selectOption("responses");
+    await expect(protocol).toBeEnabled();
+    await expect(page.locator("#saveEndpoint")).toBeEnabled();
+    await hostMessage(page, { type: "endpointValidation", protocol: "chat-completions", ok: false, error: "Stale error" });
+    await expect(page.getByText("Stale error")).toHaveCount(0);
+    await hostMessage(page, { type: "endpointValidation", protocol: "responses", ok: false, error: "Responses is unavailable. Select Chat Completions in Protocol." });
+    await expect(page.getByRole("alert")).toContainText("Select Chat Completions");
+    await hostMessage(page, { type: "settings", settings: { protocol: "chat-completions" }, reasoningEffort: "default" });
+    await expect(protocol).toHaveValue("chat-completions");
+    await webview(page, theme, "side");
+    await hostMessage(page, { type: "settings", settings: { protocol: "chat-completions" }, reasoningEffort: "default" });
+    await hostMessage(page, { type: "focusTab", tab: "settings" });
+    await page.locator('[data-settings-section="model"]').click();
+    await expect(page.getByLabel("Protocol", { exact: true })).toHaveValue("chat-completions");
+  });
+
   test(`${theme}: automatic server detection, masked credentials, image status and failed validation`, async ({ page }) => {
     await webview(page, theme, "side");
     await hostMessage(page, { type: "settings", settings: { endpoint: "http://localhost:8000/v1", serverType: "auto", model: "qwen" }, reasoningEffort: "default" });

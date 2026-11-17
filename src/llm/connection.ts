@@ -1,9 +1,9 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash } from "node:crypto";
 import type { SecretStorage } from "vscode";
-import { normalizeServerType, type ServerBackend, type ServerType } from "./serverTypes.js";
+import { normalizeModelProtocol, normalizeServerType, type ModelProtocol, type ServerBackend, type ServerType } from "./serverTypes.js";
 
-export interface ConnectionSettings { endpoint: string; model?: string; serverType?: ServerType }
+export interface ConnectionSettings { endpoint: string; model?: string; serverType?: ServerType; protocol?: ModelProtocol }
 export interface ServerConnection extends ConnectionSettings {
   serverType: ServerType;
   apiKey?: string;
@@ -53,6 +53,7 @@ export async function connectionFor(endpoint: string, model?: string): Promise<S
   const configured = settingsProvider?.();
   return {
     endpoint, model: model ?? configured?.model,
+    protocol: normalizeModelProtocol(configured?.protocol),
     // Preserve the pre-existing standalone client API; the extension configures auto.
     serverType: configured ? normalizeServerType(configured.serverType) : "llama.cpp",
     apiKey: await secretStorage?.get(secretKey(endpoint))
@@ -62,7 +63,7 @@ export async function connectionFor(endpoint: string, model?: string): Promise<S
 export async function withServerConnection<T>(settings: ConnectionSettings, work: () => Promise<T>, fresh = false): Promise<T> {
   if (!fresh && scope.getStore()) return work();
   const connection: ServerConnection = {
-    ...settings, serverType: settings.serverType ?? (settingsProvider ? "auto" : "llama.cpp")
+    ...settings, protocol: normalizeModelProtocol(settings.protocol), serverType: settings.serverType ?? (settingsProvider ? "auto" : "llama.cpp")
   };
   if (secretStorage) {
     try { connection.apiKey = await secretStorage.get(secretKey(settings.endpoint)); }
@@ -74,23 +75,23 @@ export async function withServerConnection<T>(settings: ConnectionSettings, work
 /** Keep live feature settings while retaining this attempt's connection selection. */
 export function capturedConnectionSettings<T extends ConnectionSettings>(settings: T): T {
   const active = scope.getStore();
-  return active ? { ...settings, endpoint: active.endpoint, model: active.model, serverType: active.serverType } : settings;
+  return active ? { ...settings, endpoint: active.endpoint, model: active.model, serverType: active.serverType, protocol: normalizeModelProtocol(active.protocol) } : settings;
 }
 
 /** A draft connection must never inherit an ongoing turn's connection. */
 export async function withConnectionDraft<T>(settings: ConnectionSettings, apiKey: string | undefined, work: () => Promise<T>): Promise<T> {
-  return scope.run({ ...settings, serverType: normalizeServerType(settings.serverType),
+  return scope.run({ ...settings, protocol: normalizeModelProtocol(settings.protocol), serverType: normalizeServerType(settings.serverType),
     apiKey: apiKey ?? await secretStorage?.get(secretKey(settings.endpoint)) }, work);
 }
 
 export function connectionIdentity(endpoint: string, model?: string): string {
   const c = scope.getStore() ?? settingsProvider?.();
-  return JSON.stringify([serverRoot(c?.endpoint ?? endpoint), c?.model ?? model ?? "", (c && "backend" in c ? c.backend : undefined) ?? c?.serverType ?? "llama.cpp"]);
+  return JSON.stringify([serverRoot(c?.endpoint ?? endpoint), c?.model ?? model ?? "", (c && "backend" in c ? c.backend : undefined) ?? c?.serverType ?? "llama.cpp", normalizeModelProtocol(c?.protocol)]);
 }
 
 export function connectionCacheKey(c: ServerConnection): string {
   const credential = createHash("sha256").update(c.apiKey ?? "").digest("hex");
-  return JSON.stringify([serverRoot(c.endpoint), c.model ?? "", c.serverType, credentialRevision, credential]);
+  return JSON.stringify([serverRoot(c.endpoint), c.model ?? "", c.serverType, normalizeModelProtocol(c.protocol), credentialRevision, credential]);
 }
 
 export function connectionHeaders(c: ServerConnection): Record<string, string> {

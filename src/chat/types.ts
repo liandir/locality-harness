@@ -67,6 +67,8 @@ export interface ChatMessage {
   steering?: boolean;
   /** Native model reasoning associated with this assistant response. */
   reasoningContent?: string;
+  /** Completed native output for local replay; excluded from webview payloads. */
+  responseHistory?: import("../llm/responseHistory.js").ResponseHistory;
   /** Parser events captured during this assistant turn (text, thought, toolCall, summary). */
   events?: unknown[];
   /** Tool call this message corresponds to (when role === "tool"). */

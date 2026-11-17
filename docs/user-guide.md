@@ -34,6 +34,16 @@ tab in the side panel. Configure the server and tool calling before chatting:
   rejects native tools.
   Start `llama-server` with `--jinja` and a tool-aware chat template.
 
+**Protocol** defaults to **Responses** (`locality.protocol: "responses"`). Choose
+**Chat Completions** (`"chat-completions"`) for servers that do not implement
+`/v1/responses`. Locality reports unsupported protocols rather than switching
+automatically. **Set** verifies the selected protocol before saving a connection.
+Existing installations without a protocol override also use Responses.
+
+Both protocols keep conversation history and compaction in Locality. Responses
+requests use `store: false` and resend local history, including completed tool
+and reasoning items; they do not depend on server-managed response chains.
+
 The other settings (sampling, auto-approve toggles, safe
 commands) have sensible defaults and can be revisited later.
 
@@ -60,8 +70,9 @@ Choose **Native server only** in Locality. Other models need their corresponding
 [tool parser](https://docs.vllm.ai/en/v0.32.0/features/tool_calling/) and
 [reasoning configuration](https://docs.vllm.ai/en/v0.32.0/features/reasoning_outputs/).
 Reasoning effort values must be supported by the served model. Finite reasoning
-budgets use `thinking_token_budget` and require a configured reasoning parser or
-reasoning boundaries; leave the budget empty for unlimited reasoning. Models
+budgets require **Chat Completions** with vLLM 0.32.0: that protocol uses
+`thinking_token_budget` and needs a configured reasoning parser or boundaries.
+Leave the budget empty for unlimited reasoning when using **Responses**. Models
 whose templates cannot disable thinking may still reason when the switch is off.
 
 If the server uses `--api-key`, enter its key in the masked **API key** field and
@@ -71,13 +82,17 @@ the server URL and proxy prefix and are not stored in settings or chat history.
 
 When connecting or selecting a model, Locality sends a tiny test image generated
 entirely in memory and reports image input as **Supported** or **Unavailable**.
-No test image file is created. vLLM only preprocesses the image; llama.cpp's check
-generates at most one token. Authentication, invalid responses and server outages
+No test image file is created. Responses checks generate at most one token.
+With Chat Completions, vLLM only preprocesses the image and llama.cpp generates
+at most one token. Authentication, invalid responses and server outages
 remain connection errors instead of marking the model as text-only. Clicking
-**Set** checks again. Actual vLLM image prompts are also preprocessed before generation.
-The complete vLLM prompt, tools and image tokens are counted on the server for
-the context guard, reserving up to 4,096 tokens (at most a quarter of the context)
-for the answer. Auxiliary requests reserve their explicit output limits.
+**Set** checks again. Responses token counts use llama.cpp's
+`/v1/responses/input_tokens` or vLLM's `/v1/responses/render` when available.
+The latter requires vLLM's `--enable-scale-out` option. When these optional
+routes are unavailable, Locality uses tokenizer-based estimates with additional
+context headroom. Chat Completions retains vLLM's exact chat-tokenizer counting.
+The context guard reserves output space; auxiliary requests reserve their
+explicit output limits.
 vLLM uses the normal waiting indicator without llama.cpp's
 prompt-progress percentage.
 
@@ -89,6 +104,8 @@ records the compatibility baseline and how to run live acceptance tests.
 
 Connection troubleshooting:
 
+- **Responses unavailable:** select **Chat Completions** under **Protocol**, or
+  upgrade the server to a version with Responses support.
 - **401/403:** set or replace the API key for this server.
 - **Could not identify:** check the server URL and proxy routing. llama.cpp must
   expose `/props`; vLLM must expose `/v1/models` and `/tokenize`. A missing
@@ -387,6 +404,7 @@ Only settings supported by the installed edition are available.
 | Setting | Default | What it does |
 | --- | --- | --- |
 | `endpoint` | `http://localhost:8080/v1` | URL of your llama.cpp or vLLM server. Use `localhost` or a private IP literal such as `http://127.0.0.1:8080/v1` or `http://192.168.1.50:8080/v1`. |
+| `protocol` | `responses` | Model API: `responses` or `chat-completions`. Applies to chat, planning, compaction, titles, and commit messages. |
 | `model` | `local` | Model id sent with requests. Choose a served model or alias from `/v1/models`. |
 | `toolCallingMode` | `native` | Select `native`, `compat-gemma4`, `compat-qwen3`, `compat-muse-glimmer`, or `compat-gpt-oss`. Compatibility profiles are native-first and add only the selected family's recovery behavior. |
 | `temperature` | `0.8` | Sampling temperature for chat requests. Lower is more deterministic, higher more varied. |

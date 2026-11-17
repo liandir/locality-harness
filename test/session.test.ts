@@ -26,6 +26,7 @@ const mocks = vi.hoisted(() => ({
   VisionUnsupportedError: class VisionUnsupportedError extends Error {},
   settings: {
     endpoint: "http://127.0.0.1:8080",
+    protocol: "responses" as "responses" | "chat-completions",
     model: "test-model",
     personalization: "",
     titlePrompt: "Summarize the user message in 2-6 words. Output ONLY the summary.",
@@ -140,6 +141,7 @@ beforeEach(() => {
     mockCommandHandle(mocks.runCommand(command, cwd, signal, onOutput))
   );
   mocks.settings.personalization = "";
+  mocks.settings.protocol = "responses";
   mocks.settings.model = "test-model";
   mocks.settings.autoapproveReads = true;
   mocks.settings.autoapproveWrites = false;
@@ -1122,6 +1124,102 @@ describe("ChatSession", () => {
     await vi.waitFor(() =>
       expect(events).toContainEqual({ kind: "titleGenerationFinished" })
     );
+  });
+
+  it("keeps interrupted Responses reasoning and text out of completed model history", async () => {
+    mocks.settings.toolCallingMode = "native";
+    const { ChatSession } = await import("../src/chat/session.js");
+    const { StreamFailure } = await import("../src/llm/completion.js");
+    const record = newRecord();
+    mocks.streamChat.mockImplementation(async function* () {
+      yield { kind: "thought", text: "UNFINISHED_REASONING" };
+      yield { kind: "text", text: "UNFINISHED_TEXT" };
+      throw new StreamFailure("Connection lost", { cause: "unexpected_eof", completionEvidence: "none" });
+    });
+    const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record, emit: vi.fn() });
+    try {
+      await session.sendUserMessage("Do the work");
+      expect(JSON.stringify(record.messages)).toContain("UNFINISHED_TEXT");
+      expect(JSON.stringify(record.contextMessages)).not.toContain("UNFINISHED_");
+      expect(record.messages.some(message => message.responseHistory)).toBe(false);
+    } finally { await session.shutdown(); }
+  });
+
+  it("retains completed Responses reasoning when retrying a thought-only answer", async () => {
+    mocks.settings.toolCallingMode = "native";
+    const { ChatSession } = await import("../src/chat/session.js");
+    const record = newRecord();
+    const history = { source: "local-source", output: [{ type: "reasoning", id: "rs_1", summary: [], content: [{ type: "reasoning_text", text: "COMPLETED_REASONING" }] }] };
+    let pass = 0;
+    mocks.streamChat.mockImplementation(async function* (_endpoint, request) {
+      if (pass++ === 0) {
+        yield { kind: "thought", text: "COMPLETED_REASONING" };
+        yield { kind: "finish", reason: "stop", diagnostics: { completionEvidence: "response_completed" }, responseHistory: history };
+      } else {
+        expect(request.messages).toContainEqual(expect.objectContaining({ role: "assistant", responseHistory: { ...history, text: "" } }));
+        yield { kind: "text", text: "Answer" };
+      }
+    });
+    const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record, emit: vi.fn() });
+    try {
+      await session.sendUserMessage("Do the work");
+      expect(pass).toBe(2);
+      expect(record.messages.some(message => message.responseHistory)).toBe(true);
+    } finally { await session.shutdown(); }
+  });
+
+  it("persists Responses tool-only output and replays it after a reload", async () => {
+    const ws = await fs.mkdtemp(path.join(os.tmpdir(), "locality-responses-session-"));
+    const storage = new ChatStorage(ws, path.join(ws, "chats"));
+    const record = storage.newRecord("native");
+    mocks.settings.toolCallingMode = "native";
+    const history = { source: "local-source", output: [{ type: "function_call", id: "fc_read", call_id: "read", name: "list_dir", arguments: '{"path":"."}', status: "completed" }] };
+    let pass = 0;
+    mocks.streamChat.mockImplementation(async function* (_endpoint, request) {
+      if (pass++ === 0) {
+        yield { kind: "finish", reason: "tool_calls", diagnostics: { completionEvidence: "response_completed" }, responseHistory: history };
+        yield { kind: "toolCall", id: "read", name: "list_dir", argsJson: '{"path":"."}' };
+      } else {
+        expect(request.messages).toContainEqual(expect.objectContaining({ role: "assistant", content: "", responseHistory: { ...history, text: "" }, tool_calls: [expect.objectContaining({ id: "read" })] }));
+        yield { kind: "text", text: "Done" };
+      }
+    });
+    const { ChatSession } = await import("../src/chat/session.js");
+    let session = new ChatSession({ storage, workspaceRoot: ws, record, emit: vi.fn() });
+    try {
+      await session.sendUserMessage("List files");
+      expect(pass).toBe(2);
+      await session.shutdown();
+      const loaded = (await storage.load(record.id, true))!;
+      expect(loaded.messages.some(message => message.responseHistory?.output[0].type === "function_call")).toBe(true);
+      session = new ChatSession({ storage, workspaceRoot: ws, record: loaded, emit: vi.fn() });
+      await session.sendUserMessage("Continue");
+      expect(pass).toBe(3);
+    } finally { await session.shutdown(); await fs.rm(ws, { recursive: true, force: true }); }
+  });
+
+  it("continues a commentary-phase Responses plan before exposing approval", async () => {
+    mocks.settings.toolCallingMode = "native";
+    const record = newRecord();
+    const events: UiEvent[] = [];
+    const { ChatSession } = await import("../src/chat/session.js");
+    const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record, emit: event => events.push(event) });
+    let pass = 0;
+    mocks.streamChat.mockImplementation(async function* () {
+      const text = planText("- Implement\n- Verify");
+      expect(record.pendingPlanMessageTs).toBeUndefined();
+      yield { kind: "text", text };
+      yield { kind: "finish", reason: "stop", diagnostics: { completionEvidence: "response_completed" }, responseHistory: {
+        source: "local-source", output: [{ type: "message", id: `msg_${pass}`, role: "assistant", status: "completed", phase: pass++ === 0 ? "commentary" : "final_answer",
+          content: [{ type: "output_text", text, annotations: [] }] }]
+      } };
+    });
+    try {
+      await session.sendUserMessage("Plan this", [], "plan");
+      expect(pass).toBe(2);
+      expect(events.filter(event => event.kind === "planFinal")).toHaveLength(1);
+      expect(record.messages.at(-1)?.responseHistory).toMatchObject({ text: "- Implement\n- Verify", output: [{ phase: "final_answer" }] });
+    } finally { await session.shutdown(); }
   });
 
   it("uses native tool schemas and replays calls/results with their protocol id", async () => {
@@ -5107,7 +5205,8 @@ describe("steering an active turn", () => {
     await fs.rm(workspaceRoot, { recursive: true, force: true });
   });
 
-  it.each(["act", "plan", "review"] as const)("interrupts generation and preserves the complete %s system prompt", async mode => {
+  it.each((["act", "plan", "review"] as const).flatMap(mode => (["responses", "chat-completions"] as const).map(protocol => ({ mode, protocol }))))("$protocol: interrupts generation and preserves the complete $mode system prompt", async ({ mode, protocol }) => {
+    mocks.settings.protocol = protocol;
     const requests: import("../src/llm/client.js").ChatCompletionRequest[] = [];
     let requestSignal: AbortSignal | undefined;
     mocks.streamChat.mockImplementation(async function* (_endpoint, request, signal: AbortSignal) {
@@ -5136,10 +5235,9 @@ describe("steering an active turn", () => {
     expect(requests[1].tools).toEqual(requests[0].tools);
     expect(requests[1].generation?.reasoning).toEqual(requests[0].generation?.reasoning);
     expect(requests[1].messages.filter(m => m.role === "system")).toHaveLength(1);
-    expect(requests[1].messages.slice(-2)).toEqual([
-      expect.objectContaining({ role: "assistant", content: "Initial approach." }),
-      expect.objectContaining({ role: "user", content: "Use the smaller change" })
-    ]);
+    expect(requests[1].messages.at(-1)).toMatchObject({ role: "user", content: "Use the smaller change" });
+    expect(requests[1].messages.some(message => message.content === "Initial approach.")).toBe(protocol === "chat-completions");
+    expect(record.messages.some(message => message.content === "Initial approach.")).toBe(true);
     expect(events.filter(e => e.kind === "turnEnd")).toEqual([expect.objectContaining({ mode })]);
     expect(events.some(e => e.kind === "abort")).toBe(false);
     const textEvents = events.filter(e => e.kind === "text");
@@ -5163,6 +5261,7 @@ describe("steering an active turn", () => {
       requests.push(request);
       if (requests.length === 1) {
         yield { kind: "thought", text: "Check the workspace first." };
+        yield { kind: "finish", reason: "tool_calls", diagnostics: { completionEvidence: "response_completed" } };
         yield { kind: "toolCall", name: "run_command", argsJson: '{"command":"first"}', id: "first" };
         yield { kind: "toolCall", name: "run_command", argsJson: '{"command":"obsolete"}', id: "obsolete" };
       } else yield { kind: "text", text: "Followed the new guidance." };

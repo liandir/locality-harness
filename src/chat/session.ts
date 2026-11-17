@@ -1,3 +1,4 @@
+import { responseIsCommentary, responseReasoning, type ResponseHistory } from "../llm/responseHistory.js";
 import { capturedConnectionSettings, connectionIdentity, withServerConnection } from "../llm/connection.js";
 import { outputTokenReserve, promptBudget, promptSafetyMargin, type PromptMeasurement } from "../llm/requestPolicy.js";
 import { serverGuidance } from "../llm/serverGuidance.js";
@@ -471,12 +472,12 @@ export class ChatSession {
       this.serverHelp = serverGuidance(metadata.backend);
       this.serverMetadataError = "";
       this.supportsVision = metadata.supportsVision;
-      this.emit({ kind: "visionCapability", supported: this.supportsVision, endpoint: s.endpoint, model: s.model, serverType: s.serverType });
+      this.emit({ kind: "visionCapability", supported: this.supportsVision, endpoint: s.endpoint, model: s.model, serverType: s.serverType, protocol: s.protocol });
       return true;
     } catch (error) {
       this.serverMetadataError = error instanceof Error ? error.message : "The model server is unavailable.";
       this.supportsVision = false;
-      this.emit({ kind: "visionCapability", supported: false, endpoint: s.endpoint, model: s.model, serverType: s.serverType });
+      this.emit({ kind: "visionCapability", supported: false, endpoint: s.endpoint, model: s.model, serverType: s.serverType, protocol: s.protocol });
       return false;
     }
   }
@@ -1523,6 +1524,7 @@ export class ChatSession {
     let emptyNativeRetries = 0;
     let planCorrectionAttempts = 0;
     let completion: CompletionDiagnostics | undefined;
+    let responseHistory: ResponseHistory | undefined;
     let malformedNativeRetries = 0;
     let lengthRecoveryRetries = 0;
     let disabledReasoningNoticeShown = false;
@@ -1560,6 +1562,7 @@ export class ChatSession {
       this.emit({ kind: "turnPreparing", reason: "server" });
       finishReason = undefined;
       completion = undefined;
+      responseHistory = undefined;
       const planResponse = this.planResponse = this.turnMode() === "plan" ? new PlanResponse() : undefined;
       // Memory writes (including compatibility calls) wait for terminal evidence.
       this.stagedToolCalls = this.turnMode() === "plan" || readSettings().memoryEnabled ? [] : undefined;
@@ -1777,6 +1780,7 @@ export class ChatSession {
             continue;
           }
           if (chunk.kind === "finish") {
+            responseHistory = chunk.responseHistory;
             finishReason = chunk.reason;
             completion = chunk.diagnostics ?? { finishReason: chunk.reason, completionEvidence: "finish_reason" };
             completedEventCount = turnEvents.length;
@@ -1943,11 +1947,15 @@ export class ChatSession {
         this.lastProgressEmitAt.clear();
         this.streamingFileState.clear();
         if (assistantBuf.trim() || thoughtBuf.trim() || turnEvents.length) {
-          appendChatMessage(this.record, {
+          const partial: ChatMessage = {
             role: "assistant", content: assistantBuf,
-            reasoningContent: this.toolProtocol === "native" ? thoughtBuf || undefined : undefined,
+            reasoningContent: this.toolProtocol === "native" ? (responseHistory ? responseReasoning(responseHistory) : thoughtBuf || undefined) : undefined,
             events: turnEvents.splice(0), ts: Date.now()
-          });
+          };
+          if (s.protocol === "responses" && !completion) {
+            this.record.contextMessages ??= this.record.messages.slice();
+            this.record.messages.push(partial);
+          } else appendChatMessage(this.record, partial);
         }
         assistantBuf = "";
         thoughtBuf = "";
@@ -1989,11 +1997,12 @@ export class ChatSession {
         // a tool call to be replayed on that same assistant tool-call message.
         // It is stored after the tool results in our execution-oriented record
         // and moved back beside the calls by buildNativePromptMessages.
-        if (assistantBuf.trim() || thoughtBuf.trim()) {
+        if (assistantBuf.trim() || thoughtBuf.trim() || responseHistory) {
           appendChatMessage(this.record, {
             role: "assistant",
             content: assistantBuf,
-            reasoningContent: this.toolProtocol === "native" ? thoughtBuf || undefined : undefined,
+            responseHistory: this.toolProtocol === "native" && responseHistory ? { ...responseHistory, text: assistantBuf } : undefined,
+            reasoningContent: this.toolProtocol === "native" ? (responseHistory ? responseReasoning(responseHistory) : thoughtBuf || undefined) : undefined,
             events: turnEvents.splice(0),
             ts: Date.now()
           });
@@ -2023,16 +2032,22 @@ export class ChatSession {
           kind: "turnRecovery", messageId,
           text: `The model stopped after thinking without a reply. Retrying native continuation (${emptyNativeRetries}/${MAX_EMPTY_NATIVE_RETRIES})…`
         });
+        if (responseHistory) {
+          appendChatMessage(this.record, { role: "assistant", content: "", responseHistory: { ...responseHistory, text: "" },
+            reasoningContent: responseReasoning(responseHistory), events: turnEvents.splice(0), ts: Date.now() });
+          completedEventCount = 0;
+          await this.saveRecord();
+        }
         thoughtBuf = "";
         this.emitLiveTokenEstimate("");
         continue;
       }
-      if (this.turnMode() === "plan" && (!completion || !planResponse?.complete)) {
+      if (this.turnMode() === "plan" && (!completion || !planResponse?.complete || responseIsCommentary(responseHistory))) {
         if (completion && planCorrectionAttempts++ < MAX_PLAN_CONTINUATIONS) {
           // Preserve visible progress and give the model its previous reply as context.
           // This is a continuation of planning, never a completed plan or approval state.
-          if (assistantBuf.trim() || thoughtBuf.trim()) appendChatMessage(this.record, {
-            role: "assistant", content: assistantBuf, reasoningContent: thoughtBuf || undefined,
+          if (assistantBuf.trim() || thoughtBuf.trim() || responseHistory) appendChatMessage(this.record, {
+            role: "assistant", content: assistantBuf, responseHistory: responseHistory ? { ...responseHistory, text: assistantBuf } : undefined, reasoningContent: responseHistory ? responseReasoning(responseHistory) : thoughtBuf || undefined,
             events: turnEvents.splice(0), ts: Date.now()
           });
           assistantBuf = "";
@@ -2059,7 +2074,8 @@ export class ChatSession {
         const assistantMessage: ChatMessage = {
           role: "assistant",
           content: assistantBuf,
-          reasoningContent: this.toolProtocol === "native" ? thoughtBuf || undefined : undefined,
+          responseHistory: this.toolProtocol === "native" && responseHistory ? { ...responseHistory, text: assistantBuf } : undefined,
+          reasoningContent: this.toolProtocol === "native" ? (responseHistory ? responseReasoning(responseHistory) : thoughtBuf || undefined) : undefined,
           events: turnEvents,
           ts: this.turnMode() === "plan"
             ? this.record.messages.reduce((next, message) => Math.max(next, message.ts + 1), Date.now())
@@ -2106,7 +2122,7 @@ export class ChatSession {
         const message: ChatMessage = { role: "assistant", content,
           reasoningContent: reasoning || undefined, events, ts: Date.now() };
         this.record.messages.push(message);
-        const completed = events.slice(0, completedEventCount);
+        const completed = s.protocol === "responses" && !completion ? [] : events.slice(0, completedEventCount);
         if (completed.length) this.record.contextMessages.push({ ...message,
           content: completed.flatMap(event => event.kind === "text" ? [event.text] : []).join(""),
           reasoningContent: completed.flatMap(event => event.kind === "thought" ? [event.text] : []).join("") || undefined,
@@ -2845,7 +2861,7 @@ export class ChatSession {
     for (let index = transcriptStart; index < context.length; index++) {
       const stored = context[index];
       if (stored.role !== "tool") {
-        if (stored.role !== "assistant" || stored.content.trim() || stored.attachments?.length) {
+        if (stored.role !== "assistant" || stored.content.trim() || stored.attachments?.length || stored.responseHistory) {
           const attachments = stored.role === "user" ? stored.attachments?.filter(isImageAttachment) ?? [] : [];
           const content = attachments.length
             ? [
@@ -2859,7 +2875,8 @@ export class ChatSession {
           messages.push({
             role: stored.fileUndoNotice ? "user" : stored.role,
             content,
-            reasoning_content: stored.role === "assistant" ? stored.reasoningContent : undefined
+            reasoning_content: stored.role === "assistant" ? stored.reasoningContent : undefined,
+            responseHistory: stored.role === "assistant" ? stored.responseHistory : undefined
           });
         }
         continue;
@@ -2898,6 +2915,7 @@ export class ChatSession {
         role: "assistant",
         content: assistantRecord?.content ?? "",
         reasoning_content: assistantRecord?.reasoningContent,
+        responseHistory: assistantRecord?.responseHistory,
         tool_calls: calls
       });
       toolMessages.forEach((message, callIndex) => {

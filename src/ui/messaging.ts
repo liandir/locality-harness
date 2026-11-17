@@ -1,4 +1,4 @@
-import type { ServerMetadata } from "../llm/serverTypes.js";
+import type { ModelProtocol, ServerMetadata } from "../llm/serverTypes.js";
 /**
  * Webview commands and presentation messages. Session events and chat data
  * live in shared chat contracts, independently of their host implementations.
@@ -64,7 +64,7 @@ export type SideToExt =
   | { type: "savePersonalization" }
   | { type: "cancelPersonalization" }
   | { type: "setReasoningEffort"; effort: ReasoningEffort }
-  | { type: "validateEndpoint"; url: string; requestId?: number; apiKey?: string }
+  | { type: "validateEndpoint"; url: string; requestId?: number; apiKey?: string; protocol?: ModelProtocol }
   | { type: "validateWebSearch"; endpoint: string; apiKey: string }
   | { type: "editUserSettingsJson" }
   | { type: "editWorkspacePrompts" }
@@ -100,7 +100,7 @@ export type ExtToSide =
   | { type: "serverCredential"; endpoint: string; configured: boolean }
   | { type: "chats"; chats: { id: string; title: string; updatedAt: number }[] }
   | { type: "focusTab"; tab: SideTab }
-  | { type: "endpointValidation"; requestId?: number; ok: boolean; error?: string; resolved?: string[]; metadata?: ServerMetadata; models?: { id: string }[]; selectedModel?: string }
+  | { type: "endpointValidation"; protocol?: ModelProtocol; requestId?: number; ok: boolean; error?: string; resolved?: string[]; metadata?: ServerMetadata; models?: { id: string }[]; selectedModel?: string }
   | { type: "settingSaved"; key: string; ok: boolean; error?: string }
   | { type: "openTabs"; tabs: ChatTab[] };
 

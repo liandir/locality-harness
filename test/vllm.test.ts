@@ -5,7 +5,7 @@ import { configureServerConnections, hasServerApiKey, saveServerApiKey, serverUr
 import { clearServerCaches, countServerPrompt, fetchServerMetadata, fetchServerModels, onServerCapabilitiesChange, tokenize } from "../src/llm/server.js";
 import { generateChatTitle } from "../src/chat/chatTitle.js";
 
-const settings = { endpoint: "http://127.0.0.1:8000/proxy/v1", model: "test-model", serverType: "vllm" as const };
+const settings = { protocol: "chat-completions" as const, endpoint: "http://127.0.0.1:8000/proxy/v1", model: "test-model", serverType: "vllm" as const };
 const messages = [{ role: "user" as const, content: "hello" }];
 const tokenResponse = (count = 5, limit = 8192) => Response.json({ count, max_model_len: limit, tokens: Array.from({ length: count }, (_, i) => i) });
 const sse = (chunks: unknown[] = [{ choices: [{ delta: { content: "A useful response" }, finish_reason: "stop" }] }], done = true) =>

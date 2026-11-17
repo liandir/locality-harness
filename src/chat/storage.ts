@@ -1,4 +1,5 @@
 import { validWorkspaceNote } from "./workspaceNotes.js";
+import { normalizeResponseHistory } from "../llm/responseHistory.js";
 import { validMemoryAttempt } from "./memoryJobTypes.js";
 import type { ChatAttachment, ChatMessage, ChatRecord } from "./types.js";
 export type { Role, StoredToolStatus, ChatAttachment, ChatMessage, ChatRecord } from "./types.js";
@@ -323,7 +324,8 @@ export class ChatStorage {
         : undefined;
       const requestContext = message.role === "user" && !message.steering && typeof message.requestContext === "string"
         ? message.requestContext : undefined;
-      return { ...message, requestContext, attachments: attachments?.length ? attachments : undefined };
+      return { ...message, requestContext, responseHistory: message.role === "assistant" ? normalizeResponseHistory(message.responseHistory) : undefined,
+        attachments: attachments?.length ? attachments : undefined };
     });
     const messages = normalizeMessages(Array.isArray(rec.messages) ? rec.messages : []);
     return {

@@ -2,12 +2,30 @@
 
 ## Model server integration
 
-The shared connection service snapshots endpoint, backend selection, model, and
+The shared connection service snapshots endpoint, protocol, backend selection, model, and
 credentials for each foreground turn or background attempt. Background jobs
 start a fresh asynchronous connection scope; nested compaction and title work
 inherit the current turn. Backend adapters own discovery, tokenization, request
-translation and errors. The streaming parser and terminal-evidence handling stay
-shared. All HTTP calls continue through `safeFetch` in every edition.
+translation and errors. Protocol-specific serializers and streaming parsers emit
+the shared stream events. All HTTP calls continue through `safeFetch` in every edition.
+
+`locality.protocol` accepts `responses` (default, including existing installations)
+or `chat-completions`. Protocol is part of connection/cache identity; changes
+invalidate pending validation and apply to the next turn. There is no automatic
+protocol fallback. Explicit connection checks exercise the selected generation
+endpoint in addition to discovery and image validation.
+
+Responses uses `store: false` with locally reconstructed input. Completed native
+output items are retained in optional assistant `responseHistory` metadata;
+older transcripts need no migration. Metadata is host-only, is replayed only
+for the originating endpoint/model/backend and matching message/calls, and stays
+with its exchange through compaction and forks. Visible text can omit plan
+markers, so metadata records the corresponding display-text snapshot. Reasoning
+summaries remain display text rather than becoming replayable raw reasoning.
+Failed or interrupted Responses output never becomes completed native history.
+Only a successful response-level terminal event releases native calls; item-level
+completion and `[DONE]` alone cannot authorize execution or plan approval.
+Commentary-phase messages cannot finish planning.
 
 Generation consumers use `GenerationPolicy`: task, output allowance, reasoning
 intent, and optional progress reporting. Server adapters translate that policy
@@ -17,9 +35,20 @@ fallback to the model default, cached per connection/model. Explicit user
 reasoning choices in chat do not take that fallback. Older wire-shaped client
 arguments remain supported for existing integrations.
 
+vLLM 0.32.0 Responses lacks the finite `thinking_token_budget` control. Explicit
+finite budgets fail with guidance to use unlimited reasoning or Chat Completions.
+llama.cpp Responses carries backend controls in `extra_params`. Function tools
+explicitly use `strict: false`, preserving the existing schemas' optional fields.
+
 `measureRequestPrompt` counts the full request, including tools. It reports
 exact rendered counts where supported and estimated template counts otherwise;
 the shared budget reserves generation plus 1% or 5% headroom respectively.
+Responses counts the actual serialized input using llama.cpp's
+`/v1/responses/input_tokens` or vLLM's `/v1/responses/render`. vLLM requires
+`--enable-scale-out` to expose that optional renderer route. A missing counting
+route (404/405/501) uses estimated template counting; authentication, malformed
+responses and other failures remain errors. Chat Completions tokenization is
+never reported as an exact Responses count.
 Estimated template counting requires a functioning tokenizer: character-count
 fallbacks remain display estimates, not permission to send an oversized prompt.
 Main chat generation can use the remaining measured window; it has no fixed
@@ -39,8 +68,8 @@ live compaction tests in `test/serverLive.test.ts`.
 Backend detection is automatic; the old `serverType` setting is ignored and is
 no longer exposed. vLLM metadata comes from `/v1/models` and `/tokenize`;
 llama.cpp uses `/props`. Connection checks send an in-memory 28×28 RGB PNG
-(under 100 bytes) to vLLM's chat tokenizer or llama.cpp's chat completions with
-a one-token output limit. No image asset is stored. Image support is tri-state
+(under 100 bytes) through the selected protocol with a one-token output limit;
+Chat Completions on vLLM retains its tokenizer-only probe. No image asset is stored. Image support is tri-state
 internally; only successful preprocessing/completion or an explicit unsupported
 modality error resolves the probe. Other failures remain connection errors.
 Concurrent checks share a probe, results are cached per connection, and **Set**
@@ -58,7 +87,7 @@ Live model acceptance is separate: no live results should be claimed from fixtur
 implementation. The three vLLM model cases and the llama.cpp smoke test below
 must pass, with their configurations recorded, before publishing v2.2.0.
 
-`test/serverLive.test.ts` is skipped unless endpoints are supplied. Provision the
+`test/serverLive.test.ts` runs both protocols and is skipped unless endpoints are supplied. Provision the
 servers externally, then set the following variables in the invoking shell:
 
 | Endpoint variable | Default model | Coverage |
