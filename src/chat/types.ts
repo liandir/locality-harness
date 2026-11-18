@@ -51,6 +51,9 @@ export interface ChatInterruption {
 }
 
 export interface ChatMessage {
+  id?: string;
+  /** One completed model/tool pass, independent of its transport. */
+  exchangeId?: string;
   role: Role;
   /** Harness-issued recall tool result after the first user message; outside the transcript. */
   initialMemoryContext?: boolean;
@@ -67,6 +70,10 @@ export interface ChatMessage {
   steering?: boolean;
   /** Native model reasoning associated with this assistant response. */
   reasoningContent?: string;
+  /** Completed native output for local replay; excluded from webview payloads. */
+  /** Prefix changed; adapters must validate native replay compatibility. */
+  replayContextChanged?: boolean;
+  responseHistory?: import("../llm/responseHistory.js").ResponseHistory;
   /** Parser events captured during this assistant turn (text, thought, toolCall, summary). */
   events?: unknown[];
   /** Tool call this message corresponds to (when role === "tool"). */
@@ -97,6 +104,11 @@ export interface ChatMessage {
 }
 
 export interface ChatRecord {
+  contextCheckpoint?: import("./contextHistory.js").ContextCheckpoint;
+  /** Settled tool results that have not yet received a completed model continuation. */
+  unconsumedExchangeId?: string;
+  /** Host-owned compaction outcomes, restored with their diagnostics on reload. */
+  compactions?: CompactHistory[];
   id: string;
   workspaceRoot: string;
   createdAt: number;
@@ -132,4 +144,20 @@ export interface ChatRecord {
   /** Model whose tokenizer produced the cached per-message token counts. */
   tokenizerModel?: string;
   tokenizerIdentity?: string;
+}
+
+export interface CompactHistory {
+  failureCause?: string;
+  targetReached?: boolean;
+  compactId: string;
+  ts: number;
+  source: "manual" | "auto";
+  status: "executed" | "failed" | "skipped";
+  beforeTokens: number;
+  afterTokens?: number;
+  beforeMessages: number;
+  afterMessages?: number;
+  keepTail: number;
+  error?: string;
+  diagnostics?: CompletionDiagnostics;
 }

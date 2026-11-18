@@ -475,6 +475,7 @@ export interface PromptMessage {
   role: "system" | "user" | "assistant" | "tool";
   content: LlmContent;
   reasoning_content?: string;
+  responseHistory?: import("./responseHistory.js").ResponseHistory;
 }
 
 /**

@@ -1,3 +1,4 @@
+import { normalizeModelProtocol } from "../../../llm/serverTypes.js";
 import { renderSettings, renderToolAutoApprovals, clampPercent } from "./settings.js";
 import { renderMemories, bindMemories, memoryContextActions } from "./memories.js";
 import type { SideViewState } from "./types.js";
@@ -229,10 +230,19 @@ function bind(): void {
     state.serverApiKeyDraft = undefined;
     if (keyInput) keyInput.value = "";
     render();
-    send({ type: "validateEndpoint", url, requestId: state.endpointRequestId, apiKey });
+    send({ type: "validateEndpoint", url, requestId: state.endpointRequestId, apiKey, protocol: normalizeModelProtocol(state.settings.protocol) });
   });
   keyInput?.addEventListener("input", event => {
     state.serverApiKeyDraft = (event.target as HTMLInputElement).value;
+  });
+  root.querySelector("#protocol")?.addEventListener("change", event => {
+    state.endpointTesting = false;
+    state.endpointRequestId = undefined;
+    state.endpointSubmitted = undefined;
+    state.endpointMetadata = undefined;
+    state.endpointMsg = undefined;
+    send({ type: "saveSetting", key: "protocol", value: (event.target as HTMLSelectElement).value });
+    render();
   });
   bindSetting("model", "change", v => v);
   bindSetting("toolCallingMode", "change", v => v);
@@ -378,6 +388,7 @@ window.addEventListener("message", ev => {
         render();
       }
       if (msg.key === "reasoningEffort" && !msg.ok) { state.reasoningEffortError = msg.error; render(); }
+      if (msg.key === "protocol" && !msg.ok) { state.endpointMsg = { ok: false, text: msg.error ?? "Could not save protocol." }; render(); }
       if (msg.key === "reasoningBudget" && !msg.ok) { state.reasoningBudgetError = msg.error; render(); }
       break;
     case "memories": state.memories = msg.memories; state.memoryWarnings = msg.warnings; state.memoryError = undefined; render(); break;
@@ -417,6 +428,7 @@ window.addEventListener("message", ev => {
       if (msg.endpoint === (state.endpointDraft ?? state.settings.endpoint)) { state.hasServerApiKey = msg.configured; render(); }
       break;
     case "endpointValidation":
+      if (msg.protocol && msg.protocol !== normalizeModelProtocol(state.settings.protocol)) break;
       if (msg.requestId !== state.endpointRequestId && (state.endpointTesting || msg.requestId !== undefined)) break;
       state.endpointTesting = false;
       state.endpointRequestId = undefined;

@@ -18,6 +18,36 @@ afterEach(async () => {
 });
 
 describe("ChatStorage", () => {
+  it("retains completed Responses history on reload and forks, filtering corrupt payloads", async () => {
+    const storage = new ChatStorage(ws, chatsRoot);
+    const rec = storage.newRecord("native");
+    const history = { source: "local-source", text: "Answer", output: [{ type: "message" as const, id: "msg_1", role: "assistant" as const, status: "completed", content: [{ type: "output_text" as const, text: "Answer", annotations: [] }] }] };
+    rec.messages = [{ role: "user", content: "Earlier", ts: -1 }, { role: "assistant", content: "Earlier answer", ts: 0 },
+      { role: "user", content: "First", ts: 1 }, { role: "assistant", content: "Answer", responseHistory: history, ts: 2 }, { role: "user", content: "Next", ts: 3 }];
+    await storage.save(rec);
+    const loaded = (await storage.load(rec.id))!;
+    expect(loaded.messages[3].responseHistory).toEqual(history);
+    const full = await storage.fork(loaded);
+    expect((await storage.load(full.id))?.messages[3].responseHistory).toEqual(history);
+    expect((await storage.fork(loaded, 1)).messages[3].responseHistory).toEqual(history);
+    expect((await storage.fork(loaded, -1)).messages.some(message => message.responseHistory)).toBe(false);
+    rec.messages[3].responseHistory = { source: "local-source", output: [{ type: "function_call", arguments: "partial" } as never] };
+    await storage.save(rec);
+    expect((await storage.load(rec.id, true))?.messages[3].responseHistory).toBeUndefined();
+  });
+
+  it("restores compaction failures and excludes future outcomes from historical forks", async () => {
+    const storage = new ChatStorage(ws, chatsRoot);
+    const rec = storage.newRecord("native");
+    rec.messages = [{ role: "user", content: "first", ts: 1 }, { role: "assistant", content: "answer", ts: 2 }, { role: "user", content: "next", ts: 4 }];
+    rec.compactions = [{ compactId: "compact", ts: 3, source: "manual", status: "failed", beforeTokens: 5000, beforeMessages: 2, keepTail: 1,
+      error: "Output limit", diagnostics: { cause: "generation_limit", finishReason: "length" } }];
+    await storage.save(rec);
+    const loaded = (await storage.load(rec.id))!;
+    expect(loaded.compactions).toEqual(rec.compactions);
+    expect((await storage.fork(loaded)).compactions).toEqual(rec.compactions);
+    expect((await storage.fork(loaded, 1)).compactions).toEqual([]);
+  });
   it("retains accepted turn prompts on reload and full forks, excluding them from earlier forks", async () => {
     const storage = new ChatStorage(ws, chatsRoot);
     const rec = storage.newRecord("native");
@@ -67,7 +97,7 @@ describe("ChatStorage", () => {
       { role: "user", content: "Next turn", ts: 5 }
     ];
     const forked = await storage.fork(rec, 1);
-    expect(forked.messages).toEqual(rec.messages.slice(0, 4));
+    expect(forked.messages).toMatchObject(rec.messages.slice(0, 4));
     expect((await storage.load(forked.id))?.messages[2].steering).toBe(true);
   });
 
@@ -416,7 +446,7 @@ describe("saved transcript and context", () => {
     ];
     rec.contextMessages = [{ role: "system", content: "[context summary] future request", ts: 4 }];
     const forked = await storage.fork(rec, 1);
-    expect(forked.messages).toEqual(rec.messages.slice(0, 2));
+    expect(forked.messages).toMatchObject(rec.messages.slice(0, 2));
     expect(forked.contextMessages).toBeUndefined();
     expect(JSON.stringify(await storage.load(forked.id))).not.toContain("future request");
   });
@@ -439,4 +469,22 @@ describe("image input restrictions", () => {
     const record = storage.newRecord("native");
     await expect(storage.importAttachmentBytes(record.id, "notes.txt", Buffer.from("notes"), { imageOnly: true })).rejects.toThrow("valid JPEG, PNG, or WebP");
   });
+});
+
+it("restores a valid checkpoint and drops corrupt metadata without losing readable context", async () => {
+  const storage = new ChatStorage(ws, chatsRoot);
+  const rec = storage.newRecord("native");
+  rec.messages = [{ id: "covered", role: "user", content: "earlier request", ts: 1 }];
+  rec.contextMessages = [{ id: "summary", role: "system", content: "[context summary]\nSaved facts", ts: 2 }];
+  rec.contextCheckpoint = { version: 1, summaryMessageId: "summary", summary: "Saved facts", sourceRevision: "revision",
+    coveredIds: ["covered"], protectedIds: [], evidenceIds: [], inputTokens: 50, targetReached: true };
+  await storage.save(rec);
+  const loaded = (await storage.load(rec.id))!;
+  expect(loaded.contextCheckpoint).toEqual(rec.contextCheckpoint);
+  expect((await storage.fork(loaded)).contextCheckpoint).toEqual(rec.contextCheckpoint);
+  rec.contextCheckpoint.summaryMessageId = "missing";
+  await storage.save(rec);
+  const invalid = (await storage.load(rec.id))!;
+  expect(invalid.contextCheckpoint).toBeUndefined();
+  expect(invalid.contextMessages).toEqual(rec.contextMessages);
 });

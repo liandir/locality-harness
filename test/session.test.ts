@@ -8,6 +8,13 @@ import type { ChatCompletionRequest } from "../src/llm/client.js";
 import { editDiffCases } from "./fixtures/editDiff.js";
 import { steeredConversation } from "./fixtures/steeredConversation.js";
 
+const testSummary = "GOAL: continue\nSTATE: current work\nDONE: completed changes\nPENDING: remaining tasks\nNEXT: verify";
+const compactionStorage = {
+  captureRevision: async () => undefined,
+  async saveCompaction(this: { save: (candidate: ChatRecord) => Promise<void> }, candidate: ChatRecord, _revision: string | undefined, assertCurrent: () => void, publish: () => void) {
+    assertCurrent(); await this.save(candidate); publish();
+  }
+};
 const planText = (markdown: string) => `<proposed_plan>\n${markdown}\n</proposed_plan>`;
 
 // Inspect the latest harness block, ignoring plain steering and tool messages.
@@ -26,6 +33,7 @@ const mocks = vi.hoisted(() => ({
   VisionUnsupportedError: class VisionUnsupportedError extends Error {},
   settings: {
     endpoint: "http://127.0.0.1:8080",
+    protocol: "responses" as "responses" | "chat-completions",
     model: "test-model",
     personalization: "",
     titlePrompt: "Summarize the user message in 2-6 words. Output ONLY the summary.",
@@ -109,7 +117,7 @@ vi.mock("../src/llm/client.js", () => ({
 }));
 
 vi.mock("../src/llm/server.js", async importOriginal => ({
-  ...await importOriginal<typeof import("../src/llm/server.js")>(), countServerPrompt: mocks.countPrompt
+  ...await importOriginal<typeof import("../src/llm/server.js")>(), countServerPrompt: (...args: unknown[]) => mocks.backend === "vllm" ? mocks.countPrompt(...args) : fakeRequestCount(args[0] as string, args[1] as ChatCompletionRequest)
 }));
 
 vi.mock("../src/tools/terminalTool.js", () => ({
@@ -117,6 +125,11 @@ vi.mock("../src/tools/terminalTool.js", () => ({
   startCommand: mocks.startCommand
 }));
 
+async function fakeRequestCount(endpoint: string, request: ChatCompletionRequest): Promise<number> {
+  let total = 0;
+  for (const message of request.messages) total += await mocks.tokenize(endpoint, JSON.stringify(message), request.model) + 4;
+  return total;
+}
 beforeEach(() => {
   mocks.configurationListeners.clear();
   mocks.updateSetting.mockReset().mockImplementation(async (key: string, value: unknown) => {
@@ -133,13 +146,14 @@ beforeEach(() => {
   mocks.runCommand.mockReset();
   mocks.startCommand.mockReset();
   mocks.tokenize.mockResolvedValue(1);
-  mocks.complete.mockResolvedValue("Test chat");
+  mocks.complete.mockImplementation(async (_endpoint, req) => req?.generation?.task === "compaction" ? testSummary : "Test chat");
   mocks.fetchServerContextSize.mockResolvedValue(32768);
   mocks.runCommand.mockResolvedValue({ exitCode: 0, stdout: "ok\n", stderr: "", truncated: false });
   mocks.startCommand.mockImplementation((command, cwd, signal, onOutput) =>
     mockCommandHandle(mocks.runCommand(command, cwd, signal, onOutput))
   );
   mocks.settings.personalization = "";
+  mocks.settings.protocol = "responses";
   mocks.settings.model = "test-model";
   mocks.settings.autoapproveReads = true;
   mocks.settings.autoapproveWrites = false;
@@ -222,7 +236,7 @@ describe("vLLM session lifecycle", () => {
     const { StreamFailure } = await import("../src/llm/completion.js");
     const record = newRecord();
     const events: UiEvent[] = [];
-    const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record, emit: event => events.push(event) });
+    const session = new ChatSession({ storage: { ...compactionStorage, save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record, emit: event => events.push(event) });
     mocks.streamChat.mockImplementation(async function* () {
       yield { kind: "thought", text: "Consider the tests." };
       yield { kind: "text", text: planText("- Implement the change\n- Run the tests") };
@@ -245,7 +259,7 @@ describe("vLLM session lifecycle", () => {
     const { ChatSession } = await import("../src/chat/session.js");
     const record = newRecord();
     const events: UiEvent[] = [];
-    const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: ws, record, emit: event => events.push(event) });
+    const session = new ChatSession({ storage: { ...compactionStorage, save: vi.fn() } as never, workspaceRoot: ws, record, emit: event => events.push(event) });
     let calls = 0;
     mocks.streamChat.mockImplementation(async function* (_endpoint, request) {
       if (++calls === 1) {
@@ -357,7 +371,7 @@ describe("interrupted turn continuation", () => {
     const { ChatSession } = await import("../src/chat/session.js");
     const record = newRecord();
     record.toolCallingMode = "native";
-    const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record, emit: vi.fn() });
+    const session = new ChatSession({ storage: { ...compactionStorage, save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record, emit: vi.fn() });
     mocks.streamChat.mockImplementation(async function* () {
       yield { kind: "thought", text: "Finished thinking." };
       yield { kind: "text", text: "Unfinished answer" };
@@ -379,7 +393,7 @@ describe("interrupted turn continuation", () => {
     const { ChatSession } = await import("../src/chat/session.js");
     const record = newRecord();
     record.toolCallingMode = "compat-qwen3";
-    const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: ws, record, emit: vi.fn() });
+    const session = new ChatSession({ storage: { ...compactionStorage, save: vi.fn() } as never, workspaceRoot: ws, record, emit: vi.fn() });
     let pass = 0;
     mocks.streamChat.mockImplementation(async function* (_endpoint, request) {
       if (request.tools) throw new mocks.NativeToolsUnsupportedError("tools unsupported");
@@ -393,10 +407,12 @@ describe("interrupted turn continuation", () => {
         typeof event === "object" && event !== null && "text" in event && event.text === "Finished legacy thinking."
       ));
       expect(thinking).toBeDefined();
+      expect(record.unconsumedExchangeId).toBeTruthy();
       expect(record.messages.filter(message => message.toolCall?.status === "executed")).toHaveLength(1);
       mocks.streamChat.mockImplementation(async function* () { yield { kind: "text", text: "Completed answer" }; });
       await session.continueTurn(record.messages.at(-1)!.ts);
       expect(record.messages).toContainEqual(thinking);
+      expect(record.unconsumedExchangeId).toBeUndefined();
       expect(record.messages.filter(message => message.toolCall?.status === "executed")).toHaveLength(1);
     } finally {
       await session.shutdown();
@@ -436,7 +452,7 @@ describe("interrupted turn continuation", () => {
       await expect(fs.stat(path.join(ws, "pending.txt"))).rejects.toThrow();
       await session.shutdown();
       const loaded = (await storage.load(record.id))!;
-      expect(loaded.messages.at(-1)).toEqual(terminal);
+      expect(loaded.messages.at(-1)).toMatchObject(JSON.parse(JSON.stringify(terminal)));
       session = new ChatSession({ storage, workspaceRoot: ws, record: loaded, emit: event => events.push(event) });
       const checkpointEvents = events.length;
       const completedHistory = structuredClone(loaded.messages.slice(0, -1));
@@ -477,7 +493,7 @@ describe("interrupted turn continuation", () => {
     const { ChatSession } = await import("../src/chat/session.js");
     const record = newRecord();
     const events: UiEvent[] = [];
-    const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record, emit: event => events.push(event) });
+    const session = new ChatSession({ storage: { ...compactionStorage, save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record, emit: event => events.push(event) });
     try {
       await session.sendUserMessage("Try this");
       const first = record.messages.at(-1)!.ts;
@@ -509,7 +525,7 @@ describe("interrupted turn continuation", () => {
     mocks.fetchServerContextSize.mockRejectedValue(new Error("offline"));
     const { ChatSession } = await import("../src/chat/session.js");
     const record = newRecord();
-    const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record, emit: vi.fn() });
+    const session = new ChatSession({ storage: { ...compactionStorage, save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record, emit: vi.fn() });
     const now = vi.spyOn(Date, "now").mockReturnValue(1_000);
     try {
       await session.sendUserMessage("Try this");
@@ -534,7 +550,7 @@ describe("interrupted turn continuation", () => {
     const { ChatSession } = await import("../src/chat/session.js");
     const record = newRecord();
     const events: UiEvent[] = [];
-    const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: ws, record, emit: event => events.push(event) });
+    const session = new ChatSession({ storage: { ...compactionStorage, save: vi.fn() } as never, workspaceRoot: ws, record, emit: event => events.push(event) });
     let pass = 0;
     mocks.streamChat.mockImplementation(async function* (_endpoint, request) {
       if (pass++ < 2) {
@@ -566,7 +582,7 @@ describe("interrupted turn continuation", () => {
     mocks.settings.toolCallingMode = "native";
     const { ChatSession } = await import("../src/chat/session.js");
     const record = newRecord();
-    const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record, emit: vi.fn() });
+    const session = new ChatSession({ storage: { ...compactionStorage, save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record, emit: vi.fn() });
     mocks.streamChat.mockImplementation(async function* () { yield { kind: "text", text: "Partial plan" }; throw new Error("Disconnected"); });
     try {
       await session.sendUserMessage("Plan it", [], "plan");
@@ -590,7 +606,7 @@ describe("session shutdown", () => {
     mocks.fetchServerContextSize.mockReturnValue(new Promise<number>(resolve => { release = resolve; }));
     const { ChatSession } = await import("../src/chat/session.js");
     const events: UiEvent[] = [];
-    const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record: newRecord(), emit: event => events.push(event) });
+    const session = new ChatSession({ storage: { ...compactionStorage, save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record: newRecord(), emit: event => events.push(event) });
     const turn = session.sendUserMessage("Do some work");
     await vi.waitFor(() => expect(mocks.fetchServerContextSize).toHaveBeenCalled());
     session.cancel();
@@ -605,7 +621,7 @@ describe("session shutdown", () => {
     mocks.fetchServerContextSize.mockReturnValue(new Promise<number>(resolve => { release = resolve; }));
     const { ChatSession } = await import("../src/chat/session.js");
     const save = vi.fn();
-    const session = new ChatSession({ storage: { save } as never, workspaceRoot: "/tmp/workspace", record: newRecord(), emit: vi.fn() });
+    const session = new ChatSession({ storage: { ...compactionStorage, save } as never, workspaceRoot: "/tmp/workspace", record: newRecord(), emit: vi.fn() });
     const turn = session.sendUserMessage("Start work");
     await vi.waitFor(() => expect(mocks.fetchServerContextSize).toHaveBeenCalled());
     let stopped = false;
@@ -625,9 +641,9 @@ describe("ChatSession", () => {
 
   it("labels reported prompt processing as context loading on every turn", async () => {
     mocks.streamChat.mockImplementation(async function* (
-      _endpoint: string, request: { return_progress?: boolean; onResponseAccepted?: () => void }
+      _endpoint: string, request: { generation?: ChatCompletionRequest["generation"]; onResponseAccepted?: () => void }
     ) {
-      expect(request.return_progress).toBe(true);
+      expect(request.generation?.reportProgress).toBe(true);
       request.onResponseAccepted?.();
       expect(events.filter(event => event.kind === "turnPreparing").at(-1))
         .toEqual({ kind: "turnPreparing", reason: "server" });
@@ -644,7 +660,7 @@ describe("ChatSession", () => {
     record.title = "Existing title";
     const events: UiEvent[] = [];
     const session = new ChatSession({
-      storage: { save: vi.fn(async () => undefined) } as never,
+      storage: { ...compactionStorage, save: vi.fn(async () => undefined) } as never,
       workspaceRoot: "/tmp/workspace", record, emit: event => events.push(event)
     });
 
@@ -671,7 +687,7 @@ describe("ChatSession", () => {
     );
     const events: UiEvent[] = [];
     const session = new ChatSession({
-      storage: { save: vi.fn(async () => undefined) } as never,
+      storage: { ...compactionStorage, save: vi.fn(async () => undefined) } as never,
       workspaceRoot: "/tmp/workspace",
       record,
       emit: event => events.push(event)
@@ -706,7 +722,7 @@ describe("ChatSession", () => {
         expect(events.filter(event => event.kind === "turnPreparing").at(-1)).toEqual(expected);
         yield { kind: "text", text: "Done." };
       });
-      const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: ws, record, emit: event => events.push(event) });
+      const session = new ChatSession({ storage: { ...compactionStorage, save: vi.fn() } as never, workspaceRoot: ws, record, emit: event => events.push(event) });
       const send = async (reason: string, mode: "act" | "review" = "review") => {
         expectedReason = reason;
         events.length = 0;
@@ -754,7 +770,7 @@ describe("ChatSession", () => {
         }
         yield { kind: "text", text: "Done." };
       });
-      const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record, emit: event => events.push(event) });
+      const session = new ChatSession({ storage: { ...compactionStorage, save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record, emit: event => events.push(event) });
       try {
         await session.sendUserMessage("First question");
         mocks.settings.personalization = "Use short answers.";
@@ -786,7 +802,7 @@ describe("ChatSession", () => {
         }
         yield { kind: "text", text: "Done." };
       });
-      const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record: newRecord(), emit: event => events.push(event) });
+      const session = new ChatSession({ storage: { ...compactionStorage, save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record: newRecord(), emit: event => events.push(event) });
       try {
         await session.sendUserMessage("First question");
         mocks.settings.personalization = "Use short answers.";
@@ -841,7 +857,7 @@ describe("ChatSession", () => {
     const record = newRecord();
     record.title = "Read files";
     const session = new ChatSession({
-      storage: { save: vi.fn(async () => undefined) } as never,
+      storage: { ...compactionStorage, save: vi.fn(async () => undefined) } as never,
       workspaceRoot: ws, record, emit: event => events.push(event)
     });
     await session.sendUserMessage("Read both files");
@@ -896,7 +912,7 @@ describe("ChatSession", () => {
     const record = newRecord();
     record.title = "Tool results";
     const session = new ChatSession({
-      storage: { save: vi.fn(async () => undefined) } as never,
+      storage: { ...compactionStorage, save: vi.fn(async () => undefined) } as never,
       workspaceRoot: ws, record, emit: event => events.push(event)
     });
     await session.sendUserMessage("Use the tool");
@@ -926,7 +942,7 @@ describe("ChatSession", () => {
     });
     const { ChatSession } = await import("../src/chat/session.js");
     const session = new ChatSession({
-      storage: { save: vi.fn(async () => undefined) } as never,
+      storage: { ...compactionStorage, save: vi.fn(async () => undefined) } as never,
       workspaceRoot: ws, record: newRecord(), emit: event => events.push(event)
     });
     await session.sendUserMessage("Read it twice");
@@ -954,7 +970,7 @@ describe("ChatSession", () => {
     const { ChatSession } = await import("../src/chat/session.js");
     const record = newRecord();
     const session = new ChatSession({
-      storage: { save: vi.fn(async () => undefined) } as never,
+      storage: { ...compactionStorage, save: vi.fn(async () => undefined) } as never,
       workspaceRoot: ws, record, emit: event => events.push(event)
     });
     await session.sendUserMessage("Read the file");
@@ -981,7 +997,7 @@ describe("ChatSession", () => {
     });
     const { ChatSession } = await import("../src/chat/session.js");
     const session = new ChatSession({
-      storage: { save: vi.fn(async () => undefined) } as never,
+      storage: { ...compactionStorage, save: vi.fn(async () => undefined) } as never,
       workspaceRoot: ws, record: newRecord(), emit: event => events.push(event)
     });
     await session.sendUserMessage("Read missing.txt");
@@ -1006,7 +1022,7 @@ describe("ChatSession", () => {
     const { ChatSession } = await import("../src/chat/session.js");
     const events: UiEvent[] = [];
     const session = new ChatSession({
-      storage: { save: vi.fn(async () => undefined) } as never,
+      storage: { ...compactionStorage, save: vi.fn(async () => undefined) } as never,
       workspaceRoot: "/tmp/workspace",
       record: newRecord(),
       emit: event => events.push(event)
@@ -1045,7 +1061,7 @@ describe("ChatSession", () => {
     const events: UiEvent[] = [];
     const record = newRecord();
     const session = new ChatSession({
-      storage: { save: vi.fn(async () => undefined) } as never,
+      storage: { ...compactionStorage, save: vi.fn(async () => undefined) } as never,
       workspaceRoot: "/tmp/workspace",
       record,
       emit: event => events.push(event)
@@ -1092,7 +1108,7 @@ describe("ChatSession", () => {
     const { ChatSession } = await import("../src/chat/session.js");
     const events: UiEvent[] = [];
     const session = new ChatSession({
-      storage: { save: vi.fn(async () => undefined) } as never,
+      storage: { ...compactionStorage, save: vi.fn(async () => undefined) } as never,
       workspaceRoot: ws,
       record: newRecord(),
       emit: event => events.push(event)
@@ -1124,6 +1140,102 @@ describe("ChatSession", () => {
     );
   });
 
+  it("keeps interrupted Responses reasoning and text out of completed model history", async () => {
+    mocks.settings.toolCallingMode = "native";
+    const { ChatSession } = await import("../src/chat/session.js");
+    const { StreamFailure } = await import("../src/llm/completion.js");
+    const record = newRecord();
+    mocks.streamChat.mockImplementation(async function* () {
+      yield { kind: "thought", text: "UNFINISHED_REASONING" };
+      yield { kind: "text", text: "UNFINISHED_TEXT" };
+      throw new StreamFailure("Connection lost", { cause: "unexpected_eof", completionEvidence: "none" });
+    });
+    const session = new ChatSession({ storage: { ...compactionStorage, save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record, emit: vi.fn() });
+    try {
+      await session.sendUserMessage("Do the work");
+      expect(JSON.stringify(record.messages)).toContain("UNFINISHED_TEXT");
+      expect(JSON.stringify(record.contextMessages)).not.toContain("UNFINISHED_");
+      expect(record.messages.some(message => message.responseHistory)).toBe(false);
+    } finally { await session.shutdown(); }
+  });
+
+  it("retains completed Responses reasoning when retrying a thought-only answer", async () => {
+    mocks.settings.toolCallingMode = "native";
+    const { ChatSession } = await import("../src/chat/session.js");
+    const record = newRecord();
+    const history = { source: "local-source", output: [{ type: "reasoning", id: "rs_1", summary: [], content: [{ type: "reasoning_text", text: "COMPLETED_REASONING" }] }] };
+    let pass = 0;
+    mocks.streamChat.mockImplementation(async function* (_endpoint, request) {
+      if (pass++ === 0) {
+        yield { kind: "thought", text: "COMPLETED_REASONING" };
+        yield { kind: "finish", reason: "stop", diagnostics: { completionEvidence: "response_completed" }, responseHistory: history };
+      } else {
+        expect(request.messages).toContainEqual(expect.objectContaining({ role: "assistant", responseHistory: { ...history, text: "" } }));
+        yield { kind: "text", text: "Answer" };
+      }
+    });
+    const session = new ChatSession({ storage: { ...compactionStorage, save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record, emit: vi.fn() });
+    try {
+      await session.sendUserMessage("Do the work");
+      expect(pass).toBe(2);
+      expect(record.messages.some(message => message.responseHistory)).toBe(true);
+    } finally { await session.shutdown(); }
+  });
+
+  it("persists Responses tool-only output and replays it after a reload", async () => {
+    const ws = await fs.mkdtemp(path.join(os.tmpdir(), "locality-responses-session-"));
+    const storage = new ChatStorage(ws, path.join(ws, "chats"));
+    const record = storage.newRecord("native");
+    mocks.settings.toolCallingMode = "native";
+    const history = { source: "local-source", output: [{ type: "function_call", id: "fc_read", call_id: "read", name: "list_dir", arguments: '{"path":"."}', status: "completed" }] };
+    let pass = 0;
+    mocks.streamChat.mockImplementation(async function* (_endpoint, request) {
+      if (pass++ === 0) {
+        yield { kind: "finish", reason: "tool_calls", diagnostics: { completionEvidence: "response_completed" }, responseHistory: history };
+        yield { kind: "toolCall", id: "read", name: "list_dir", argsJson: '{"path":"."}' };
+      } else {
+        expect(request.messages).toContainEqual(expect.objectContaining({ role: "assistant", content: "", responseHistory: { ...history, text: "" }, tool_calls: [expect.objectContaining({ id: "read" })] }));
+        yield { kind: "text", text: "Done" };
+      }
+    });
+    const { ChatSession } = await import("../src/chat/session.js");
+    let session = new ChatSession({ storage, workspaceRoot: ws, record, emit: vi.fn() });
+    try {
+      await session.sendUserMessage("List files");
+      expect(pass).toBe(2);
+      await session.shutdown();
+      const loaded = (await storage.load(record.id, true))!;
+      expect(loaded.messages.some(message => message.responseHistory?.output[0].type === "function_call")).toBe(true);
+      session = new ChatSession({ storage, workspaceRoot: ws, record: loaded, emit: vi.fn() });
+      await session.sendUserMessage("Continue");
+      expect(pass).toBe(3);
+    } finally { await session.shutdown(); await fs.rm(ws, { recursive: true, force: true }); }
+  });
+
+  it("continues a commentary-phase Responses plan before exposing approval", async () => {
+    mocks.settings.toolCallingMode = "native";
+    const record = newRecord();
+    const events: UiEvent[] = [];
+    const { ChatSession } = await import("../src/chat/session.js");
+    const session = new ChatSession({ storage: { ...compactionStorage, save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record, emit: event => events.push(event) });
+    let pass = 0;
+    mocks.streamChat.mockImplementation(async function* () {
+      const text = planText("- Implement\n- Verify");
+      expect(record.pendingPlanMessageTs).toBeUndefined();
+      yield { kind: "text", text };
+      yield { kind: "finish", reason: "stop", diagnostics: { completionEvidence: "response_completed" }, responseHistory: {
+        source: "local-source", output: [{ type: "message", id: `msg_${pass}`, role: "assistant", status: "completed", phase: pass++ === 0 ? "commentary" : "final_answer",
+          content: [{ type: "output_text", text, annotations: [] }] }]
+      } };
+    });
+    try {
+      await session.sendUserMessage("Plan this", [], "plan");
+      expect(pass).toBe(2);
+      expect(events.filter(event => event.kind === "planFinal")).toHaveLength(1);
+      expect(record.messages.at(-1)?.responseHistory).toMatchObject({ text: "- Implement\n- Verify", output: [{ phase: "final_answer" }] });
+    } finally { await session.shutdown(); }
+  });
+
   it("uses native tool schemas and replays calls/results with their protocol id", async () => {
     const ws = await fs.mkdtemp(path.join(os.tmpdir(), "locality-session-"));
     await fs.writeFile(path.join(ws, "a.txt"), "hello\n", "utf8");
@@ -1144,7 +1256,7 @@ describe("ChatSession", () => {
     const record = newRecord();
     const events: UiEvent[] = [];
     const session = new ChatSession({
-      storage: { save: vi.fn(async () => undefined) } as never,
+      storage: { ...compactionStorage, save: vi.fn(async () => undefined) } as never,
       workspaceRoot: ws,
       record,
       emit: event => events.push(event)
@@ -1188,9 +1300,7 @@ describe("ChatSession", () => {
     mocks.settings.toolCallingMode = "native";
     const requests: Array<{
       messages: Array<{ content: unknown }>;
-      thinking_budget_tokens?: number;
-      reasoning_effort?: string;
-      chat_template_kwargs?: Record<string, unknown>;
+      generation?: ChatCompletionRequest["generation"];
       tools?: Array<{ function: { name: string } }>;
     }> = [];
     let releaseFirstRequest = (): void => undefined;
@@ -1211,7 +1321,7 @@ describe("ChatSession", () => {
     record.reasoningEffort = "effort:high";
     const events: UiEvent[] = [];
     const session = new ChatSession({
-      storage: { save: vi.fn(async () => undefined) } as never,
+      storage: { ...compactionStorage, save: vi.fn(async () => undefined) } as never,
       workspaceRoot: ws,
       record,
       emit: event => events.push(event)
@@ -1227,14 +1337,13 @@ describe("ChatSession", () => {
 
     expect(requests).toHaveLength(3);
     for (const request of requests.slice(0, 2)) {
-      expect(request.thinking_budget_tokens).toBe(16384);
-      expect(request.reasoning_effort).toBe("high");
-      expect(request.chat_template_kwargs).toBeUndefined();
+      expect(request.generation?.reasoning?.budgetTokens).toBe(16384);
+      expect(request.generation?.reasoning?.effort).toBe("high");
+      expect(request.generation?.reasoning?.mode).toBe("default");
       expect(request.tools?.some(tool => tool.function.name === "create_file")).toBe(true);
     }
-    expect(requests[2].thinking_budget_tokens).toBe(0);
-    expect(requests[2].reasoning_effort).toBeUndefined();
-    expect(requests[2].chat_template_kwargs).toEqual({ enable_thinking: false });
+    expect(requests[2].generation?.reasoning?.mode).toBe("off");
+    expect(requests[2].generation?.reasoning?.effort).toBeUndefined();
     expect(requests[2].tools).toEqual(requests[0].tools);
     expect(latestUserContext(requests[2])).toContain("Current chat mode: plan.");
     expect(record.messages.filter(message => message.role === "user").map(message => message.mode)).toEqual(["act", "plan"]);
@@ -1255,7 +1364,7 @@ describe("ChatSession", () => {
     const composerMode = record.mode;
     const events: UiEvent[] = [];
     const session = new ChatSession({
-      storage: { save: vi.fn(async () => undefined) } as never,
+      storage: { ...compactionStorage, save: vi.fn(async () => undefined) } as never,
       workspaceRoot: "/tmp/workspace",
       record,
       emit: event => events.push(event)
@@ -1381,7 +1490,7 @@ describe("ChatSession", () => {
     const { ChatSession } = await import("../src/chat/session.js");
     const record = newRecord();
     const session = new ChatSession({
-      storage: { save: vi.fn(async () => undefined) } as never,
+      storage: { ...compactionStorage, save: vi.fn(async () => undefined) } as never,
       workspaceRoot: ws,
       record,
       emit: () => undefined
@@ -1414,7 +1523,7 @@ describe("ChatSession", () => {
     const record = newRecord();
     record.reasoningEffort = selection;
     const session = new ChatSession({
-      storage: { save: vi.fn(async () => undefined) } as never,
+      storage: { ...compactionStorage, save: vi.fn(async () => undefined) } as never,
       workspaceRoot: "/tmp/workspace",
       record,
       emit: () => undefined
@@ -1424,15 +1533,14 @@ describe("ChatSession", () => {
 
     expect(request).toMatchObject({
       model: "test-model",
-      thinking_budget_tokens: 12345,
-      reasoning_effort: effort
+      generation: { reasoning: { budgetTokens: 12345, effort } }
     });
   });
 
   it.each([
-    ["none", { enable_thinking: false }],
-    ["default", undefined]
-  ] as const)("sends the universal %s reasoning selection", async (selection, templateArgs) => {
+    ["none"],
+    ["default"]
+  ] as const)("sends the universal %s reasoning selection", async (selection) => {
     mocks.settings.toolCallingMode = "native";
     let request: Record<string, unknown> | undefined;
     mocks.streamChat.mockImplementation(async function* (_endpoint: string, value: Record<string, unknown>) {
@@ -1444,7 +1552,7 @@ describe("ChatSession", () => {
     const record = newRecord();
     record.reasoningEffort = selection;
     const session = new ChatSession({
-      storage: { save: vi.fn(async () => undefined) } as never,
+      storage: { ...compactionStorage, save: vi.fn(async () => undefined) } as never,
       workspaceRoot: "/tmp/workspace",
       record,
       emit: () => undefined
@@ -1453,16 +1561,15 @@ describe("ChatSession", () => {
     await session.sendUserMessage("answer briefly");
 
     expect(request).not.toHaveProperty("reasoning_effort");
-    expect(request).toHaveProperty("thinking_budget_tokens", selection === "none" ? 0 : 16384);
-    if (templateArgs) expect(request).toHaveProperty("chat_template_kwargs", templateArgs);
-    else expect(request).not.toHaveProperty("chat_template_kwargs");
+    expect(request).toHaveProperty("generation.reasoning.mode", selection === "none" ? "off" : "default");
+    expect(request).toHaveProperty("generation.reasoning.budgetTokens", 16384);
   });
 
   it("sends an unlimited budget when the setting is empty", async () => {
     mocks.settings.reasoningBudget = null;
     const { ChatSession } = await import("../src/chat/session.js");
     const session = new ChatSession({
-      storage: { save: vi.fn(async () => undefined) } as never,
+      storage: { ...compactionStorage, save: vi.fn(async () => undefined) } as never,
       workspaceRoot: "/tmp/workspace",
       record: newRecord(),
       emit: () => undefined
@@ -1472,7 +1579,7 @@ describe("ChatSession", () => {
 
     expect(mocks.streamChat).toHaveBeenCalledWith(
       mocks.settings.endpoint,
-      expect.objectContaining({ thinking_budget_tokens: -1 }),
+      expect.objectContaining({ generation: expect.objectContaining({ reasoning: expect.objectContaining({ budgetTokens: undefined }) }) }),
       expect.anything()
     );
   });
@@ -1489,7 +1596,7 @@ describe("ChatSession", () => {
     record.reasoningEffort = "none";
     const events: UiEvent[] = [];
     const session = new ChatSession({
-      storage: { save: vi.fn(async () => undefined) } as never,
+      storage: { ...compactionStorage, save: vi.fn(async () => undefined) } as never,
       workspaceRoot: "/tmp/workspace",
       record,
       emit: event => events.push(event)
@@ -1518,7 +1625,7 @@ describe("ChatSession", () => {
       { role: "assistant", content: "I will create the refactored file.", ts: Date.now() }
     );
     const session = new ChatSession({
-      storage: { save: vi.fn(async () => undefined) } as never,
+      storage: { ...compactionStorage, save: vi.fn(async () => undefined) } as never,
       workspaceRoot: "/tmp/workspace",
       record,
       emit: () => undefined
@@ -1549,7 +1656,7 @@ describe("ChatSession", () => {
       }
     );
     const session = new ChatSession({
-      storage: { save: vi.fn(async () => undefined) } as never,
+      storage: { ...compactionStorage, save: vi.fn(async () => undefined) } as never,
       workspaceRoot: "/tmp/workspace",
       record,
       emit: () => undefined
@@ -1568,7 +1675,7 @@ describe("ChatSession", () => {
     const { ChatSession } = await import("../src/chat/session.js");
     const record = newRecord();
     record.messages = steeredConversation();
-    const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record, emit: () => {} });
+    const session = new ChatSession({ storage: { ...compactionStorage, save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record, emit: () => {} });
     const internal = session as unknown as { toolProtocol: "native" | "legacy"; buildPromptMessages(): Promise<import("../src/llm/client.js").LlmMessage[]> };
     internal.toolProtocol = toolProtocol;
     try {
@@ -1601,7 +1708,7 @@ describe("ChatSession", () => {
     ];
     record.contextMessages = [{ role: "system", content: "[context summary] current task", ts: answerTs }];
     const session = new ChatSession({
-      storage: { save: vi.fn(async () => undefined) } as never,
+      storage: { ...compactionStorage, save: vi.fn(async () => undefined) } as never,
       workspaceRoot: "/tmp/workspace", record, emit: () => undefined
     });
     const internal = session as unknown as {
@@ -1617,7 +1724,7 @@ describe("ChatSession", () => {
     expect(JSON.stringify(messages)).not.toContain(new Date(answerTs).toISOString());
     expect(JSON.stringify(messages)).not.toContain(new Date(firstTs).toISOString());
     expect(messages[0].content).not.toContain(new Date(latestTs).toISOString());
-    await internal.promptOverheadTokens(mocks.settings);
+    await fakeRequestCount(mocks.settings.endpoint, { messages: messages as ChatCompletionRequest["messages"] });
     expect(mocks.tokenize.mock.calls.some(call => String(call[1]).includes(new Date(latestTs).toISOString()))).toBe(true);
 
     // Advancing the transcript to a new user request updates the reference time.
@@ -1634,7 +1741,7 @@ describe("ChatSession", () => {
     const record = newRecord();
     const events: UiEvent[] = [];
     const session = new ChatSession({
-      storage: { save: vi.fn(async () => undefined) } as never,
+      storage: { ...compactionStorage, save: vi.fn(async () => undefined) } as never,
       workspaceRoot: "/tmp/workspace", record, emit: event => events.push(event)
     });
     await session.sendUserMessage("hello");
@@ -1659,7 +1766,7 @@ describe("ChatSession", () => {
     const { ChatSession } = await import("../src/chat/session.js");
     const events: UiEvent[] = [];
     const session = new ChatSession({
-      storage: { save: vi.fn(async () => undefined) } as never,
+      storage: { ...compactionStorage, save: vi.fn(async () => undefined) } as never,
       workspaceRoot: ws,
       record: newRecord(),
       emit: event => events.push(event)
@@ -1692,7 +1799,7 @@ describe("ChatSession", () => {
     const record = newRecord();
     record.toolCallingMode = "compat-gpt-oss";
     const session = new ChatSession({
-      storage: { save: vi.fn(async () => undefined) } as never,
+      storage: { ...compactionStorage, save: vi.fn(async () => undefined) } as never,
       workspaceRoot: ws,
       record,
       emit: event => events.push(event)
@@ -1729,7 +1836,7 @@ describe("ChatSession", () => {
     const record = newRecord();
     record.toolCallingMode = "compat-gpt-oss";
     const session = new ChatSession({
-      storage: { save: vi.fn(async () => undefined) } as never,
+      storage: { ...compactionStorage, save: vi.fn(async () => undefined) } as never,
       workspaceRoot: ws,
       record,
       emit: event => events.push(event)
@@ -1766,7 +1873,7 @@ describe("ChatSession", () => {
     const record = newRecord();
     record.toolCallingMode = "compat-gpt-oss";
     const session = new ChatSession({
-      storage: { save: vi.fn(async () => undefined) } as never,
+      storage: { ...compactionStorage, save: vi.fn(async () => undefined) } as never,
       workspaceRoot: ws,
       record,
       emit: event => events.push(event)
@@ -1802,7 +1909,7 @@ describe("ChatSession", () => {
     const record = newRecord();
     const events: UiEvent[] = [];
     const session = new ChatSession({
-      storage: { save: vi.fn(async () => undefined) } as never,
+      storage: { ...compactionStorage, save: vi.fn(async () => undefined) } as never,
       workspaceRoot: ws,
       record,
       emit: event => events.push(event)
@@ -1825,7 +1932,7 @@ describe("ChatSession", () => {
     const { ChatSession } = await import("../src/chat/session.js");
     const events: UiEvent[] = [];
     const session = new ChatSession({
-      storage: { save: vi.fn(async () => undefined) } as never,
+      storage: { ...compactionStorage, save: vi.fn(async () => undefined) } as never,
       workspaceRoot: "/tmp/workspace",
       record: newRecord(),
       emit: event => events.push(event)
@@ -1909,7 +2016,7 @@ describe("ChatSession", () => {
       expect(record.messages[0].content).toBe(`Explain these ${profile}`);
       expect(record.messages[0].attachments).toHaveLength(2);
       expect(record.contextMessages![0].attachments).toBeUndefined();
-      expect(record.contextMessages![0].tokens).toBe(1);
+      expect(record.contextMessages![0].tokens).toBeUndefined();
       expect(mocks.tokenize.mock.calls.some(call => String(call[1]).includes("CODE_SENTINEL"))).toBe(true);
       const loaded = (await storage.load(record.id))!;
       session = new ChatSession({ storage, workspaceRoot: dir, record: loaded, emit: () => undefined });
@@ -2030,7 +2137,7 @@ describe("ChatSession", () => {
     const { ChatSession } = await import("../src/chat/session.js");
     const events: UiEvent[] = [];
     const session = new ChatSession({
-      storage: { save: vi.fn(async () => undefined) } as never,
+      storage: { ...compactionStorage, save: vi.fn(async () => undefined) } as never,
       workspaceRoot: "/tmp/workspace",
       record: newRecord(),
       emit: event => events.push(event)
@@ -2050,7 +2157,7 @@ describe("ChatSession", () => {
     const { ChatSession } = await import("../src/chat/session.js");
     const events: UiEvent[] = [];
     const session = new ChatSession({
-      storage: { save: vi.fn(async () => undefined) } as never,
+      storage: { ...compactionStorage, save: vi.fn(async () => undefined) } as never,
       workspaceRoot: "/tmp/workspace",
       record: newRecord(),
       emit: event => events.push(event)
@@ -2087,7 +2194,7 @@ describe("ChatSession", () => {
       }
     );
     const session = new ChatSession({
-      storage: { save: vi.fn(async () => undefined) } as never,
+      storage: { ...compactionStorage, save: vi.fn(async () => undefined) } as never,
       workspaceRoot: "/tmp/workspace",
       record,
       emit: () => undefined
@@ -2116,7 +2223,7 @@ describe("ChatSession", () => {
     const { ChatSession } = await import("../src/chat/session.js");
     const events: UiEvent[] = [];
     const session = new ChatSession({
-      storage: { save: vi.fn(async () => undefined) } as never,
+      storage: { ...compactionStorage, save: vi.fn(async () => undefined) } as never,
       workspaceRoot: "/tmp/workspace",
       record: newRecord(),
       emit: event => events.push(event)
@@ -2141,7 +2248,7 @@ describe("ChatSession", () => {
     const record = newRecord();
     const events: UiEvent[] = [];
     const session = new ChatSession({
-      storage: { save: vi.fn(async () => undefined) } as never,
+      storage: { ...compactionStorage, save: vi.fn(async () => undefined) } as never,
       workspaceRoot: "/tmp/workspace",
       record,
       emit: event => events.push(event)
@@ -2171,7 +2278,7 @@ describe("ChatSession", () => {
     const record = newRecord();
     const events: UiEvent[] = [];
     const session = new ChatSession({
-      storage: { save: vi.fn(async () => undefined) } as never,
+      storage: { ...compactionStorage, save: vi.fn(async () => undefined) } as never,
       workspaceRoot: ws,
       record,
       emit: event => events.push(event)
@@ -2227,7 +2334,7 @@ describe("ChatSession", () => {
     const record = newRecord();
     const events: UiEvent[] = [];
     const session = new ChatSession({
-      storage: { save: vi.fn(async () => undefined) } as never,
+      storage: { ...compactionStorage, save: vi.fn(async () => undefined) } as never,
       workspaceRoot: ws,
       record,
       emit: event => events.push(event)
@@ -2286,7 +2393,7 @@ describe("ChatSession", () => {
     const events: UiEvent[] = [];
     const save = vi.fn(async () => undefined);
     const session = new ChatSession({
-      storage: { save } as never, workspaceRoot: "/tmp/workspace", record,
+      storage: { ...compactionStorage, save } as never, workspaceRoot: "/tmp/workspace", record,
       emit: event => events.push(event)
     });
     try {
@@ -2335,7 +2442,7 @@ describe("ChatSession", () => {
     const record = newRecord();
     const events: UiEvent[] = [];
     const session = new ChatSession({
-      storage: { save: vi.fn(async () => undefined) } as never,
+      storage: { ...compactionStorage, save: vi.fn(async () => undefined) } as never,
       workspaceRoot: "/tmp/workspace", record, emit: event => events.push(event)
     });
     try {
@@ -2370,7 +2477,7 @@ describe("ChatSession", () => {
     const record = newRecord();
     const events: UiEvent[] = [];
     const session = new ChatSession({
-      storage: { save: vi.fn(async () => undefined) } as never,
+      storage: { ...compactionStorage, save: vi.fn(async () => undefined) } as never,
       workspaceRoot: "/tmp/workspace",
       record,
       emit: event => events.push(event)
@@ -2395,7 +2502,7 @@ describe("ChatSession", () => {
     const record = newRecord();
     const events: UiEvent[] = [];
     const session = new ChatSession({
-      storage: { save: vi.fn(async () => undefined) } as never,
+      storage: { ...compactionStorage, save: vi.fn(async () => undefined) } as never,
       workspaceRoot: ws,
       record,
       emit: event => events.push(event)
@@ -2422,7 +2529,7 @@ describe("ChatSession", () => {
     const { ChatSession } = await import("../src/chat/session.js");
     const events: UiEvent[] = [];
     const session = new ChatSession({
-      storage: { save: vi.fn(async () => undefined) } as never,
+      storage: { ...compactionStorage, save: vi.fn(async () => undefined) } as never,
       workspaceRoot: "/tmp/workspace",
       record: newRecord(),
       emit: event => events.push(event)
@@ -2453,7 +2560,7 @@ describe("ChatSession", () => {
     });
     const { ChatSession } = await import("../src/chat/session.js");
     const record = newRecord();
-    const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record, emit: vi.fn() });
+    const session = new ChatSession({ storage: { ...compactionStorage, save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record, emit: vi.fn() });
     await session.sendUserMessage("Run tests");
     expect(mocks.startCommand).not.toHaveBeenCalled();
     const result = record.messages.find(message => message.role === "tool");
@@ -2471,7 +2578,7 @@ describe("ChatSession", () => {
     });
     const { ChatSession } = await import("../src/chat/session.js");
     const record = newRecord();
-    const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record, emit: vi.fn() });
+    const session = new ChatSession({ storage: { ...compactionStorage, save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record, emit: vi.fn() });
     await session.sendUserMessage("Run the command");
     expect(mocks.startCommand).not.toHaveBeenCalled();
     expect(record.messages.find(message => message.role === "tool")?.toolCall?.status).toBe("failed");
@@ -2558,7 +2665,7 @@ describe("ChatSession", () => {
     const { ChatSession } = await import("../src/chat/session.js");
     const record = newRecord();
     const session = new ChatSession({
-      storage: { save: vi.fn(async () => undefined) } as never,
+      storage: { ...compactionStorage, save: vi.fn(async () => undefined) } as never,
       workspaceRoot: "/tmp/workspace",
       record,
       emit: event => events.push(event)
@@ -2605,7 +2712,7 @@ describe("ChatSession", () => {
     const { ChatSession } = await import("../src/chat/session.js");
     const record = newRecord();
     const events: UiEvent[] = [];
-    const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record, emit: event => events.push(event) });
+    const session = new ChatSession({ storage: { ...compactionStorage, save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record, emit: event => events.push(event) });
     await session.sendUserMessage("Run the command");
     expect(events).toContainEqual(expect.objectContaining({ kind: "processJobState", status: "failed", resultPreview: "error: runner connection lost" }));
     expect(record.messages.find(message => message.toolCall?.id === "yield_then_fail")?.toolCall)
@@ -2653,7 +2760,7 @@ describe("ChatSession", () => {
     const record = newRecord();
     const events: UiEvent[] = [];
     const session = new ChatSession({
-      storage: { save: vi.fn(async () => undefined) } as never,
+      storage: { ...compactionStorage, save: vi.fn(async () => undefined) } as never,
       workspaceRoot: "/tmp/workspace",
       record,
       emit: event => events.push(event)
@@ -2716,7 +2823,7 @@ describe("ChatSession", () => {
     const { ChatSession } = await import("../src/chat/session.js");
     const events: UiEvent[] = [];
     const session = new ChatSession({
-      storage: { save: vi.fn(async () => undefined) } as never,
+      storage: { ...compactionStorage, save: vi.fn(async () => undefined) } as never,
       workspaceRoot: "/tmp/workspace",
       record: newRecord(),
       emit: event => events.push(event)
@@ -2815,7 +2922,7 @@ describe("ChatSession", () => {
     const { ChatSession } = await import("../src/chat/session.js");
     const events: UiEvent[] = [];
     const session = new ChatSession({
-      storage: { save: vi.fn(async () => undefined) } as never,
+      storage: { ...compactionStorage, save: vi.fn(async () => undefined) } as never,
       workspaceRoot: ws,
       record: newRecord(),
       emit: event => events.push(event)
@@ -2871,7 +2978,7 @@ describe("ChatSession", () => {
     const { ChatSession } = await import("../src/chat/session.js");
     const events: UiEvent[] = [];
     const session = new ChatSession({
-      storage: { save: vi.fn(async () => undefined) } as never,
+      storage: { ...compactionStorage, save: vi.fn(async () => undefined) } as never,
       workspaceRoot: ws,
       record: newRecord(),
       emit: event => events.push(event)
@@ -2903,7 +3010,7 @@ describe("ChatSession", () => {
     const { ChatSession } = await import("../src/chat/session.js");
     const record = newRecord();
     const events: UiEvent[] = [];
-    const storage = { save: vi.fn(async () => undefined) };
+    const storage = { ...compactionStorage, save: vi.fn(async () => undefined) };
     const session = new ChatSession({
       storage: storage as never,
       workspaceRoot: "/tmp/workspace",
@@ -2939,7 +3046,7 @@ describe("ChatSession", () => {
     const { ChatSession } = await import("../src/chat/session.js");
     const record = newRecord();
     const events: UiEvent[] = [];
-    const storage = { save: vi.fn(async () => undefined) };
+    const storage = { ...compactionStorage, save: vi.fn(async () => undefined) };
     const session = new ChatSession({
       storage: storage as never,
       workspaceRoot: "/tmp/workspace",
@@ -2982,7 +3089,7 @@ describe("ChatSession", () => {
     const { ChatSession } = await import("../src/chat/session.js");
     const events: UiEvent[] = [];
     const session = new ChatSession({
-      storage: { save: vi.fn(async () => undefined) } as never,
+      storage: { ...compactionStorage, save: vi.fn(async () => undefined) } as never,
       workspaceRoot: ws,
       record: newRecord(),
       emit: e => events.push(e)
@@ -3023,7 +3130,7 @@ describe("ChatSession", () => {
     const { ChatSession } = await import("../src/chat/session.js");
     const events: UiEvent[] = [];
     const session = new ChatSession({
-      storage: { save: vi.fn(async () => undefined) } as never,
+      storage: { ...compactionStorage, save: vi.fn(async () => undefined) } as never,
       workspaceRoot: ws,
       record: newRecord(),
       emit: e => events.push(e)
@@ -3053,7 +3160,7 @@ describe("ChatSession", () => {
     const { ChatSession } = await import("../src/chat/session.js");
     const events: UiEvent[] = [];
     const session = new ChatSession({
-      storage: { save: vi.fn(async () => undefined) } as never,
+      storage: { ...compactionStorage, save: vi.fn(async () => undefined) } as never,
       workspaceRoot: ws,
       record: newRecord(),
       emit: e => events.push(e)
@@ -3092,7 +3199,7 @@ describe("ChatSession", () => {
     const record = newRecord();
     const events: UiEvent[] = [];
     const session = new ChatSession({
-      storage: { save: vi.fn(async () => undefined) } as never,
+      storage: { ...compactionStorage, save: vi.fn(async () => undefined) } as never,
       workspaceRoot: "/tmp/workspace",
       record,
       emit: e => events.push(e)
@@ -3131,7 +3238,7 @@ describe("ChatSession", () => {
     const { ChatSession } = await import("../src/chat/session.js");
     const record = newRecord();
     const session = new ChatSession({
-      storage: { save: vi.fn(async () => undefined) } as never,
+      storage: { ...compactionStorage, save: vi.fn(async () => undefined) } as never,
       workspaceRoot: "/tmp/workspace", record,
       emit: event => {
         if (event.kind === "toolCallProposed") mocks.settings.autoapproveCommands = false;
@@ -3167,7 +3274,7 @@ describe("ChatSession", () => {
       record.mode = mode;
       const events: UiEvent[] = [];
       const session = new ChatSession({
-        storage: { save: vi.fn(async () => undefined) } as never,
+        storage: { ...compactionStorage, save: vi.fn(async () => undefined) } as never,
         workspaceRoot: "/tmp/workspace", record, emit: event => events.push(event)
       });
       await session.sendUserMessage("Inspect the tests");
@@ -3294,7 +3401,7 @@ describe("ChatSession", () => {
         record.mode = mode;
         const events: UiEvent[] = [];
         const session = new ChatSession({
-          storage: { save: vi.fn(async () => undefined) } as never,
+          storage: { ...compactionStorage, save: vi.fn(async () => undefined) } as never,
           workspaceRoot: ws, record, emit: event => events.push(event)
         });
         try {
@@ -3329,7 +3436,7 @@ describe("ChatSession", () => {
     let resolveProposed: (id: string) => void = () => undefined;
     const proposedId = new Promise<string>(r => { resolveProposed = r; });
     const session = new ChatSession({
-      storage: { save: vi.fn(async () => undefined) } as never,
+      storage: { ...compactionStorage, save: vi.fn(async () => undefined) } as never,
       workspaceRoot: "/tmp/workspace",
       record: newRecord(),
       emit: e => {
@@ -3367,7 +3474,7 @@ describe("ChatSession", () => {
     const { ChatSession } = await import("../src/chat/session.js");
     const events: UiEvent[] = [];
     const session = new ChatSession({
-      storage: { save: vi.fn(async () => undefined) } as never,
+      storage: { ...compactionStorage, save: vi.fn(async () => undefined) } as never,
       workspaceRoot: "/tmp/workspace",
       record: newRecord(),
       emit: event => {
@@ -3401,7 +3508,7 @@ describe("ChatSession", () => {
     let resolveProposed: (id: string) => void = () => undefined;
     const proposedId = new Promise<string>(resolve => { resolveProposed = resolve; });
     const session = new ChatSession({
-      storage: { save: vi.fn(async () => undefined) } as never,
+      storage: { ...compactionStorage, save: vi.fn(async () => undefined) } as never,
       workspaceRoot: "/tmp/workspace",
       record: newRecord(),
       emit: event => {
@@ -3442,7 +3549,7 @@ describe("ChatSession", () => {
     const record = newRecord();
     const events: UiEvent[] = [];
     const session = new ChatSession({
-      storage: { save: vi.fn(async () => undefined) } as never,
+      storage: { ...compactionStorage, save: vi.fn(async () => undefined) } as never,
       workspaceRoot: "/tmp/workspace",
       record,
       emit: e => events.push(e)
@@ -3479,7 +3586,7 @@ describe("ChatSession", () => {
     const { ChatSession } = await import("../src/chat/session.js");
     const events: UiEvent[] = [];
     const session = new ChatSession({
-      storage: { save: vi.fn(async () => undefined) } as never,
+      storage: { ...compactionStorage, save: vi.fn(async () => undefined) } as never,
       workspaceRoot: ws,
       record: newRecord(),
       emit: event => events.push(event)
@@ -3515,7 +3622,7 @@ describe("ChatSession", () => {
     const { ChatSession } = await import("../src/chat/session.js");
     const record = newRecord();
     const session = new ChatSession({
-      storage: { save: vi.fn(async () => undefined) } as never,
+      storage: { ...compactionStorage, save: vi.fn(async () => undefined) } as never,
       workspaceRoot: ws,
       record,
       emit: () => undefined
@@ -3542,7 +3649,7 @@ describe("ChatSession", () => {
     const { ChatSession } = await import("../src/chat/session.js");
     const events: UiEvent[] = [];
     const session = new ChatSession({
-      storage: { save: vi.fn(async () => undefined) } as never,
+      storage: { ...compactionStorage, save: vi.fn(async () => undefined) } as never,
       workspaceRoot: "/tmp/workspace",
       record: newRecord(),
       emit: e => events.push(e)
@@ -3574,7 +3681,7 @@ describe("ChatSession", () => {
     const record = newRecord();
     const events: UiEvent[] = [];
     const session = new ChatSession({
-      storage: { save: vi.fn(async () => undefined) } as never,
+      storage: { ...compactionStorage, save: vi.fn(async () => undefined) } as never,
       workspaceRoot: ws,
       record,
       emit: e => events.push(e)
@@ -3606,7 +3713,7 @@ describe("ChatSession", () => {
     const { ChatSession } = await import("../src/chat/session.js");
     const events: UiEvent[] = [];
     const session = new ChatSession({
-      storage: { save: vi.fn(async () => undefined) } as never,
+      storage: { ...compactionStorage, save: vi.fn(async () => undefined) } as never,
       workspaceRoot: "/tmp/workspace",
       record: newRecord(),
       emit: e => events.push(e)
@@ -3635,7 +3742,7 @@ describe("ChatSession", () => {
     const record = newRecord();
     const events: UiEvent[] = [];
     const session = new ChatSession({
-      storage: { save: vi.fn(async () => undefined) } as never,
+      storage: { ...compactionStorage, save: vi.fn(async () => undefined) } as never,
       workspaceRoot: "/tmp/workspace",
       record,
       emit: e => events.push(e)
@@ -3659,7 +3766,7 @@ describe("ChatSession", () => {
     const { ChatSession } = await import("../src/chat/session.js");
     const events: UiEvent[] = [];
     const session = new ChatSession({
-      storage: { save: vi.fn(async () => undefined) } as never,
+      storage: { ...compactionStorage, save: vi.fn(async () => undefined) } as never,
       workspaceRoot: "/tmp/workspace",
       record: newRecord(),
       emit: e => events.push(e)
@@ -3695,7 +3802,7 @@ describe("ChatSession", () => {
     const record = newRecord();
     const events: UiEvent[] = [];
     const session = new ChatSession({
-      storage: { save: vi.fn(async () => undefined) } as never,
+      storage: { ...compactionStorage, save: vi.fn(async () => undefined) } as never,
       workspaceRoot: "/tmp/workspace",
       record,
       emit: event => events.push(event)
@@ -3729,7 +3836,7 @@ describe("ChatSession", () => {
     const { ChatSession } = await import("../src/chat/session.js");
     const record = newRecord();
     const session = new ChatSession({
-      storage: { save: vi.fn(async () => undefined) } as never,
+      storage: { ...compactionStorage, save: vi.fn(async () => undefined) } as never,
       workspaceRoot: ws,
       record,
       emit: () => undefined
@@ -3765,7 +3872,7 @@ describe("ChatSession", () => {
     const { ChatSession } = await import("../src/chat/session.js");
     const record = newRecord();
     const session = new ChatSession({
-      storage: { save: vi.fn(async () => undefined) } as never,
+      storage: { ...compactionStorage, save: vi.fn(async () => undefined) } as never,
       workspaceRoot: ws,
       record,
       emit: () => undefined
@@ -3797,7 +3904,7 @@ describe("ChatSession", () => {
     const { ChatSession } = await import("../src/chat/session.js");
     const record = newRecord();
     const session = new ChatSession({
-      storage: { save: vi.fn(async () => undefined) } as never,
+      storage: { ...compactionStorage, save: vi.fn(async () => undefined) } as never,
       workspaceRoot: ws,
       record,
       emit: () => undefined
@@ -3827,7 +3934,7 @@ describe("ChatSession", () => {
     const { ChatSession } = await import("../src/chat/session.js");
     const record = newRecord();
     const session = new ChatSession({
-      storage: { save: vi.fn(async () => undefined) } as never,
+      storage: { ...compactionStorage, save: vi.fn(async () => undefined) } as never,
       workspaceRoot: ws,
       record,
       emit: () => undefined
@@ -3857,7 +3964,7 @@ describe("ChatSession", () => {
     const record = newRecord();
     const events: UiEvent[] = [];
     const session = new ChatSession({
-      storage: { save: vi.fn(async () => undefined) } as never,
+      storage: { ...compactionStorage, save: vi.fn(async () => undefined) } as never,
       workspaceRoot: ws,
       record,
       emit: e => events.push(e)
@@ -3869,7 +3976,7 @@ describe("ChatSession", () => {
     expect(toolResult?.content).toBe("[lines 2-3 of 4]\n2\ttwo\n3\tthree");
   });
 
-  it.each([false, true])("updates streaming context at most every 250ms without tokenization requests (legacy=%s)", async legacy => {
+  it.each([false, true])("holds the last measured context count while streaming without tokenization requests (legacy=%s)", async legacy => {
     const { ChatSession } = await import("../src/chat/session.js");
     const events: UiEvent[] = [];
     const tokens = () => events.filter((event): event is Extract<UiEvent, { kind: "tokens" }> => event.kind === "tokens");
@@ -3894,13 +4001,13 @@ describe("ChatSession", () => {
       yield { kind: "usage", promptTokens: 777, completionTokens: 45 };
       observe();
     });
-    const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record: newRecord(), emit: event => events.push(event) });
+    const session = new ChatSession({ storage: { ...compactionStorage, save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record: newRecord(), emit: event => events.push(event) });
     try {
       await session.sendUserMessage("Stream a response");
       expect(observations).toHaveLength(6);
       const base = observations[0];
-      expect(observations.slice(0, 5).map(value => value.total - base.total)).toEqual([0, 10, 10, 30, 40]);
-      expect(observations.slice(0, 5).map(value => value.count - base.count)).toEqual([0, 1, 1, 2, 3]);
+      expect(observations.slice(0, 5).map(value => value.total - base.total)).toEqual([0, 0, 0, 0, 0]);
+      expect(observations.slice(0, 5).map(value => value.count - base.count)).toEqual([0, 0, 0, 0, 0]);
       expect(observations.every(value => value.tokenizerCalls === base.tokenizerCalls)).toBe(true);
       expect(tokens().at(-1)?.total).toBe(822);
       expect(events.some(event => event.kind === "abort")).toBe(false);
@@ -3910,7 +4017,7 @@ describe("ChatSession", () => {
     }
   });
 
-  it("uses prompt progress as the live baseline and counts cumulative streamed tool content once", async () => {
+  it("uses server prompt progress without estimating streamed tool tokens", async () => {
     const { ChatSession } = await import("../src/chat/session.js");
     const events: UiEvent[] = [];
     const observations: number[] = [];
@@ -3935,10 +4042,10 @@ describe("ChatSession", () => {
       observe();
       yield { kind: "usage", promptTokens: 1000, completionTokens: 24 };
     });
-    const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record: newRecord(), emit: event => events.push(event) });
+    const session = new ChatSession({ storage: { ...compactionStorage, save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record: newRecord(), emit: event => events.push(event) });
     try {
       await session.sendUserMessage("Prepare a file");
-      expect(observations).toEqual([1000, 1010, 1020, 1025]);
+      expect(observations).toEqual([1000, 1000, 1000, 1000]);
       expect(events.some(event => event.kind === "abort")).toBe(false);
     } finally {
       await session.shutdown();
@@ -3959,7 +4066,7 @@ describe("ChatSession", () => {
         yield { kind: "text", text: "Done." };
       }
     });
-    const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record, emit: event => events.push(event) });
+    const session = new ChatSession({ storage: { ...compactionStorage, save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record, emit: event => events.push(event) });
     try {
       await session.sendUserMessage("Update tasks");
       expect(calls).toBe(2);
@@ -3979,7 +4086,7 @@ describe("ChatSession", () => {
     const { ChatSession } = await import("../src/chat/session.js");
     const events: UiEvent[] = [];
     const session = new ChatSession({
-      storage: { save: vi.fn(async () => undefined) } as never,
+      storage: { ...compactionStorage, save: vi.fn(async () => undefined) } as never,
       workspaceRoot: "/tmp/workspace",
       record: newRecord(),
       emit: e => events.push(e)
@@ -3999,7 +4106,7 @@ describe("ChatSession", () => {
     const { ChatSession } = await import("../src/chat/session.js");
     const events: UiEvent[] = [];
     const session = new ChatSession({
-      storage: { save: vi.fn(async () => undefined) } as never,
+      storage: { ...compactionStorage, save: vi.fn(async () => undefined) } as never,
       workspaceRoot: "/tmp/workspace",
       record: newRecord(),
       emit: event => events.push(event)
@@ -4018,7 +4125,7 @@ describe("ChatSession", () => {
     // tokenize returns 100 for the system prompt and 1 for everything else;
     // the emitted totals must include that fixed overhead.
     mocks.tokenize.mockImplementation(async (_endpoint: string, text: string) =>
-      text.startsWith("<|system|>") ? 100 : 1
+      text.includes('"role":"system"') ? 100 : 1
     );
     mocks.streamChat.mockImplementation(async function* (): AsyncGenerator<{ kind: "text"; text: string }, void, void> {
       yield { kind: "text", text: "hi" };
@@ -4027,7 +4134,7 @@ describe("ChatSession", () => {
     const { ChatSession } = await import("../src/chat/session.js");
     const events: UiEvent[] = [];
     const session = new ChatSession({
-      storage: { save: vi.fn(async () => undefined) } as never,
+      storage: { ...compactionStorage, save: vi.fn(async () => undefined) } as never,
       workspaceRoot: "/tmp/workspace",
       record: newRecord(),
       emit: e => events.push(e)
@@ -4045,7 +4152,7 @@ describe("ChatSession", () => {
     mocks.settings.autoCompact = true;
     mocks.settings.autoCompactThresholdPercent = 50;
     mocks.tokenize.mockImplementation(async (_endpoint: string, text: string) =>
-      text.includes("TRIGGER_COMPACTION") ? 20_000 : 1
+      text.includes("TRIGGER_COMPACTION") ? 7000 : text.includes("history") ? 2000 : 1
     );
     let call = 0;
     mocks.streamChat.mockImplementation(async function* (_endpoint: string, request: { onResponseAccepted?: () => void }) {
@@ -4084,7 +4191,7 @@ describe("ChatSession", () => {
     }));
     const events: UiEvent[] = [];
     const session = new ChatSession({
-      storage: { save: vi.fn(async () => undefined) } as never,
+      storage: { ...compactionStorage, save: vi.fn(async () => undefined) } as never,
       workspaceRoot: ws,
       record,
       emit: event => events.push(event)
@@ -4131,7 +4238,7 @@ describe("ChatSession", () => {
     const record = newRecord();
     const events: UiEvent[] = [];
     const session = new ChatSession({
-      storage: { save: vi.fn(async () => undefined) } as never,
+      storage: { ...compactionStorage, save: vi.fn(async () => undefined) } as never,
       workspaceRoot: "/tmp/workspace",
       record,
       emit: e => events.push(e)
@@ -4165,7 +4272,7 @@ describe("ChatSession", () => {
     const { ChatSession } = await import("../src/chat/session.js");
     const events: UiEvent[] = [];
     const session = new ChatSession({
-      storage: { save: vi.fn(async () => undefined) } as never,
+      storage: { ...compactionStorage, save: vi.fn(async () => undefined) } as never,
       workspaceRoot: "/tmp/workspace",
       record: newRecord(),
       emit: e => events.push(e)
@@ -4255,7 +4362,7 @@ describe("live tool permissions", () => {
     const record = newRecord();
     const events: UiEvent[] = [];
     session = new ChatSession({
-      storage: { save: vi.fn(async () => undefined) } as never, workspaceRoot, record,
+      storage: { ...compactionStorage, save: vi.fn(async () => undefined) } as never, workspaceRoot, record,
       emit: event => {
         events.push(event);
         if (event.kind === "toolCallProposed") proposals[proposalIndex++].resolve(event);
@@ -4389,6 +4496,13 @@ describe("length-limited generation recovery", () => {
 
   it.each(["native", "legacy"])("discards unfinished %s output, compacts, and continues the same turn", async protocol => {
     mocks.settings.autoCompact = true;
+    mocks.complete.mockImplementation(async (_endpoint, request) => {
+      if (request.generation?.task === "compaction") {
+        expect(mocks.tokenize.mock.calls.some(call => String(call[1]).includes("[harness recovery]"))).toBe(true);
+        return testSummary;
+      }
+      return "Title";
+    });
     const record = recoveryRecord();
     record.toolCallingMode = protocol === "native" ? "native" : "compat-gemma4";
     const events: UiEvent[] = [];
@@ -4415,7 +4529,7 @@ describe("length-limited generation recovery", () => {
       yield { kind: "text", text: "Completed answer" };
     });
     const { ChatSession } = await import("../src/chat/session.js");
-    const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record, emit: e => events.push(e) });
+    const session = new ChatSession({ storage: { ...compactionStorage, save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record, emit: e => events.push(e) });
     await session.sendUserMessage("CURRENT_REQUEST_SENTINEL");
 
     expect(generation).toBe(2);
@@ -4457,7 +4571,7 @@ describe("length-limited generation recovery", () => {
         }
       });
       const { ChatSession } = await import("../src/chat/session.js");
-      const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: ws, record, emit: e => events.push(e) });
+      const session = new ChatSession({ storage: { ...compactionStorage, save: vi.fn() } as never, workspaceRoot: ws, record, emit: e => events.push(e) });
       await session.sendUserMessage("Create done.ts");
       expect(await fs.readFile(path.join(ws, "done.ts"), "utf8")).toBe("export const done = true;");
       expect(record.messages.filter(message => message.role === "tool")).toHaveLength(1);
@@ -4477,7 +4591,7 @@ describe("length-limited generation recovery", () => {
       throw new mocks.GenerationLengthError("Generation limit");
     });
     const { ChatSession } = await import("../src/chat/session.js");
-    const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record, emit: e => events.push(e) });
+    const session = new ChatSession({ storage: { ...compactionStorage, save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record, emit: e => events.push(e) });
     if (outcome === "compaction-failed") mocks.complete.mockRejectedValue(new Error("Summary failed"));
     if (outcome === "cancelled") mocks.complete.mockImplementation(async (_endpoint, _request, signal: AbortSignal) => {
       session.cancel();
@@ -4490,7 +4604,7 @@ describe("length-limited generation recovery", () => {
     });
     await session.sendUserMessage("Continue");
     expect(mocks.streamChat).toHaveBeenCalledTimes(outcome === "repeated-limit" ? 2 : 1);
-    expect(events.filter(event => event.kind === "compactStart")).toHaveLength(outcome === "auto-disabled" || outcome === "cancelled-before-summary" ? 0 : 1);
+    expect(events.filter(event => event.kind === "compactStart")).toHaveLength(outcome === "auto-disabled" ? 0 : 1);
     expect(events).toContainEqual(expect.objectContaining({ kind: "abort", reason: outcome.startsWith("cancelled") ? "Cancelled." : "Generation limit", messageTs: expect.any(Number) }));
     expect(events.filter(event => event.kind === "turnEnd")).toEqual([]);
     expect(record.messages.at(-1)?.interruption).toBeDefined();
@@ -4509,11 +4623,110 @@ describe("length-limited generation recovery", () => {
       yield { kind: "text", text: "Concise answer" };
     });
     const { ChatSession } = await import("../src/chat/session.js");
-    const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record, emit: e => events.push(e) });
+    const session = new ChatSession({ storage: { ...compactionStorage, save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record, emit: e => events.push(e) });
     await session.sendUserMessage("Answer briefly");
     expect(mocks.streamChat).toHaveBeenCalledTimes(2);
     expect(events.some(event => event.kind === "compactStart" || event.kind === "abort")).toBe(false);
     expect(record.messages.at(-1)?.content).toBe("Concise answer");
+  });
+});
+
+describe("compaction transactions", () => {
+  it("defers manual compaction until the active generation has finished", async () => {
+    const { ChatSession } = await import("../src/chat/session.js");
+    const record = newRecord();
+    record.messages = [{ role: "user", content: "old request", ts: 1 }, { role: "assistant", content: "completed work ".repeat(100), ts: 2 }];
+    let release!: () => void, started!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const ready = new Promise<void>(resolve => { started = resolve; });
+    let ended = false;
+    mocks.streamChat.mockImplementation(async function* () { started(); await gate; ended = true; yield { kind: "text", text: "Final reply" }; });
+    mocks.complete.mockImplementation(async (_endpoint, req) => { if (req.generation?.task === "compaction") expect(ended).toBe(true); return testSummary; });
+    const events: UiEvent[] = [];
+    const session = new ChatSession({ storage: { ...compactionStorage, save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record, emit: event => events.push(event) });
+    const turn = session.sendUserMessage("continue");
+    await ready;
+    await session.compactNow();
+    expect(events.some(event => event.kind === "compactStart")).toBe(false);
+    expect(events).toContainEqual(expect.objectContaining({ kind: "notice", text: expect.stringContaining("queued") }));
+    release(); await turn;
+    expect(record.compactions?.at(-1)?.status).toBe("executed");
+    await session.shutdown();
+  });
+
+  beforeEach(() => {
+    mocks.tokenize.mockImplementation(async (_endpoint, text: string) => Math.ceil(text.length / 4));
+    mocks.countPrompt.mockImplementation(fakeRequestCount);
+  });
+  it("publishes inside the save queue so a queued rename cannot restore stale context", async () => {
+    const { ChatSession } = await import("../src/chat/session.js");
+    const record = newRecord();
+    record.messages = [{ role: "user", content: "request", ts: 1 }, { role: "assistant", content: "completed work ".repeat(100), ts: 2 }];
+    let saving!: () => void, release!: () => void;
+    const started = new Promise<void>(resolve => { saving = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let saved: ChatRecord | undefined;
+    let calls = 0;
+    const save = vi.fn(async (candidate: ChatRecord) => {
+      if (++calls === 1) { saving(); await gate; }
+      saved = structuredClone(candidate);
+    });
+    const session = new ChatSession({ storage: { ...compactionStorage, save } as never, workspaceRoot: "/tmp/workspace", record, emit: () => undefined });
+    const compaction = session.compactNow();
+    await started;
+    const rename = session.renameTitle("Renamed during save");
+    release();
+    await Promise.all([compaction, rename]);
+    expect(saved?.title).toBe("Renamed during save");
+    expect(saved?.contextMessages?.[0].content).toContain("[context summary]");
+    expect(saved?.compactions).toHaveLength(1);
+  });
+  it.each(["llama.cpp", "vllm"] as const)("coalesces concurrent manual compaction on %s and saves its outcome", async backend => {
+    mocks.backend = backend;
+    const { ChatSession } = await import("../src/chat/session.js");
+    const record = newRecord();
+    record.messages = [{ role: "user", content: "request", ts: 1 }, { role: "assistant", content: "completed work ".repeat(100), ts: 2 }];
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    mocks.complete.mockImplementation(async () => { await gate; return testSummary; });
+    const save = vi.fn(async () => undefined);
+    const events: UiEvent[] = [];
+    const session = new ChatSession({ storage: { ...compactionStorage, save } as never, workspaceRoot: "/tmp/workspace", record, emit: event => events.push(event) });
+    const first = session.compactNow();
+    const second = session.compactNow();
+    await vi.waitFor(() => expect(mocks.complete).toHaveBeenCalledTimes(1));
+    expect(session.isTurnActive()).toBe(true);
+    release();
+    await Promise.all([first, second]);
+    expect(events.filter(event => event.kind === "compactStart")).toHaveLength(1);
+    expect(record.compactions).toHaveLength(1);
+    expect(record.compactions![0].status).toBe("executed");
+    expect(save).toHaveBeenCalledTimes(1);
+    expect(session.isTurnActive()).toBe(false);
+  });
+
+  it.each(["save", "cancel", "change"])("preserves active and saved context on %s during compaction", async outcome => {
+    const { ChatSession } = await import("../src/chat/session.js");
+    const record = newRecord();
+    record.messages = [{ role: "user", content: "request", ts: 1 }, { role: "assistant", content: "completed work ".repeat(100), ts: 2 }];
+    const events: UiEvent[] = [];
+    let saved: ChatRecord | undefined;
+    const save = vi.fn(async (candidate: ChatRecord) => {
+      if (outcome === "save" && candidate.contextMessages?.[0]?.content.startsWith("[context summary]")) throw new Error("Disk full");
+      saved = structuredClone(candidate);
+    });
+    const session = new ChatSession({ storage: { ...compactionStorage, save } as never, workspaceRoot: "/tmp/workspace", record, emit: event => events.push(event) });
+    mocks.complete.mockImplementation(async () => {
+      if (outcome === "cancel") session.cancel();
+      if (outcome === "change") record.messages[0].content = "edited request";
+      return testSummary;
+    });
+    await session.compactNow();
+    expect(record.contextMessages).toBeUndefined();
+    expect(saved?.contextMessages).toBeUndefined();
+    expect(saved?.compactions?.[0].status).toBe("failed");
+    expect(events).toContainEqual(expect.objectContaining({ kind: "compactEnd", status: "failed" }));
+    expect(session.isTurnActive()).toBe(false);
   });
 });
 
@@ -4543,7 +4756,7 @@ describe("separate transcript and model context", () => {
     );
     const events: UiEvent[] = [];
     const session = new ChatSession({
-      storage: { save: vi.fn(async () => undefined) } as never,
+      storage: { ...compactionStorage, save: vi.fn(async () => undefined) } as never,
       workspaceRoot: "/tmp/workspace", record, emit: event => events.push(event)
     });
     try {
@@ -4557,7 +4770,8 @@ describe("separate transcript and model context", () => {
       expect(workIndex).toBeGreaterThan(-1);
       expect(compactIndex).toBeGreaterThan(workIndex);
       expect(compactEndIndex).toBeGreaterThan(compactIndex);
-      expect(turnIndex).toBeGreaterThan(compactEndIndex);
+      expect(turnIndex).toBeGreaterThan(workIndex);
+      expect(events.findIndex(event => event.kind === "text")).toBeGreaterThan(compactEndIndex);
       expect(events[compactEndIndex]).toMatchObject({ source: "auto", status: "executed" });
       // Reloading here clears the live assistant message and strands compaction
       // in a standalone row, outside the response's normal tool sub-sessions.
@@ -4585,7 +4799,7 @@ describe("separate transcript and model context", () => {
     }));
     const events: UiEvent[] = [];
     const session = new ChatSession({
-      storage: { save: vi.fn(async () => undefined) } as never,
+      storage: { ...compactionStorage, save: vi.fn(async () => undefined) } as never,
       workspaceRoot: "/tmp/workspace", record, emit: event => events.push(event)
     });
     await session.compactNow();
@@ -4641,7 +4855,7 @@ describe("separate transcript and model context", () => {
     ];
     const original = structuredClone(record.messages);
     let saved: ChatRecord | undefined;
-    const storage = { save: vi.fn(async (rec: ChatRecord) => { saved = structuredClone(rec); }) };
+    const storage = { ...compactionStorage, save: vi.fn(async (rec: ChatRecord) => { saved = structuredClone(rec); }) };
     const session = new ChatSession({ storage: storage as never, workspaceRoot: "/tmp/workspace", record, emit: () => undefined });
     await session.compactNow();
     expect(saved!.messages).toMatchObject(original);
@@ -4650,7 +4864,8 @@ describe("separate transcript and model context", () => {
     mocks.streamChat.mockImplementation(async function* () { yield { kind: "text", text: "new answer" }; });
     await reopened.sendUserMessage("new request");
     const request = mocks.streamChat.mock.calls[0][1];
-    expect(JSON.stringify(request.messages)).not.toContain("ORIGINAL_REQUEST_SENTINEL");
+    expect(JSON.stringify(request.messages)).toContain("ORIGINAL_REQUEST_SENTINEL");
+    expect(JSON.stringify(request.messages)).not.toContain("answer 0");
     expect(JSON.stringify(request.messages)).toContain("new request");
     expect(saved!.messages[0].content).toBe("ORIGINAL_REQUEST_SENTINEL");
     expect(saved!.messages.at(-1)?.content).toBe("new answer");
@@ -4682,12 +4897,12 @@ describe("separate transcript and model context", () => {
     const events: UiEvent[] = [];
     let saved!: ChatRecord;
     const save = vi.fn(async (rec: ChatRecord) => { saved = structuredClone(rec); });
-    const session = new ChatSession({ storage: { save } as never, workspaceRoot: "/tmp/workspace", record, emit: event => events.push(event) });
+    const session = new ChatSession({ storage: { ...compactionStorage, save } as never, workspaceRoot: "/tmp/workspace", record, emit: event => events.push(event) });
     mocks.streamChat.mockImplementation(async function* () { yield { kind: "text", text: "Revised answer" }; });
     if (action === "edit") await session.editUserMessage(9, "Revised request");
     else {
       expect(await session.deleteUserMessage(9)).toBe(true);
-      expect(record.totalTokens).toBe(1);
+      expect(record.totalTokens).toBe(40002); // Last measured count remains until a fresh request is counted.
       await session.sendUserMessage("Revised request");
     }
     expect(events.some(event => event.kind === "compactStart")).toBe(false);
@@ -4699,7 +4914,7 @@ describe("separate transcript and model context", () => {
     expect(record.totalTokens).toBeLessThan(100);
     expect(record.memoryCreations?.map(creation => creation.messageTs)).toEqual([8]);
     await session.shutdown();
-    const reopened = new ChatSession({ storage: { save } as never, workspaceRoot: "/tmp/workspace", record: saved, emit: event => events.push(event) });
+    const reopened = new ChatSession({ storage: { ...compactionStorage, save } as never, workspaceRoot: "/tmp/workspace", record: saved, emit: event => events.push(event) });
     await reopened.sendUserMessage("Continue after reopening");
     const replay = JSON.stringify(mocks.streamChat.mock.calls.at(-1)![1].messages);
     expect(replay).toContain("Earlier task is done");
@@ -4729,7 +4944,7 @@ describe("separate transcript and model context", () => {
     record.tokenizerModel = mocks.settings.model;
     record.totalTokens = 45015;
     const events: UiEvent[] = [];
-    const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record, emit: event => events.push(event) });
+    const session = new ChatSession({ storage: { ...compactionStorage, save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record, emit: event => events.push(event) });
     mocks.streamChat.mockImplementation(async function* () { yield { kind: "text", text: "New answer" }; });
     await session.editUserMessage(3, "Small revised request");
     expect(mocks.streamChat).toHaveBeenCalledOnce();
@@ -4743,7 +4958,7 @@ describe("separate transcript and model context", () => {
     expect(events.some(event => event.kind === "compactStart")).toBe(false);
     const counts = events.filter((event): event is Extract<UiEvent, { kind: "tokens" }> => event.kind === "tokens");
     expect(counts.length).toBeGreaterThan(0);
-    expect(counts.every(event => event.total < 100)).toBe(true);
+    expect(counts.at(-1)!.total).toBeLessThan(100);
     await session.shutdown();
   });
 
@@ -4758,7 +4973,7 @@ describe("separate transcript and model context", () => {
     record.contextMessages = [{ role: "system", content: "[context summary] obsolete response and future request", ts: 4 }];
     mocks.streamChat.mockImplementation(async function* () { yield { kind: "text", text: "revised answer" }; });
     const session = new ChatSession({
-      storage: { save: vi.fn(async () => undefined) } as never,
+      storage: { ...compactionStorage, save: vi.fn(async () => undefined) } as never,
       workspaceRoot: "/tmp/workspace", record, emit: () => undefined
     });
     await session.editUserMessage(1, "revised request");
@@ -4804,7 +5019,7 @@ describe("delete user messages", () => {
       expect(loaded.contextMessages).toBeUndefined();
       expect(loaded.planning).toBeUndefined();
       expect(loaded.pendingPlanMessageTs).toBeUndefined();
-      expect(loaded.totalTokens).toBe(30);
+      expect(loaded.totalTokens).toBe(100); // Do not manufacture a new prompt count from per-message caches.
       expect(loaded.memoryCreations?.map(creation => creation.messageTs)).toEqual([2]);
       await expect(fs.stat(storage.attachmentPath(record.id, removed))).rejects.toThrow();
       expect(await fs.readFile(storage.attachmentPath(record.id, retained), "utf8")).toBe("KEPT_ATTACHMENT");
@@ -4837,7 +5052,7 @@ describe("delete user messages", () => {
       { role: "assistant", content: "Later answer", ts: 4 }
     ];
     const save = vi.fn(async () => undefined);
-    const session = new ChatSession({ storage: { save } as never, workspaceRoot: "/tmp/workspace", record, emit: () => undefined });
+    const session = new ChatSession({ storage: { ...compactionStorage, save } as never, workspaceRoot: "/tmp/workspace", record, emit: () => undefined });
     expect(await session.deleteUserMessage(3)).toBe(true);
     expect(record.messages.map(message => message.ts)).toEqual([1, 2]);
     expect(await session.deleteUserMessage(1)).toBe(true);
@@ -4852,7 +5067,7 @@ describe("delete user messages", () => {
     const record = newRecord();
     record.messages = [{ role: "user", content: "Keep", ts: 1 }, { role: "assistant", content: "Answer", ts: 2 }];
     const save = vi.fn(async () => undefined);
-    const session = new ChatSession({ storage: { save } as never, workspaceRoot: "/tmp/workspace", record, emit: () => undefined });
+    const session = new ChatSession({ storage: { ...compactionStorage, save } as never, workspaceRoot: "/tmp/workspace", record, emit: () => undefined });
     expect(await session.deleteUserMessage(2)).toBe(false);
     expect(await session.deleteUserMessage(99)).toBe(false);
     expect(save).not.toHaveBeenCalled();
@@ -4880,10 +5095,10 @@ describe("delete user messages", () => {
     record.planning = true;
     const original = structuredClone(record);
     const events: UiEvent[] = [];
-    const storage = { save: vi.fn().mockRejectedValue(new Error("Disk full")), deleteAttachment: vi.fn() };
+    const storage = { ...compactionStorage, save: vi.fn().mockRejectedValue(new Error("Disk full")), deleteAttachment: vi.fn() };
     const session = new ChatSession({ storage: storage as never, workspaceRoot: "/tmp/workspace", record, emit: event => events.push(event) });
     expect(await session.deleteUserMessage(1)).toBe(false);
-    expect(record).toEqual(original);
+    expect(record).toMatchObject(original);
     expect(storage.deleteAttachment).not.toHaveBeenCalled();
     expect(events).toContainEqual({ kind: "notice", text: "Could not save the chat. No messages were deleted." });
     expect(events.some(event => event.kind === "chatLoaded")).toBe(false);
@@ -4898,7 +5113,7 @@ describe("workspace image viewing", () => {
     ["photo.jpg", "image/jpeg", Buffer.from([0xff, 0xd8, 0xff, 0xe0, 1])]
   ])("lists and views %s, retaining pixels after the original file is removed and the chat reloads", async (name, mime, bytes) => {
     const { ChatSession } = await import("../src/chat/session.js");
-    const { ChatStorage, VISION_TOKEN_RESERVE } = await import("../src/chat/storage.js");
+    const { ChatStorage } = await import("../src/chat/storage.js");
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "locality-view-image-"));
     try {
       const storage = new ChatStorage(root, path.join(root, "chats"));
@@ -4921,7 +5136,7 @@ describe("workspace image viewing", () => {
       expect(request.messages.find((message: { role: string; name?: string }) => message.role === "tool" && message.name === "view_image").content).toContain(`Image loaded: ${name}`);
       const stored = record.messages.find(message => message.toolCall?.name === "view_image")!;
       expect(stored.toolCall?.status).toBe("executed");
-      expect(stored.tokens).toBeGreaterThanOrEqual(VISION_TOKEN_RESERVE);
+      expect(stored.tokens).toBe(1); // Image cost is measured on the complete request, without a fixed reserve.
       expect(stored.attachments).toHaveLength(1);
       expect(events.find(event => event.kind === "toolCallProposed" && event.toolName === "view_image")).toMatchObject({ category: "read", approvalRequired: false });
       await fs.unlink(path.join(root, name));
@@ -4941,7 +5156,7 @@ describe("workspace image viewing", () => {
       else yield { kind: "text", text: "Unavailable." };
     });
     const { ChatSession } = await import("../src/chat/session.js");
-    const storage = { save: vi.fn(), importAttachment: vi.fn() };
+    const storage = { ...compactionStorage, save: vi.fn(), importAttachment: vi.fn() };
     const record = newRecord();
     const session = new ChatSession({ storage: storage as never, workspaceRoot: "/tmp/workspace", record, emit: vi.fn() });
     await session.sendUserMessage("Inspect an image");
@@ -4954,7 +5169,7 @@ describe("workspace image viewing", () => {
     mocks.supportsVision = false;
     const { ChatSession } = await import("../src/chat/session.js");
     const events: UiEvent[] = [];
-    const storage = { save: vi.fn(), attachmentDataUrl: vi.fn() };
+    const storage = { ...compactionStorage, save: vi.fn(), attachmentDataUrl: vi.fn() };
     const session = new ChatSession({ storage: storage as never, workspaceRoot: "/tmp/workspace", record: newRecord(), emit: event => events.push(event) });
     await session.sendUserMessage("Inspect", [{ id: "image", fileName: "image.png", mimeType: "image/png", extension: "png", byteLength: 10 }]);
     expect(mocks.streamChat).not.toHaveBeenCalled();
@@ -4975,7 +5190,7 @@ describe("workspace image viewing", () => {
         if (pass++ === 0) yield { kind: "toolCall", name: "view_image", argsJson: JSON.stringify({ path: imagePath }), id: "view" };
         else yield { kind: "text", text: "Read refused." };
       });
-      const storage = { save: vi.fn(), importAttachment: vi.fn() };
+      const storage = { ...compactionStorage, save: vi.fn(), importAttachment: vi.fn() };
       const record = newRecord();
       const session = new ChatSession({ storage: storage as never, workspaceRoot: workspace, record, emit: vi.fn() });
       await session.sendUserMessage("Inspect");
@@ -4997,7 +5212,7 @@ describe("tool presentation data", () => {
     const { ChatSession } = await import("../src/chat/session.js");
     const record = newRecord();
     const events: UiEvent[] = [];
-    const session = new ChatSession({ storage: { save: vi.fn(async () => undefined) } as never, workspaceRoot: "/tmp/workspace", record, emit: event => events.push(event) });
+    const session = new ChatSession({ storage: { ...compactionStorage, save: vi.fn(async () => undefined) } as never, workspaceRoot: "/tmp/workspace", record, emit: event => events.push(event) });
     const result = "Complete result for the model";
     const displayResult = "Separate UI-only payload";
     (session as unknown as { features: import("../src/build/contracts.js").FeatureRuntime[] }).features = [{
@@ -5037,7 +5252,8 @@ describe("steering an active turn", () => {
     await fs.rm(workspaceRoot, { recursive: true, force: true });
   });
 
-  it.each(["act", "plan", "review"] as const)("interrupts generation and preserves the complete %s system prompt", async mode => {
+  it.each((["act", "plan", "review"] as const).flatMap(mode => (["responses", "chat-completions"] as const).map(protocol => ({ mode, protocol }))))("$protocol: interrupts generation and preserves the complete $mode system prompt", async ({ mode, protocol }) => {
+    mocks.settings.protocol = protocol;
     const requests: import("../src/llm/client.js").ChatCompletionRequest[] = [];
     let requestSignal: AbortSignal | undefined;
     mocks.streamChat.mockImplementation(async function* (_endpoint, request, signal: AbortSignal) {
@@ -5064,12 +5280,11 @@ describe("steering an active turn", () => {
     expect(requests[1].messages[0]).toEqual(requests[0].messages[0]);
     expect(latestUserContext(requests[1])).toContain(`User request time: ${new Date(record.messages[0].ts).toISOString()}`);
     expect(requests[1].tools).toEqual(requests[0].tools);
-    expect(requests[1].reasoning_effort).toEqual(requests[0].reasoning_effort);
+    expect(requests[1].generation?.reasoning).toEqual(requests[0].generation?.reasoning);
     expect(requests[1].messages.filter(m => m.role === "system")).toHaveLength(1);
-    expect(requests[1].messages.slice(-2)).toEqual([
-      expect.objectContaining({ role: "assistant", content: "Initial approach." }),
-      expect.objectContaining({ role: "user", content: "Use the smaller change" })
-    ]);
+    expect(requests[1].messages.at(-1)).toMatchObject({ role: "user", content: "Use the smaller change" });
+    expect(requests[1].messages.some(message => message.content === "Initial approach.")).toBe(protocol === "chat-completions");
+    expect(record.messages.some(message => message.content === "Initial approach.")).toBe(true);
     expect(events.filter(e => e.kind === "turnEnd")).toEqual([expect.objectContaining({ mode })]);
     expect(events.some(e => e.kind === "abort")).toBe(false);
     const textEvents = events.filter(e => e.kind === "text");
@@ -5093,6 +5308,7 @@ describe("steering an active turn", () => {
       requests.push(request);
       if (requests.length === 1) {
         yield { kind: "thought", text: "Check the workspace first." };
+        yield { kind: "finish", reason: "tool_calls", diagnostics: { completionEvidence: "response_completed" } };
         yield { kind: "toolCall", name: "run_command", argsJson: '{"command":"first"}', id: "first" };
         yield { kind: "toolCall", name: "run_command", argsJson: '{"command":"obsolete"}', id: "obsolete" };
       } else yield { kind: "text", text: "Followed the new guidance." };
@@ -5238,7 +5454,7 @@ describe("streamed final plans and terminal failures", () => {
     record.toolCallingMode = "native";
     mocks.settings.toolCallingMode = "native";
     const events: UiEvent[] = [];
-    const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record, emit: event => events.push(event) });
+    const session = new ChatSession({ storage: { ...compactionStorage, save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record, emit: event => events.push(event) });
     let pass = 0;
     mocks.streamChat.mockImplementation(async function* (_endpoint, request) {
       if (pass++ === 0) yield {
@@ -5277,7 +5493,7 @@ describe("streamed final plans and terminal failures", () => {
         record.toolCallingMode = profile;
         mocks.settings.toolCallingMode = profile;
         const events: UiEvent[] = [];
-        const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record, emit: event => events.push(event) });
+        const session = new ChatSession({ storage: { ...compactionStorage, save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record, emit: event => events.push(event) });
         let generations = 0;
         mocks.streamChat.mockImplementation(async function* (_endpoint, request) {
           expect(request.tools?.some((tool: { function: { name: string } }) => tool.function.name === "submit_plan")).not.toBe(true);
@@ -5331,7 +5547,7 @@ describe("streamed final plans and terminal failures", () => {
       yield { kind: "text", text: '<tool_call>{"name":"list_dir","arguments":{"path":"."}}' };
       throw new StreamFailure("Stream ended without completion", { cause: "unexpected_eof" });
     });
-    const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record, emit: event => events.push(event) });
+    const session = new ChatSession({ storage: { ...compactionStorage, save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record, emit: event => events.push(event) });
     try {
       await session.sendUserMessage("Inspect");
       expect(events.some(event => event.kind === "toolCallProposed")).toBe(false);
@@ -5345,7 +5561,7 @@ describe("streamed final plans and terminal failures", () => {
     const record = newRecord();
     const save = vi.fn();
     mocks.streamChat.mockImplementation(async function* () { yield { kind: "text", text: "Partial" }; throw new Error("Disconnected"); });
-    const session = new ChatSession({ storage: { save } as never, workspaceRoot: "/tmp/workspace", record, emit: vi.fn() });
+    const session = new ChatSession({ storage: { ...compactionStorage, save } as never, workspaceRoot: "/tmp/workspace", record, emit: vi.fn() });
     try {
       await session.sendUserMessage("Work");
       const terminal = unresolvedInterruption(record)!;
@@ -5364,7 +5580,7 @@ it("keeps user cancellation distinct from a socket abort and releases the queue 
   const { unresolvedInterruption } = await import("../src/chat/interruption.js");
   const record = newRecord();
   const events: UiEvent[] = [];
-  const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record, emit: event => events.push(event) });
+  const session = new ChatSession({ storage: { ...compactionStorage, save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record, emit: event => events.push(event) });
   mocks.streamChat.mockImplementation(async function* () {
     yield { kind: "thought", text: "Thinking" };
     session.cancel();
@@ -5383,7 +5599,7 @@ it("rejects an old approval after a plan revision in the same millisecond", asyn
   const { ChatSession } = await import("../src/chat/session.js");
   const record = newRecord();
   record.toolCallingMode = "native";
-  const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record, emit: vi.fn() });
+  const session = new ChatSession({ storage: { ...compactionStorage, save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record, emit: vi.fn() });
   const now = vi.spyOn(Date, "now").mockReturnValue(1000);
   mocks.streamChat.mockImplementation(async function* () {
     yield { kind: "text", text: planText("Implement and verify") };
@@ -5490,7 +5706,7 @@ describe("explicit workspace notes", () => {
       else if (step === 3) yield call("recall_memory", { name: "Parser", id: JSON.parse(record.messages.find(m => m.role === "tool")!.content).id });
       else yield { kind: "text", text: "Saved." };
     });
-    const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: root, record, emit: e => events.push(e) });
+    const session = new ChatSession({ storage: { ...compactionStorage, save: vi.fn() } as never, workspaceRoot: root, record, emit: e => events.push(e) });
     const proposals = () => events.filter((e): e is Extract<UiEvent, { kind: "toolCallProposed" }> => e.kind === "toolCallProposed");
     try {
       const turn = session.sendUserMessage("Remember the parser");
@@ -5532,7 +5748,7 @@ describe("explicit workspace notes", () => {
           default: yield { kind: "text", text: mode === "plan" ? planText("- Inspect parser\n- Verify cache") : "Saved." };
         }
       });
-      const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: root, record, emit: e => events.push(e) });
+      const session = new ChatSession({ storage: { ...compactionStorage, save: vi.fn() } as never, workspaceRoot: root, record, emit: e => events.push(e) });
       try {
         await session.sendUserMessage("Remember parser decisions", [], mode);
         expect((await store.list()).memories).toHaveLength(1);
@@ -5556,7 +5772,7 @@ describe("explicit workspace notes", () => {
       yield { kind: "toolCall", id: "create", name: "create_memory", argsJson: outcome === "malformed" ? '{"name":"Parser"}' : outcome === "truncated" ? '{"name":' : '{"name":"Parser","contents":"Saved"}' };
       if (outcome === "interrupted" || outcome === "enabled_mid_stream") throw new StreamFailure("Lost connection", { cause: "unexpected_eof", completionEvidence: "none" });
     });
-    const record = newRecord(), session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: root, record, emit: () => {} });
+    const record = newRecord(), session = new ChatSession({ storage: { ...compactionStorage, save: vi.fn() } as never, workspaceRoot: root, record, emit: () => {} });
     try { await session.sendUserMessage("Remember"); expect((await new MemoryStore(root).list()).memories).toEqual([]); }
     finally { await session.shutdown(); await fs.rm(root, { recursive: true, force: true }); }
   });
@@ -5578,7 +5794,7 @@ describe("explicit workspace notes", () => {
         yield call("create_memory", { name: note.name, contents: "Stale correction", id: note.id });
       } else yield { kind: "text", text: "Done" };
     });
-    const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: root, record, emit: () => {} });
+    const session = new ChatSession({ storage: { ...compactionStorage, save: vi.fn() } as never, workspaceRoot: root, record, emit: () => {} });
     try {
       await session.sendUserMessage("Remember parser");
       expect((await store.get(note.id)).contents).toBe("External correction");
@@ -5626,9 +5842,10 @@ describe("automatic note budgeting and steering", () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "locality-memory-compact-"));
     const note = (await new MemoryStore(root).save({ name: "Parser", contents: "COMPACT_NOTE_SENTINEL" })).note;
     mocks.settings.memoryAutoLoad = true; mocks.backend = backend;
+    mocks.countPrompt.mockImplementation(fakeRequestCount);
     mocks.streamChat.mockImplementation(async function* () { yield { kind: "text", text: "Done." }; });
     const record = newRecord(), events: UiEvent[] = [];
-    const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: root, record, emit: e => events.push(e) });
+    const session = new ChatSession({ storage: { ...compactionStorage, save: vi.fn() } as never, workspaceRoot: root, record, emit: e => events.push(e) });
     try {
       for (let i = 0; i < 3; i++) await session.sendUserMessage(`Parser query ${i}`);
       await session.compactNow();
@@ -5656,7 +5873,7 @@ describe("automatic note budgeting and steering", () => {
       yield { kind: "toolCall", name: "list_dir", id: "list", argsJson: '{"path":"."}' };
     });
     const record = newRecord(), events: UiEvent[] = [];
-    const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: root, record, emit: e => events.push(e) });
+    const session = new ChatSession({ storage: { ...compactionStorage, save: vi.fn() } as never, workspaceRoot: root, record, emit: e => events.push(e) });
     try {
       await session.sendUserMessage("Parser");
       expect(record.memorySelections?.[0].memories).toEqual([note]);
@@ -5681,7 +5898,7 @@ describe("automatic note budgeting and steering", () => {
       expect(latestUserContext(request)).not.toContain("LOW_RANK_SENTINEL");
       yield { kind: "text", text: "Done." };
     });
-    const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: root, record, emit: e => events.push(e) });
+    const session = new ChatSession({ storage: { ...compactionStorage, save: vi.fn() } as never, workspaceRoot: root, record, emit: e => events.push(e) });
     try {
       await session.sendUserMessage("Parser");
       expect(mocks.streamChat).toHaveBeenCalled();
@@ -5699,7 +5916,7 @@ describe("automatic note budgeting and steering", () => {
     mocks.settings.memoryAutoLoad = true; mocks.backend = backend;
     await fs.writeFile(path.join(root, "AGENTS.md"), "Original project instructions.");
     const record = newRecord(), prompts: string[] = [];
-    const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: root, record, emit: () => {} });
+    const session = new ChatSession({ storage: { ...compactionStorage, save: vi.fn() } as never, workspaceRoot: root, record, emit: () => {} });
     let step = 0;
     mocks.streamChat.mockImplementation(async function* (_endpoint, request) {
       prompts.push(requestContextText(request));
@@ -5785,7 +6002,7 @@ describe("committed automatic memory selections", () => {
     let ready!: (size: number) => void;
     mocks.fetchServerContextSize.mockImplementationOnce(() => new Promise(resolve => { ready = resolve; }));
     const record = newRecord();
-    const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: root, record, emit: () => {} });
+    const session = new ChatSession({ storage: { ...compactionStorage, save: vi.fn() } as never, workspaceRoot: root, record, emit: () => {} });
     mocks.streamChat.mockImplementation(async function* (_endpoint, request) {
       expect(latestUserContext(request)).toContain("ORIGINAL_NOTE");
       expect(latestUserContext(request)).not.toContain("COLOR_NOTE");
@@ -5821,7 +6038,7 @@ describe("committed automatic memory selections", () => {
       prompts.push(requestContextText(request));
       yield { kind: "text", text: "Done." };
     });
-    const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: root, record, emit: e => events.push(e) });
+    const session = new ChatSession({ storage: { ...compactionStorage, save: vi.fn() } as never, workspaceRoot: root, record, emit: e => events.push(e) });
     try {
       if (cached) {
         await fs.writeFile(path.join(root, "AGENTS.md"), "Previous instructions.");
@@ -5847,7 +6064,7 @@ describe("committed automatic memory selections", () => {
     await store.save({ name: "Colors", contents: "UNUSED_COLORS_SENTINEL" });
     mocks.settings.memoryAutoLoad = true;
     const record = newRecord(), events: UiEvent[] = [], prompts: string[] = [];
-    const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: root, record, emit: e => events.push(e) });
+    const session = new ChatSession({ storage: { ...compactionStorage, save: vi.fn() } as never, workspaceRoot: root, record, emit: e => events.push(e) });
     mocks.streamChat.mockImplementation(async function* (_endpoint, request) {
       prompts.push(requestContextText(request));
       if (prompts.length === 1) {
@@ -5935,7 +6152,7 @@ describe("stable request prefixes", () => {
       expect(acceptedUser).toContain("ACCEPTED_OLD_NOTE");
       yield { kind: "text", text: planText("- Inspect parser\n- Verify changes") };
     });
-    const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record, emit: () => {} });
+    const session = new ChatSession({ storage: { ...compactionStorage, save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record, emit: () => {} });
     try {
       expect(await session.continueTurn(2000)).toBe(true);
       expect(record.turnSystemPrompt?.contextVersion).toBe(1);
@@ -6025,7 +6242,7 @@ describe("personalized system prompts", () => {
         yield { kind: "toolCall", name: "list_dir", id: "list", argsJson: '{"path":"."}' };
       } else yield { kind: "text", text: "Done." };
     });
-    const session = new ChatSession({ storage: { save: vi.fn() } as never, workspaceRoot: root, record, emit: () => {} });
+    const session = new ChatSession({ storage: { ...compactionStorage, save: vi.fn() } as never, workspaceRoot: root, record, emit: () => {} });
     try {
       await session.sendUserMessage("Inspect the directory");
       expect(prompts).toHaveLength(2);

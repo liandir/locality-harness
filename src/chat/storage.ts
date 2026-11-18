@@ -1,4 +1,7 @@
+import { identifyMessages, newMessageId, validCheckpoint } from "./contextHistory.js";
+import { createHash } from "node:crypto";
 import { validWorkspaceNote } from "./workspaceNotes.js";
+import { normalizeResponseHistory } from "../llm/responseHistory.js";
 import { validMemoryAttempt } from "./memoryJobTypes.js";
 import type { ChatAttachment, ChatMessage, ChatRecord } from "./types.js";
 export type { Role, StoredToolStatus, ChatAttachment, ChatMessage, ChatRecord } from "./types.js";
@@ -7,7 +10,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { validMemory, validMemoryCreation, validSnapshot } from "./memory.js";
 import { WorkspaceChatIndex } from "./chatIndex.js";
-import { makeChatHeader, parseChatRecord, readChatHeader, writeChatFile, type ChatHeader, type IndexedChat } from "./chatFile.js";
+import { makeChatHeader, parseChatRecord, readChatHeader, writeChatFile, writeAtomic, type ChatHeader, type IndexedChat } from "./chatFile.js";
 import { isValidChatId, normalizeWorkspaceRoot } from "./storagePaths.js";
 export { isValidChatId } from "./storagePaths.js";
 import { MAX_MEMORY_COUNT } from "./memoryLimits.js";
@@ -26,7 +29,7 @@ import {
 
 export const CHATS_DIR = ".locality";
 export const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
-export const VISION_TOKEN_RESERVE = 4096;
+
 
 export type { FileChangeSummary };
 export type { TodoItem } from "./todos.js";
@@ -186,8 +189,41 @@ export class ChatStorage {
     await writeChatFile(path.join(this.dir(), rec.id + ".json"), rec);
   }
 
+  async captureRevision(id: string): Promise<string | undefined> {
+    if (!isValidChatId(id)) throw new Error(`Invalid chat id: ${id}`);
+    try { return createHash("sha256").update(await fs.readFile(path.join(this.dir(), id + ".json"))).digest("hex"); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
+  }
+
+  /** Compare and publish while holding the same workspace lock as ordinary saves. */
+  async saveCompaction(rec: ChatRecord, revision: string | undefined, assertCurrent: () => void, publish: () => void): Promise<void> {
+    if (!isValidChatId(rec.id) || !this.belongsToWorkspace(rec)) throw new Error("Compaction workspace changed.");
+    await this.ensureDir();
+    const file = path.join(this.dir(), rec.id + ".json");
+    let previous: string | undefined;
+    let written = false;
+    await this.index.change(rec.id, async () => {
+      assertCurrent();
+      if (await this.captureRevision(rec.id) !== revision) throw new Error("Chat changed on disk during compaction. Reload it before retrying.");
+      previous = revision === undefined ? undefined : await fs.readFile(file, "utf8");
+      assertCurrent();
+      rec.updatedAt = Date.now();
+      await this.writeRecord(rec);
+      written = true;
+    }, {
+      publish: () => { assertCurrent(); publish(); },
+      rollback: async () => {
+        if (!written) return;
+        if (previous === undefined) await fs.unlink(file);
+        else await writeAtomic(file, previous);
+      }
+    });
+  }
+
   async save(rec: ChatRecord): Promise<void> {
     if (!isValidChatId(rec.id)) throw new Error(`Invalid chat id: ${rec.id}`);
+    identifyMessages(rec.messages);
+    if (rec.contextMessages) identifyMessages(rec.contextMessages);
     await this.ensureDir();
     await this.serialize(rec.id, async () => {
       rec.workspaceRoot = this.workspaceRoot;
@@ -238,6 +274,7 @@ export class ChatStorage {
     forked.mode = rec.mode;
     forked.reasoningEffort = normalizeReasoningEffort(rec.reasoningEffort);
     forked.messages = structuredClone(rec.messages.slice(0, end));
+    forked.compactions = rec.compactions?.filter(outcome => end === rec.messages.length || outcome.ts <= (forked.messages.at(-1)?.ts ?? 0)).map(outcome => ({ ...outcome }));
     if (rec.turnSystemPrompt && forked.messages.some(message => message.ts === rec.turnSystemPrompt?.messageTs)) {
       forked.turnSystemPrompt = { ...rec.turnSystemPrompt };
     }
@@ -247,9 +284,11 @@ export class ChatStorage {
       forked.pendingPlanMessageTs = rec.pendingPlanMessageTs;
     }
     if (end === rec.messages.length && rec.planning) forked.planning = true;
+    if (end === rec.messages.length) forked.unconsumedExchangeId = rec.unconsumedExchangeId;
     // A historical fork must not inherit a summary containing later turns.
     if (end === rec.messages.length && rec.contextMessages) {
       forked.contextMessages = structuredClone(rec.contextMessages);
+      forked.contextCheckpoint = rec.contextCheckpoint && structuredClone(rec.contextCheckpoint);
       forked.initialMemories = rec.initialMemories && structuredClone(rec.initialMemories);
       forked.tokenizerModel = rec.tokenizerModel;
       forked.tokenizerIdentity = rec.tokenizerIdentity;
@@ -322,9 +361,13 @@ export class ChatStorage {
         : undefined;
       const requestContext = message.role === "user" && !message.steering && typeof message.requestContext === "string"
         ? message.requestContext : undefined;
-      return { ...message, requestContext, attachments: attachments?.length ? attachments : undefined };
+      return { ...message, requestContext, responseHistory: message.role === "assistant" ? normalizeResponseHistory(message.responseHistory) : undefined,
+        attachments: attachments?.length ? attachments : undefined };
     });
     const messages = normalizeMessages(Array.isArray(rec.messages) ? rec.messages : []);
+    identifyMessages(messages);
+    const contextMessages = Array.isArray(rec.contextMessages) ? normalizeMessages(rec.contextMessages) : undefined;
+    if (contextMessages) identifyMessages(contextMessages);
     return {
       ...rec,
       id,
@@ -333,6 +376,11 @@ export class ChatStorage {
       mode: normalizeChatMode(rec.mode),
       reasoningEffort: normalizeReasoningEffort(rec.reasoningEffort),
       messages,
+      compactions: Array.isArray(rec.compactions) ? rec.compactions.filter(outcome => outcome
+        && typeof outcome.compactId === "string" && Number.isFinite(outcome.ts)
+        && ["manual", "auto"].includes(outcome.source) && ["executed", "failed"].includes(outcome.status)
+        && Number.isFinite(outcome.beforeTokens) && Number.isFinite(outcome.beforeMessages) && Number.isFinite(outcome.keepTail)
+        && (outcome.error === undefined || typeof outcome.error === "string")) : undefined,
       turnSystemPrompt: rec.turnSystemPrompt && Number.isFinite(rec.turnSystemPrompt.messageTs)
         && messages.some(message => message.role === "user" && !message.steering && message.ts === rec.turnSystemPrompt?.messageTs)
         && ["native", "legacy"].includes(rec.turnSystemPrompt.protocol) && typeof rec.turnSystemPrompt.content === "string"
@@ -346,7 +394,9 @@ export class ChatStorage {
       initialMemories: Array.isArray(rec.initialMemories) ? rec.initialMemories.filter(validSnapshot).slice(-MAX_MEMORY_COUNT) : undefined,
       memorySources: rec.memorySources && typeof rec.memorySources === "object" && !Array.isArray(rec.memorySources)
         ? Object.fromEntries(Object.entries(rec.memorySources).filter(([memoryId, sourceId]) => /^[a-f0-9]{16}$/.test(memoryId) && isValidChatId(sourceId))) : undefined,
-      contextMessages: Array.isArray(rec.contextMessages) ? normalizeMessages(rec.contextMessages) : undefined
+      contextMessages,
+      contextCheckpoint: validCheckpoint(rec.contextCheckpoint, contextMessages ?? messages) ? rec.contextCheckpoint : undefined,
+      unconsumedExchangeId: typeof rec.unconsumedExchangeId === "string" ? rec.unconsumedExchangeId : undefined
     } as ChatRecord;
   }
 }
@@ -423,6 +473,7 @@ export function modelMessages(rec: ChatRecord): ChatMessage[] {
 }
 
 export function appendChatMessage(rec: ChatRecord, message: ChatMessage): void {
+  message.id ??= newMessageId();
   rec.messages.push(message);
   if (rec.contextMessages) rec.contextMessages.push(structuredClone(message));
 }

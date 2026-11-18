@@ -1,199 +1,133 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { ChatRecord, ChatMessage } from "../src/chat/storage.js";
+import { compact, validSummary, type CompactConfig } from "../src/chat/compactor.js";
+import { GenerationLengthError, StreamFailure } from "../src/llm/completion.js";
+import { appendChatMessage, ChatStorage } from "../src/chat/storage.js";
+import { identifyMessages, historyGroups } from "../src/chat/contextHistory.js";
+import type { ChatMessage } from "../src/chat/types.js";
+import type { ChatCompletionRequest } from "../src/llm/client.js";
 
-const mocks = vi.hoisted(() => ({
-  tokenize: vi.fn(),
-  complete: vi.fn()
-}));
-
-vi.mock("../src/llm/client.js", () => ({
-  tokenize: mocks.tokenize,
-  complete: mocks.complete
-}));
-
-function fakeTokenize(_endpoint: string, text: string): Promise<number> {
-  return Promise.resolve(Math.max(1, Math.ceil(text.length / 4)));
-}
-
-function msg(role: ChatMessage["role"], content: string): ChatMessage {
-  return { role, content, ts: Date.now() };
-}
-
-function record(messages: ChatMessage[]): ChatRecord {
-  return {
-    id: "r1",
-    workspaceRoot: "/w",
-    createdAt: 0,
-    updatedAt: 0,
-    title: "t",
-    toolCallingMode: "compat-gemma4",
-    mode: "act",
-    reasoningEffort: "effort:high",
-    messages,
-    totalTokens: 0
-  };
-}
-
-const cfg = {
-  limit: 400,
-  thresholdPercent: 80,
-  tailBudgetPercent: 30,
-  maxMessageTokensPercent: 25,
-  overheadPerMessage: 0
-};
-
+const mocks = vi.hoisted(() => ({ tokenize: vi.fn(), complete: vi.fn(), count: vi.fn() }));
+vi.mock("../src/llm/client.js", () => ({ tokenize: mocks.tokenize, complete: mocks.complete }));
+vi.mock("../src/llm/server.js", () => ({ countServerPrompt: mocks.count, serverCacheRevision: () => 0 }));
+const summary = "GOAL: fix parser\nSTATE: parser.ts changed\nDONE: tests passed\nPENDING: documentation\nNEXT: update docs";
+const count = (request: ChatCompletionRequest) => Math.ceil(JSON.stringify(request.messages).length / 4) + 20;
+let seq = 0;
+const msg = (role: ChatMessage["role"], content: string, extra: Partial<ChatMessage> = {}): ChatMessage => ({ role, content, ts: ++seq, id: `m${seq}`, ...extra });
+const record = (messages = [msg("user", "old request"), msg("assistant", "old details ".repeat(500)), msg("user", "continue")]) => ({ ...new ChatStorage("/w").newRecord("native"), messages });
+const config: CompactConfig = { limit: 1000, summaryContextLimit: 4096, thresholdPercent: 80, tailBudgetPercent: 30, maxMessageTokensPercent: 25,
+  request: async messages => ({ messages: [{ role: "system", content: "Instructions and tools" }, ...messages.map(m => ({ role: m.role, content: `${m.content}\n${m.requestContext ?? ""}\n${m.toolCall?.argsJson ?? ""}` }))] }) };
 beforeEach(() => {
-  mocks.tokenize.mockReset();
-  mocks.complete.mockReset();
-  mocks.tokenize.mockImplementation(fakeTokenize);
-  mocks.complete.mockResolvedValue("GOAL: keep working\nNEXT: continue");
+  mocks.tokenize.mockReset().mockImplementation(async (_endpoint, text: string) => Math.ceil(text.length / 4));
+  mocks.complete.mockReset().mockResolvedValue(summary);
+  mocks.count.mockReset().mockImplementation(async (_endpoint, request: ChatCompletionRequest) => count(request));
 });
 
-describe("compact — fit guarantee", () => {
-  it("summarizes the head and keeps the transcript within the target even with a giant tail", async () => {
-    const { compact } = await import("../src/chat/compactor.js");
-    const giant = Array.from({ length: 600 }, (_, i) => `output row ${i}`).join("\n"); // ~ big tool result
-    const rec = record([
-      msg("user", "please refactor the parser"),
-      msg("assistant", "reading files"),
-      msg("tool", "small read result A"),
-      msg("assistant", "editing"),
-      msg("tool", "small read result B"),
-      msg("assistant", "running tests"),
-      msg("tool", giant)
-    ]);
-
-    const original = structuredClone(rec.messages);
-    const { keptTail } = await compact("http://x", rec, new AbortController().signal, cfg);
-
-    // A summary was produced by the model.
-    expect(mocks.complete).toHaveBeenCalled();
-    expect(rec.contextMessages![0].content.startsWith("[context summary]")).toBe(true);
-    // The oversized tail result was truncated with a marker.
-    const last = rec.contextMessages![rec.contextMessages!.length - 1];
+describe("compaction transaction", () => {
+  it("measures the complete request, preserves the transcript, and commits coverage", async () => {
+    const rec = record(), original = structuredClone(rec.messages);
+    const result = await compact("http://x", rec, new AbortController().signal, config);
+    expect(result.kind).toBe("committed");
     expect(rec.messages).toEqual(original);
-    expect(last.content).toContain("context guard elided");
-    // The compacted transcript fits the target (threshold% of the budget).
-    const target = Math.floor((cfg.limit * cfg.thresholdPercent) / 100);
-    expect(rec.totalTokens).toBeLessThanOrEqual(target);
-    expect(keptTail).toBeGreaterThanOrEqual(1);
+    expect(rec.contextMessages?.at(-1)?.id).toBe(original.at(-1)?.id);
+    expect(rec.contextCheckpoint).toMatchObject({ version: 1, coveredIds: [original[0].id, original[1].id], protectedIds: [original[2].id], targetReached: true });
+    expect(rec.totalTokens).toBe(count(await config.request(rec.contextMessages!)));
+    expect(rec.totalTokens).toBeLessThan(config.limit);
+    for (const [, request] of mocks.complete.mock.calls) expect(count(request) + request.generation.maxOutputTokens).toBeLessThan(config.summaryContextLimit);
   });
 
-  it("summarizes oversized harness context and preserves the original snapshots", async () => {
-    const { compact } = await import("../src/chat/compactor.js");
-    const context = "<locality_context>HISTORICAL_NOTE " + "reference ".repeat(600) + "</locality_context>";
-    const rec = record([
-      msg("user", "first"), msg("assistant", "answer"), msg("user", "second"), msg("assistant", "answer"),
-      msg("assistant", "more context"), { ...msg("user", "latest request"), requestContext: context }
-    ]);
-    const original = structuredClone(rec.messages);
-    await compact("http://context-compact", rec, new AbortController().signal, cfg);
-    expect(rec.messages).toEqual(original);
-    expect(JSON.stringify(mocks.complete.mock.calls)).toContain("HISTORICAL_NOTE");
-    expect(rec.contextMessages!.at(-1)?.requestContext).toBeUndefined();
-    expect(rec.totalTokens).toBeLessThanOrEqual(cfg.limit);
-  });
-
-  it("does nothing when there are too few messages", async () => {
-    const { compact } = await import("../src/chat/compactor.js");
-    const rec = record([msg("user", "hi"), msg("assistant", "hello")]);
-    const before = rec.messages.length;
-    await compact("http://x", rec, new AbortController().signal, cfg);
-    expect(rec.messages.length).toBe(before);
-    expect(mocks.complete).not.toHaveBeenCalled();
-  });
-
-  it("chunks a very long head so no single summarize request exceeds the input budget", async () => {
-    const { compact } = await import("../src/chat/compactor.js");
-    // Many medium head messages that together dwarf the per-request budget.
-    const head: ChatMessage[] = Array.from({ length: 12 }, (_, i) =>
-      msg(i % 2 === 0 ? "assistant" : "tool", `chunk body ${i} ` + "x".repeat(300))
-    );
-    const rec = record([...head, msg("user", "keep going"), msg("assistant", "ok")]);
-
-    await compact("http://x", rec, new AbortController().signal, cfg);
-
-    // More than one summarization pass ran (map-reduce), and each request's
-    // transcript stayed within the input budget.
-    expect(mocks.complete.mock.calls.length).toBeGreaterThan(1);
-    const outputReserve = Math.floor(cfg.limit * 0.25);
-    const inputBudget = Math.max(512, Math.floor((cfg.limit * cfg.thresholdPercent) / 100) - outputReserve);
-    for (const call of mocks.complete.mock.calls) {
-      const reqMessages = call[1].messages as { role: string; content: string }[];
-      const total = reqMessages.reduce((n, m) => n + Math.ceil(`<|${m.role}|>${m.content}`.length / 4), 0);
-      expect(total).toBeLessThanOrEqual(inputBudget + 512); // instruction slack
-    }
-  });
-
-  it("summarizes an image as metadata rather than attachment bytes", async () => {
-    const { compact } = await import("../src/chat/compactor.js");
-    const imageMessage = msg("user", "What is this?");
-    imageMessage.attachments = [{
-      id: "123e4567-e89b-42d3-a456-426614174099",
-      fileName: "diagram.png",
-      mimeType: "image/png",
-      byteLength: 100,
-      extension: "png"
-    }];
-    const rec = record([
-      imageMessage,
-      msg("assistant", "It is a diagram."),
-      msg("user", "continue 1"),
-      msg("assistant", "ok 1"),
-      msg("user", "continue 2"),
-      msg("assistant", "ok 2")
-    ]);
-
-    await compact("http://x", rec, new AbortController().signal, { ...cfg, limit: 20_000 });
-
-    const request = JSON.stringify(mocks.complete.mock.calls[0]?.[1]);
-    expect(request).toContain("[image attachment: diagram.png (image/png)]");
-    expect(request).not.toContain("base64");
-  });
-});
-
-describe("transcript preservation", () => {
-  it("keeps the transcript and previous context unchanged if summarization fails", async () => {
-    const { compact } = await import("../src/chat/compactor.js");
-    const rec = record([msg("user", "original request")]);
-    rec.contextMessages = [
-      msg("system", "[context summary] previous"),
-      ...Array.from({ length: 5 }, () => msg("assistant", "old context")),
-      { ...msg("assistant", "x".repeat(8000)), reasoningContent: "retained reasoning" }
-    ];
-    const before = structuredClone(rec);
-    mocks.complete.mockRejectedValue(new Error("server unavailable"));
-    await expect(compact("http://x", rec, new AbortController().signal, cfg)).rejects.toThrow("server unavailable");
-    expect(rec).toEqual(before);
-  });
-
-  it("repeated compaction summarizes only the active context and preserves new transcript entries", async () => {
-    const { compact } = await import("../src/chat/compactor.js");
-    const { appendChatMessage } = await import("../src/chat/storage.js");
-    const rec = record([
-      msg("user", "ORIGINAL_REQUEST_SENTINEL"),
-      ...Array.from({ length: 6 }, () => msg("assistant", "old output"))
-    ]);
-    await compact("http://x", rec, new AbortController().signal, cfg);
-    for (let i = 0; i < 6; i++) appendChatMessage(rec, msg("user", `follow-up ${i}`));
-    const transcript = structuredClone(rec.messages);
+  it("uses the previous checkpoint plus only newly removed history", async () => {
+    const rec = record();
+    rec.messages[1].content += " ORIGINAL_SENTINEL";
+    await compact("http://x", rec, new AbortController().signal, config);
+    const covered = [...rec.contextCheckpoint!.coveredIds];
+    appendChatMessage(rec, msg("assistant", "NEW_EVIDENCE ".repeat(400)));
+    appendChatMessage(rec, msg("user", "next request"));
     mocks.complete.mockClear();
-    await compact("http://x", rec, new AbortController().signal, cfg);
-    expect(rec.messages).toEqual(transcript);
-    expect(JSON.stringify(mocks.complete.mock.calls)).not.toContain("ORIGINAL_REQUEST_SENTINEL");
-    expect(rec.contextMessages!.at(-1)?.content).toBe("follow-up 5");
+    expect((await compact("http://x", rec, new AbortController().signal, config)).kind).toBe("committed");
+    const inputs = JSON.stringify(mocks.complete.mock.calls);
+    expect(inputs).toContain(summary.replaceAll("\n", "\\n"));
+    expect(inputs).toContain("NEW_EVIDENCE");
+    expect(inputs).not.toContain("ORIGINAL_SENTINEL");
+    expect(rec.contextCheckpoint?.coveredIds).toEqual(expect.arrayContaining(covered));
+  });
+
+  it("keeps the latest request, steering and unconsumed tool exchange together", async () => {
+    const tool = msg("tool", "test failure", { exchangeId: "pending", toolCall: { id: "call", name: "run_command", argsJson: "{}", status: "failed" } });
+    const assistant = msg("assistant", "Checking", { exchangeId: "pending" });
+    const steering = msg("user", "preserve exports", { steering: true });
+    const rec = { ...record(), unconsumedExchangeId: "pending" };
+    rec.messages.push(tool, assistant, steering);
+    expect((await compact("http://x", rec, new AbortController().signal, config)).kind).toBe("committed");
+    expect(rec.contextMessages?.slice(-3).map(m => m.id)).toEqual([tool.id, assistant.id, steering.id]);
+    expect(historyGroups([tool, assistant, steering]).map(g => g.length)).toEqual([2, 1]);
+    expect(rec.contextCheckpoint?.protectedIds).toEqual(expect.arrayContaining([tool.id, assistant.id, steering.id]));
+  });
+
+  it("fails without truncating a protected oversized request", async () => {
+    const rec = record(); rec.messages.at(-1)!.content = "x".repeat(20_000);
+    const before = structuredClone(rec);
+    expect(await compact("http://x", rec, new AbortController().signal, config)).toMatchObject({ kind: "failed", cause: "budget" });
+    expect(rec).toEqual(before); expect(mocks.complete).not.toHaveBeenCalled();
+  });
+
+  it.each(["edit", "cancel", "save", "settings"])("preserves active context on %s", async failure => {
+    const rec = record(), ac = new AbortController();
+    mocks.complete.mockImplementation(async () => {
+      if (failure === "edit") rec.messages[0].content = "edited";
+      if (failure === "cancel") ac.abort();
+      return summary;
+    });
+    const result = await compact("http://x", rec, ac.signal, { ...config,
+      assertCurrent: () => { if (failure === "settings") throw new Error("Settings changed"); },
+      commit: async (_candidate, assert, publish) => { assert(); if (failure === "save") throw new Error("Disk full"); publish(); }
+    });
+    expect(result).toMatchObject({ kind: "failed", cause: failure === "save" ? "storage" : failure === "cancel" ? "cancelled" : "conflict" });
+    expect(rec.contextMessages).toBeUndefined(); expect(rec.contextCheckpoint).toBeUndefined();
+  });
+
+  it("skips histories with no meaningful reduction", async () => {
+    const rec = record([msg("assistant", "ok"), msg("user", "go")]);
+    expect(await compact("http://x", rec, new AbortController().signal, config)).toMatchObject({ kind: "skipped" });
+    expect(rec.contextMessages).toBeUndefined();
+  });
+
+  it("assigns stable identities to legacy transcript/context copies", () => {
+    const a = [{ role: "user" as const, content: "hi", ts: 1 }, { role: "user" as const, content: "hello", ts: 1 }];
+    const b = structuredClone(a); identifyMessages(a); identifyMessages(b);
+    expect(a).toEqual(b); expect(new Set(a.map(m => (m as ChatMessage).id)).size).toBe(2);
+    const original = structuredClone(a); identifyMessages(a); expect(a).toEqual(original);
   });
 });
 
-it("does not overwrite messages arriving while a summary is being generated", async () => {
-  const { compact } = await import("../src/chat/compactor.js");
-  const { appendChatMessage } = await import("../src/chat/storage.js");
-  const rec = record(Array.from({ length: 6 }, () => msg("user", "old request")));
-  mocks.complete.mockImplementation(async () => {
-    appendChatMessage(rec, msg("user", "arrived during compaction"));
-    return "summary";
+describe("bounded summary generation", () => {
+  it.each(["empty", "malformed", "length", "transient"])("recovers from %s without accepting partial output", async failure => {
+    if (failure === "length") mocks.complete.mockRejectedValueOnce(new GenerationLengthError());
+    else if (failure === "transient") mocks.complete.mockRejectedValueOnce(new StreamFailure("Disconnected", { cause: "transport" }));
+    else mocks.complete.mockResolvedValueOnce(failure === "empty" ? "" : "GOAL: only one section");
+    expect((await compact("http://x", record(), new AbortController().signal, config)).kind).toBe("committed");
+    const first = mocks.complete.mock.calls[0][1], retry = mocks.complete.mock.calls[1][1];
+    if (failure === "length") expect(retry.generation.maxOutputTokens).toBeGreaterThan(first.generation.maxOutputTokens);
+    else expect(retry.generation.maxOutputTokens).toBe(first.generation.maxOutputTokens);
   });
-  await expect(compact("http://x", rec, new AbortController().signal, cfg)).rejects.toThrow("Conversation changed");
-  expect(rec.messages.at(-1)?.content).toBe("arrived during compaction");
-  expect(rec.contextMessages).toBeUndefined();
+  it.each(["empty", "length", "auth"])("preserves context on repeated %s failures", async failure => {
+    if (failure === "empty") mocks.complete.mockResolvedValue("");
+    else mocks.complete.mockRejectedValue(failure === "length" ? new GenerationLengthError() : new StreamFailure("HTTP 401", { cause: "server_error", httpStatus: 401 }));
+    const rec = record(), before = structuredClone(rec);
+    expect((await compact("http://x", rec, new AbortController().signal, config)).kind).toBe("failed");
+    expect(rec).toEqual(before); expect(mocks.complete).toHaveBeenCalledTimes(failure === "auth" ? 1 : 3);
+  });
+  it("bounds successful write payloads but retains paths, status and original evidence", async () => {
+    const argsJson = JSON.stringify({ path: "parser.ts", content: "X".repeat(50_000) });
+    const tool = msg("tool", "Written parser.ts; 500 lines", { toolCall: { id: "w", name: "write_file", argsJson, status: "executed" } });
+    const rec = record([msg("user", "old"), tool, msg("user", "continue")]);
+    expect((await compact("http://x", rec, new AbortController().signal, config)).kind).toBe("committed");
+    const input = JSON.stringify(mocks.complete.mock.calls);
+    expect(input).toContain("parser.ts"); expect(input).toContain("executed"); expect(input).toContain("stored payload");
+    expect(input).not.toContain("X".repeat(1000)); expect(rec.messages[1].toolCall?.argsJson).toBe(argsJson);
+    expect(rec.contextCheckpoint?.evidenceIds).toContain(tool.id);
+  });
+  it("requires five complete sections", () => {
+    expect(validSummary(summary)).toBe(true);
+    for (const invalid of ["", "prefix\n" + summary, summary.replace("NEXT: update docs", "NEXT:"), summary + "\nGOAL: again"]) expect(validSummary(invalid)).toBe(false);
+  });
 });

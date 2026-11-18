@@ -3,7 +3,7 @@ export interface CompletionDiagnostics {
   cause?: "unexpected_eof" | "transport" | "server_error" | "protocol_error" | "generation_limit" | "no_answer" | "plan_incomplete" | "user_cancel";
   httpStatus?: number;
   finishReason?: string;
-  completionEvidence?: "finish_reason" | "done" | "none";
+  completionEvidence?: "finish_reason" | "done" | "response_completed" | "response_incomplete" | "none";
   promptTokens?: number;
   completionTokens?: number;
 }
@@ -17,8 +17,8 @@ export class StreamFailure extends Error {
 
 export class GenerationLengthError extends StreamFailure {
   constructor(diagnostics: CompletionDiagnostics = {}) {
-    super('The server stopped generation at its output or context limit (finish_reason="length"). Compact context or adjust the server generation limits before continuing.', {
-      ...diagnostics, cause: "generation_limit", finishReason: "length", completionEvidence: "finish_reason"
+    super(`The server stopped generation at its output or context limit (${diagnostics.completionEvidence === "response_incomplete" ? "response incomplete" : 'finish_reason="length"'}). Compact context or adjust the server generation limits before continuing.`, {
+      cause: "generation_limit", finishReason: "length", completionEvidence: "finish_reason", ...diagnostics
     });
     this.name = "GenerationLengthError";
   }

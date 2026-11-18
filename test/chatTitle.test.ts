@@ -16,7 +16,7 @@ const settings = {
 };
 
 describe("chat title generation", () => {
-  it("bounds auxiliary title output and retains the llama.cpp reasoning cap", async () => {
+  it("uses a bounded server-neutral title policy", async () => {
     mocks.complete.mockResolvedValue('Title: "Review fixes plan."');
     const { generateChatTitle } = await import("../src/chat/chatTitle.js");
 
@@ -39,8 +39,8 @@ describe("chat title generation", () => {
       expect.any(AbortSignal),
       { acceptPartialOnLength: true }
     );
-    expect(mocks.complete.mock.calls[0][1]).toHaveProperty("max_tokens", 256);
-    expect(mocks.complete.mock.calls[0][1]).toHaveProperty("thinking_budget_tokens", 1024);
+    expect(mocks.complete.mock.calls[0][1]).toHaveProperty("generation.maxOutputTokens", 256);
+    expect(mocks.complete.mock.calls[0][1]).toHaveProperty("generation.reasoning.mode", "prefer-off");
   });
 
   it("accepts long visible titles without validation", async () => {

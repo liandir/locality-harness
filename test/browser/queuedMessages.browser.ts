@@ -72,4 +72,26 @@ for (const theme of ["light", "dark"] as const) {
     await expect(queued.locator(".queued-message-text")).toHaveText("Updated guidance");
     await expect(queued.getByRole("button", { name: "Steer", exact: true })).toBeDisabled();
   });
+
+  test(`${theme}: opening a queued editor preserves an immediate replacement selection`, async ({ page }) => {
+    await webview(page, theme);
+    await hostMessage(page, { kind: "turnStart", messageId: "response" });
+    await hostMessage(page, { type: "messageQueue", messages: [{ id: "guidance", text: "Original guidance", mode: "act" }] });
+    // Select immediately after the editor mounts, before its next animation frame.
+    // A delayed caret initializer must not collapse this selection before typing.
+    await page.evaluate(async () => {
+      document.querySelector<HTMLButtonElement>('[data-edit-queued="guidance"]')!.click();
+      const input = document.querySelector<HTMLTextAreaElement>('[data-queued-edit-input="guidance"]')!;
+      input.focus();
+      input.select();
+      await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+    });
+    await page.keyboard.insertText("Updated guidance");
+    const editor = page.getByRole("textbox", { name: "Edit queued message", exact: true });
+    await expect(editor).toHaveValue("Updated guidance");
+    await page.keyboard.press("Enter");
+    const actions = await page.evaluate(() => (window as unknown as { posted: ChatToExt[] }).posted
+      .filter(message => message.type === "updateQueuedMessage"));
+    expect(actions).toMatchObject([{ type: "updateQueuedMessage", id: "guidance", text: "Updated guidance" }]);
+  });
 }

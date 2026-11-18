@@ -2,7 +2,7 @@
   "name": "locality",
   "displayName": "Locality",
   "description": "Drive a LAN-hosted llama.cpp or vLLM server from VS Code with hard network isolation, workspace-scoped tools, and an approval-gated terminal.",
-  "version": "2.2.3",
+  "version": "2.3.0",
   "repository": {
     "type": "git",
     "url": "https://github.com/liandir/locality.git"
@@ -154,6 +154,13 @@
           "default": "http://localhost:8080/v1",
           "description": "URL of the llama.cpp or vLLM server. Use localhost or a private IP literal such as http://127.0.0.1:8080/v1 or http://192.168.1.50:8080/v1; DNS hostnames are refused."
         },
+        "locality.protocol": {
+          "type": "string",
+          "enum": ["responses", "chat-completions"],
+          "enumDescriptions": ["Use the Responses API with Locality-managed history.", "Use the Chat Completions API for compatibility with older servers."],
+          "default": "responses",
+          "description": "Model API protocol for chat and background generation. Unsupported protocols report an error; Locality does not switch protocols automatically."
+        },
         "locality.model": {
           "type": "string",
           "default": "local",
@@ -291,7 +298,8 @@
           "default": 4,
           "minimum": 0,
           "maximum": 64,
-          "description": "Estimated chat-template overhead per message for llama.cpp. vLLM counts the complete server-rendered prompt instead."
+          "description": "Legacy setting; exact full-request counting is now required for both backends.",
+          "deprecationMessage": "No longer used. Locality obtains exact prompt counts from the server."
         },
         "locality.autoapproveReads": {
           "type": "boolean",

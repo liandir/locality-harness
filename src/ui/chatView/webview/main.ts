@@ -144,6 +144,7 @@ function replaceMarkdownLinkLabel(tokens: Parameters<RenderRule>[0], openIndex: 
 }
 
 interface ToolCard extends ChatToolProcess {
+  skipped?: boolean;
   toolId: string;
   toolName: string;
   argsJson: string;
@@ -212,8 +213,10 @@ type ComposerDecision =
 
 interface CompactActivity {
   id: string;
+  ts?: number;
   source: "manual" | "auto";
-  status: "pending" | "executed" | "failed";
+  status: "pending" | "executed" | "failed" | "skipped";
+  targetReached?: boolean;
   beforeTokens: number;
   afterTokens?: number;
   beforeMessages: number;
@@ -325,7 +328,7 @@ const state: State = {
   planning: false,
   compactAvailable: false,
   compactCurrentMessages: 0,
-  compactMinMessages: 6,
+  compactMinMessages: 2,
   compactNudge: false,
   compactMenuOpen: false,
   recentChats: [],
@@ -492,18 +495,20 @@ function upsertCompactActivityMessage(activity: CompactActivity): void {
   // assistant turn so it appears as an item in that timeline rather than as a
   // visually separate message block. Idle (manual) compaction keeps its own
   // dedicated message.
-  let message = [...state.messages].reverse().find(m => m.role === "assistant" && isAssistantTurnLive(m));
+  let message = activity.ts === undefined ? [...state.messages].reverse().find(m => m.role === "assistant" && isAssistantTurnLive(m)) : undefined;
   if (!message) {
     const messageId = compactActivityMessageId(activity);
     message = state.messages.find(m => m.id === messageId);
     if (!message) {
-      message = { id: messageId, role: "assistant", parts: [], text: "", thought: "", toolCards: [] };
-      state.messages.push(message);
+      message = { id: messageId, role: "assistant", recordTs: activity.ts, parts: [], text: "", thought: "", toolCards: [] };
+      const next = activity.ts === undefined ? -1 : state.messages.findIndex(m => (m.recordTs ?? 0) > activity.ts!);
+      if (next < 0) state.messages.push(message);
+      else state.messages.splice(next, 0, message);
     }
   }
   const card = compactActivityToolCard(activity, false);
   message.toolCards.push(card);
-  message.parts.push({ id: partId, kind: "tool", card, startedAt: Date.now() });
+  message.parts.push({ id: partId, kind: "tool", card, startedAt: activity.ts ?? Date.now() });
 }
 
 function renderFenceCode(tokens: Parameters<RenderRule>[0], idx: number): string {
@@ -1544,6 +1549,7 @@ function workActivities(parts: MessagePart[]): WorkActivity[] {
         resource,
         createsNewFile: part.card.createsNewFile,
         status: part.card.status,
+        skipped: part.card.skipped,
         active: isActiveToolCard(part.card)
       }];
     }
@@ -2339,7 +2345,7 @@ function updateModeMenuOption(option: HTMLElement, selected: boolean): void {
 
 function showCompactUnavailable(): void {
   state.compactNudge = true;
-  state.compactHintOverride = `Compaction is available after ${state.compactMinMessages} saved messages.`;
+  state.compactHintOverride = "Compaction needs older conversation history to summarize.";
   if (compactNudgeTimer) clearTimeout(compactNudgeTimer);
   compactNudgeTimer = setTimeout(() => {
     state.compactNudge = false;
@@ -2515,7 +2521,8 @@ function compactActivityToolCard(activity: CompactActivity, expanded: boolean): 
     toolName: "compact_context",
     argsJson: "{}",
     category: "compact",
-    status: activity.status,
+    status: activity.status === "skipped" ? "executed" : activity.status,
+    skipped: activity.status === "skipped",
     resultPreview: activity.status === "pending" ? undefined : compactActivityOutput(activity),
     expanded
   };
@@ -2524,11 +2531,12 @@ function compactActivityToolCard(activity: CompactActivity, expanded: boolean): 
 function compactActivityOutput(activity: CompactActivity): string {
   const source = activity.source === "auto" ? "Automatic compaction" : "Manual compaction";
   const kept = Math.min(activity.keepTail, activity.beforeMessages);
+  if (activity.status === "skipped") return `${source} skipped: no useful reduction is available. The existing context was preserved.`;
   if (activity.status === "pending") {
     return [
       `${source} is summarizing older conversation history.`,
-      `Messages before compaction: ${activity.beforeMessages}. Keeping the latest ${kept} message${kept === 1 ? "" : "s"} verbatim.`,
-      `Token estimate before compaction: ${activity.beforeTokens}.`
+      `Messages before compaction: ${activity.beforeMessages}. Retention is selected by token budget.`,
+      `Last measured token count: ${activity.beforeTokens}.`
     ].join("\n");
   }
   if (activity.status === "failed") {
@@ -2540,10 +2548,10 @@ function compactActivityOutput(activity: CompactActivity): string {
   const afterTokens = activity.afterTokens ?? activity.beforeTokens;
   const pct = Math.round((afterTokens / Math.max(1, activity.beforeTokens)) * 100);
   return [
-    `${source} completed.`,
+    `${source} completed.${activity.targetReached === false ? " The prompt fits, but protected context prevented reaching the preferred target." : ""}`,
     `Messages: ${activity.beforeMessages} -> ${activity.afterMessages ?? activity.beforeMessages}.`,
-    `Tokens: ${activity.beforeTokens} -> ${afterTokens} (${pct}% of the previous estimate).`,
-    `Older turns were summarized; the latest ${kept} message${kept === 1 ? "" : "s"} were kept verbatim.`
+    `Tokens: ${activity.beforeTokens} -> ${afterTokens} (${pct}% of the previous count).`,
+    `Older turns were summarized; ${kept} message${kept === 1 ? "" : "s"} were kept verbatim.`
   ].join("\n");
 }
 
@@ -2657,6 +2665,7 @@ function parseDiffLine(line: string): { kind: "add" | "del" | "neutral"; oldLine
 
 /** Header name for a tool card. */
 function toolCardHeadName(tc: ToolCard): string {
+  if (tc.skipped && tc.toolName === "compact_context") return "Compaction skipped";
   if (tc.status === "pending" && tc.toolName !== "compact_context") return waitingToolLabel(tc.toolName);
   const featureLabel = chatFeature.headerLabel?.(tc, isActiveToolCard(tc));
   if (featureLabel) return featureLabel;
@@ -3803,11 +3812,11 @@ function startQueuedMessageEdit(id: string): void {
   state.editingQueuedMessageId = id;
   state.queuedMessageDraft = message.text;
   render();
-  requestAnimationFrame(() => {
-    const input = root.querySelector("[data-queued-edit-input]") as HTMLTextAreaElement | null;
-    input?.focus();
-    input?.setSelectionRange(input.value.length, input.value.length);
-  });
+  // render() mounts the editor synchronously. A later caret move could overwrite
+  // a selection made immediately after opening it, turning replacement into append.
+  const input = root.querySelector("[data-queued-edit-input]") as HTMLTextAreaElement | null;
+  input?.focus();
+  input?.setSelectionRange(input.value.length, input.value.length);
 }
 
 function cancelQueuedMessageEdit(): void {
@@ -4059,12 +4068,17 @@ function handleHostMessage(msg: ExtToChat): void {
         ? state.compactActivity : undefined;
       if (!pendingCompactActivity) state.compactActivity = undefined;
       loadFromRecord(msg.record);
+      for (const outcome of msg.record.compactions ?? []) {
+        const activity: CompactActivity = { ...outcome, id: outcome.compactId };
+        state.compactActivity = activity;
+        upsertCompactActivityMessage(activity);
+      }
       if (pendingCompactActivity) {
         state.compactActivity = pendingCompactActivity;
         upsertCompactActivityMessage(pendingCompactActivity);
       }
       const contextMessages = msg.contextMessageCount ?? msg.record.messages.length;
-      applyCompactStatus(contextMessages, state.compactMinMessages, contextMessages >= state.compactMinMessages);
+      applyCompactStatus(contextMessages, state.compactMinMessages, msg.contextCompactionAvailable ?? contextMessages >= state.compactMinMessages);
       render();
       break;
     }
@@ -4478,6 +4492,7 @@ function handleHostMessage(msg: ExtToChat): void {
           status: msg.status,
           beforeTokens: msg.beforeTokens,
           afterTokens: msg.afterTokens,
+          targetReached: msg.targetReached,
           beforeMessages: msg.beforeMessages,
           afterMessages: msg.afterMessages,
           keepTail: msg.keepTail,

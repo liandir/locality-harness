@@ -1,13 +1,16 @@
 import { GenerationLengthError, StreamFailure, serverErrorMessage, type CompletionDiagnostics } from "./completion.js";
 export { GenerationLengthError, StreamFailure } from "./completion.js";
 import { connectionHeaders, redactServerError, serverUrl } from "./connection.js";
-import { countServerPrompt, isUnsupportedImage, resolvedConnection, serializeRequest, serverFailure, setImageSupport, VisionUnsupportedError } from "./server.js";
+import { allowReasoningFallback, prepareServerRequest, checkPreparedLimit, isUnsupportedImage, resolvedConnection, serverFailure, setImageSupport, VisionUnsupportedError } from "./server.js";
 export { fetchServerMetadata, fetchServerModels, fetchServerContextSize, tokenize, VisionUnsupportedError } from "./server.js";
 export type { ServerMetadata, ServerModel } from "./serverTypes.js";
 import { beginForeground } from "./activity.js";
 import { safeFetch, NetworkPolicyError } from "../network/safeFetch.js";
 import { progressSignature, writeProgressFromJsonToolBody } from "./toolProgress.js";
 import type { OpenAiTool } from "../tools/toolDefinitions.js";
+import type { GenerationPolicy } from "./requestPolicy.js";
+import { streamResponses } from "./responses.js";
+import { responseIsCommentary, type ResponseHistory } from "./responseHistory.js";
 
 export interface LlmToolCall {
   id: string;
@@ -24,17 +27,20 @@ export interface LlmMessage {
   role: "system" | "user" | "assistant" | "tool";
   content: LlmContent;
   reasoning_content?: string;
+  responseHistory?: ResponseHistory;
+  replayContextChanged?: boolean;
   name?: string;
   tool_call_id?: string;
   tool_calls?: LlmToolCall[];
 }
 
 export interface ChatCompletionRequest {
+  generation?: GenerationPolicy;
   /** OpenAI-compatible model id; required for llama.cpp router mode. */
   model?: string;
   /** Internal scheduling flag, never sent to the server. */
   background?: boolean;
-  /** Auxiliary tasks disable optional reasoning on servers without a parser. */
+  /** Legacy shorthand; new consumers select an explicit generation policy. */
   purpose?: "auxiliary";
   messages: LlmMessage[];
   temperature?: number;
@@ -52,7 +58,7 @@ export interface ChatCompletionRequest {
   parallel_tool_calls?: boolean;
   /** llama.cpp extension: report prompt processing before generation starts. */
   return_progress?: boolean;
-  /** Called once llama.cpp has accepted this generation request. Not sent over the wire. */
+  /** Called once the server accepts this generation request. Not sent over the wire. */
   onResponseAccepted?: () => void;
 }
 
@@ -73,7 +79,7 @@ export class MalformedNativeToolCallError extends Error {
 export type LlmStreamChunk =
   | { kind: "text"; text: string }
   | { kind: "thought"; text: string }
-  | { kind: "finish"; reason?: string; diagnostics?: CompletionDiagnostics }
+  | { kind: "finish"; reason?: string; diagnostics?: CompletionDiagnostics; responseHistory?: ResponseHistory }
   | { kind: "usage"; promptTokens: number; completionTokens?: number }
   | { kind: "promptProgress"; processedTokens: number; totalTokens: number }
   | { kind: "toolCallProgress"; name: string; path?: string; content?: string; contentBytes: number; contentLines: number; startLine?: number; endLine?: number; line?: number; id?: string }
@@ -106,15 +112,8 @@ interface StreamPayload {
 }
 
 /**
- * Streams text and thinking deltas from a llama.cpp /v1/chat/completions endpoint.
- * llama.cpp's OpenAI-compatible server returns SSE with lines `data: {json}`
- * where json.choices[0].delta.content is the next visible text chunk. Some
- * backends expose thinking as reasoning_content/reasoning/thought deltas; those
- * are forwarded separately so the UI can render them without showing raw tokens.
- *
- * Templates run with `--jinja` may instead return structured tool calls as
- * `delta.tool_calls` fragments. Those are accumulated by index across the stream
- * and emitted as `toolCall` chunks once complete, so they aren't silently lost.
+ * Streams the selected model protocol into shared text, reasoning and tool events.
+ * Each parser requires response-level terminal evidence before releasing calls.
  */
 export async function* streamChat(
   endpoint: string,
@@ -123,7 +122,13 @@ export async function* streamChat(
 ): AsyncGenerator<LlmStreamChunk, void, void> {
   const end = req.background ? () => undefined : beginForeground();
   try {
-    yield* streamChatRequest(endpoint, req, signal);
+    try { yield* streamChatRequest(endpoint, req, signal); }
+    catch (error) {
+      signal.throwIfAborted();
+      const connection = await resolvedConnection(endpoint, req.model, signal);
+      if (!allowReasoningFallback(req, connection, error)) throw error;
+      yield* streamChatRequest(endpoint, req, signal);
+    }
   } catch (error) {
     if (signal.aborted || error instanceof StreamFailure || error instanceof NetworkPolicyError || error instanceof NativeToolsUnsupportedError
       || error instanceof MalformedNativeToolCallError || error instanceof VisionUnsupportedError) throw error;
@@ -136,12 +141,14 @@ export async function* streamChat(
 async function* streamChatRequest(
   endpoint: string, req: ChatCompletionRequest, signal: AbortSignal
 ): AsyncGenerator<LlmStreamChunk, void, void> {
-  const connection = await resolvedConnection(endpoint, req.model, signal);
-  await countServerPrompt(endpoint, req, signal);
-  const res = await safeFetch(connection.endpoint, serverUrl(connection.endpoint, "v1/chat/completions"), {
+  const prepared = await prepareServerRequest(endpoint, req, signal);
+  checkPreparedLimit(prepared, req);
+  const connection = prepared.connection;
+  const responses = connection.protocol !== "chat-completions";
+  const res = await safeFetch(connection.endpoint, serverUrl(connection.endpoint, responses ? "v1/responses" : "v1/chat/completions"), {
     method: "POST",
     headers: { ...connectionHeaders(connection), "Content-Type": "application/json", Accept: "text/event-stream" },
-    body: JSON.stringify(serializeRequest(req, connection)), signal
+    body: prepared.body, signal
   });
   if (!res.ok || !res.body) {
     const text = redactServerError(await res.clone().text().catch(() => ""), connection);
@@ -158,6 +165,15 @@ async function* streamChatRequest(
     throw await serverFailure(res, connection, "The model server");
   }
   req.onResponseAccepted?.();
+  if (responses) {
+    for await (const chunk of streamResponses(res, connection, signal)) {
+      if (chunk.kind === "finish" && req.messages.some(message => Array.isArray(message.content) && message.content.some(part => part.type === "image_url"))) {
+        setImageSupport(connection, "supported");
+      }
+      yield chunk;
+    }
+    return;
+  }
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buf = "";
@@ -304,6 +320,10 @@ export async function complete(
   try {
     for await (const chunk of streamChat(endpoint, req, signal)) {
       if (chunk.kind === "text") out += chunk.text;
+      if (req.generation?.task === "compaction" && ((chunk.kind === "toolCall")
+        || (chunk.kind === "finish" && (chunk.reason !== "stop" || responseIsCommentary(chunk.responseHistory))))) {
+        throw new StreamFailure("Summary generation did not finish with a complete final answer.", { cause: "protocol_error" });
+      }
     }
   } catch (error) {
     // Tiny auxiliary completions intentionally use a hard output cap. Their

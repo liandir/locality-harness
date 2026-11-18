@@ -41,7 +41,7 @@ describe("chat provider lifecycle", () => {
     const state = provider as unknown as { view: { webview: { postMessage: typeof postMessage } } };
     state.view = { webview: { postMessage } };
     const record = {
-      messages: [{ role: "user", content: "original prompt", ts: 1 }],
+      messages: [{ role: "user", content: "original prompt", ts: 1 }, { role: "assistant", content: "answer", ts: 2, responseHistory: { source: "private-source", output: [] } }],
       contextMessages: [
         { role: "system", content: "model-only summary", ts: 2 },
         { role: "assistant", content: "recent response", ts: 3 }
@@ -52,6 +52,8 @@ describe("chat provider lifecycle", () => {
     expect(payload.contextMessageCount).toBe(2);
     expect(payload.record.messages[0].content).toBe("original prompt");
     expect(payload.record.contextMessages).toBeUndefined();
+    expect(payload.record.messages[1].responseHistory).toBeUndefined();
+    expect(record.messages[1].responseHistory).toBeDefined();
     expect(record.contextMessages).toHaveLength(2);
   });
 

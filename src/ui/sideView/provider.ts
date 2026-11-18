@@ -1,6 +1,7 @@
+import { normalizeModelProtocol } from "../../llm/serverTypes.js";
 import { noteRevision } from "../../chat/memoryStore.js";
 import { hasServerApiKey, saveServerApiKey, withConnectionDraft } from "../../llm/connection.js";
-import { clearServerCaches } from "../../llm/server.js";
+import { clearServerCaches, verifyServerProtocol } from "../../llm/server.js";
 import { createSideHost } from "../../build/sideHost.js";
 import type { SideHost } from "../../build/sideHostContracts.js";
 import { seedFeatureSettings } from "../../build/settings.js";
@@ -268,8 +269,12 @@ export class SideViewProvider implements vscode.WebviewViewProvider {
         break;
       case "saveSetting":
         try {
-          if (["endpoint", "model"].includes(m.key)) this.connectionAttempt++;
-          await writeSetting(m.key as keyof ReturnType<typeof readSettings>, m.value as never);
+          if (["endpoint", "model", "protocol"].includes(m.key)) {
+            this.connectionAttempt++;
+            const write = this.connectionWrites.then(() => writeSetting(m.key as keyof ReturnType<typeof readSettings>, m.value as never));
+            this.connectionWrites = write.catch(() => undefined);
+            await write;
+          } else await writeSetting(m.key as keyof ReturnType<typeof readSettings>, m.value as never);
         } catch (e) {
           this.pushSettings();
           this.post({ type: "settingSaved", key: m.key, ok: false, error: (e as Error).message });
@@ -307,34 +312,41 @@ export class SideViewProvider implements vscode.WebviewViewProvider {
         break;
       case "validateEndpoint": {
         const attempt = ++this.connectionAttempt;
-        const v = await validateEndpoint(m.url);
+        await this.connectionWrites;
         if (attempt !== this.connectionAttempt) break;
+        const protocol = normalizeModelProtocol(readSettings().protocol);
+        if (m.protocol !== undefined && m.protocol !== protocol) {
+          this.post({ type: "endpointValidation", protocol: m.protocol, requestId: m.requestId, ok: false, error: "Protocol changed before the connection check. Select the protocol and try Set again." });
+          break;
+        }
+        const v = await validateEndpoint(m.url);
+        if (attempt !== this.connectionAttempt || normalizeModelProtocol(readSettings().protocol) !== protocol) break;
         if (!v.ok) {
-          this.post({ type: "endpointValidation", requestId: m.requestId, ok: false, error: v.error, resolved: v.resolved });
+          this.post({ type: "endpointValidation", protocol, requestId: m.requestId, ok: false, error: v.error, resolved: v.resolved });
           break;
         }
         try {
           const { metadata, models, selectedModel } = await this.readEndpointInfo(m.url, true, m.apiKey);
-          if (attempt !== this.connectionAttempt) break;
+          if (attempt !== this.connectionAttempt || normalizeModelProtocol(readSettings().protocol) !== protocol) break;
           const commit = this.connectionWrites.then(async () => {
-            if (attempt !== this.connectionAttempt) return;
+            if (attempt !== this.connectionAttempt || normalizeModelProtocol(readSettings().protocol) !== protocol) return;
             if (m.apiKey !== undefined) await saveServerApiKey(m.url, m.apiKey, this.context.secrets);
-            if (attempt !== this.connectionAttempt) return;
+            if (attempt !== this.connectionAttempt || normalizeModelProtocol(readSettings().protocol) !== protocol) return;
             if (m.apiKey !== undefined) clearServerCaches();
             await writeSetting("endpoint", m.url);
-            if (attempt !== this.connectionAttempt) return;
+            if (attempt !== this.connectionAttempt || normalizeModelProtocol(readSettings().protocol) !== protocol) return;
             if (readSettings().model !== selectedModel) await writeSetting("model", selectedModel);
-            if (attempt !== this.connectionAttempt) return;
+            if (attempt !== this.connectionAttempt || normalizeModelProtocol(readSettings().protocol) !== protocol) return;
             await this.pushCredentialState(m.url);
             this.onEndpointConnected?.();
-            this.post({ type: "endpointValidation", requestId: m.requestId, ok: true, resolved: v.resolved, metadata, models, selectedModel });
+            this.post({ type: "endpointValidation", protocol, requestId: m.requestId, ok: true, resolved: v.resolved, metadata, models, selectedModel });
           });
           this.connectionWrites = commit.catch(() => undefined);
           await commit;
         } catch (error) {
-          if (attempt !== this.connectionAttempt) break;
+          if (attempt !== this.connectionAttempt || normalizeModelProtocol(readSettings().protocol) !== protocol) break;
           this.post({
-            type: "endpointValidation", requestId: m.requestId,
+            type: "endpointValidation", protocol, requestId: m.requestId,
             ok: false,
             resolved: v.resolved,
             error: `Could not read model server information: ${(error as Error).message}`
@@ -390,13 +402,13 @@ export class SideViewProvider implements vscode.WebviewViewProvider {
     if (!v.ok) return;
     try {
       const { metadata, models, selectedModel } = await this.readEndpointInfo(endpoint);
-      if (generation !== this.metadataGeneration || readSettings().endpoint !== settings.endpoint || readSettings().model !== settings.model || readSettings().serverType !== settings.serverType) return;
+      if (generation !== this.metadataGeneration || readSettings().endpoint !== settings.endpoint || readSettings().model !== settings.model || readSettings().serverType !== settings.serverType || readSettings().protocol !== settings.protocol) return;
       if (readSettings().model !== selectedModel) await writeSetting("model", selectedModel);
-      this.post({ type: "endpointValidation", ok: true, resolved: v.resolved, metadata, models, selectedModel });
+      this.post({ type: "endpointValidation", protocol: normalizeModelProtocol(settings.protocol), ok: true, resolved: v.resolved, metadata, models, selectedModel });
     } catch (error) {
-      if (generation !== this.metadataGeneration || readSettings().endpoint !== settings.endpoint || readSettings().serverType !== settings.serverType || readSettings().model !== settings.model) return;
+      if (generation !== this.metadataGeneration || readSettings().endpoint !== settings.endpoint || readSettings().serverType !== settings.serverType || readSettings().protocol !== settings.protocol || readSettings().model !== settings.model) return;
       this.post({
-        type: "endpointValidation",
+        type: "endpointValidation", protocol: normalizeModelProtocol(settings.protocol),
         ok: false,
         resolved: v.resolved,
         error: `Could not read model server information: ${(error as Error).message}`
@@ -408,11 +420,12 @@ export class SideViewProvider implements vscode.WebviewViewProvider {
     endpoint: string,
     force = false, apiKey?: string
   ): Promise<{ metadata: Awaited<ReturnType<typeof fetchServerMetadata>>; models: ServerModel[]; selectedModel: string }> {
-    const configured = readSettings().model;
-    return withConnectionDraft({ endpoint }, apiKey, async () => {
+    const { model: configured, protocol } = readSettings();
+    return withConnectionDraft({ endpoint, protocol }, apiKey, async () => {
       const models = await fetchServerModels(endpoint, force);
       const selectedModel = models.some(model => model.id === configured) ? configured : models[0].id;
-      const metadata = await withConnectionDraft({ endpoint, model: selectedModel }, apiKey, () => fetchServerMetadata(endpoint, { model: selectedModel, force, probeImages: true }));
+      const metadata = await withConnectionDraft({ endpoint, model: selectedModel, protocol }, apiKey, () => fetchServerMetadata(endpoint, { model: selectedModel, force, probeImages: true }));
+      if (force) await withConnectionDraft({ endpoint, model: selectedModel, protocol }, apiKey, () => verifyServerProtocol(endpoint, selectedModel));
       return { metadata, models, selectedModel };
     });
   }

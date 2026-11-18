@@ -1,5 +1,9 @@
 export type ServerType = "auto" | "llama.cpp" | "vllm";
 export type ServerBackend = Exclude<ServerType, "auto">;
+export type ModelProtocol = "responses" | "chat-completions";
+export function normalizeModelProtocol(value: unknown): ModelProtocol {
+  return value === "chat-completions" ? value : "responses";
+}
 export type ImageSupport = "supported" | "unsupported" | "unknown";
 
 export function normalizeServerType(value: unknown): ServerType {

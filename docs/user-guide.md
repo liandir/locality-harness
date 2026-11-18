@@ -34,6 +34,16 @@ tab in the side panel. Configure the server and tool calling before chatting:
   rejects native tools.
   Start `llama-server` with `--jinja` and a tool-aware chat template.
 
+**Protocol** defaults to **Responses** (`locality.protocol: "responses"`). Choose
+**Chat Completions** (`"chat-completions"`) for servers that do not implement
+`/v1/responses`. Locality reports unsupported protocols rather than switching
+automatically. **Set** verifies the selected protocol before saving a connection.
+Existing installations without a protocol override also use Responses.
+
+Both protocols keep conversation history and compaction in Locality. Responses
+requests use `store: false` and resend local history, including completed tool
+and reasoning items; they do not depend on server-managed response chains.
+
 The other settings (sampling, auto-approve toggles, safe
 commands) have sensible defaults and can be revisited later.
 
@@ -52,16 +62,22 @@ For a reasoning and tool-capable Qwen3 server, the vLLM 0.32.0 setup is:
 
 ```bash
 vllm serve Qwen/Qwen3-4B --host 127.0.0.1 --port 8000 \
-  --max-model-len 32768 --enable-auto-tool-choice \
+  --max-model-len 32768 --enable-scale-out --enable-auto-tool-choice \
   --tool-call-parser hermes --reasoning-parser qwen3
 ```
+
+**`--enable-scale-out` is required for Locality's default Responses protocol.**
+It enables `/v1/responses/render`, which Locality uses for exact prompt token
+counting. Without it, vLLM returns HTTP 403 with “Scale-out endpoints are disabled.”
+If you select **Chat Completions** in Locality, this flag is not required.
 
 Choose **Native server only** in Locality. Other models need their corresponding
 [tool parser](https://docs.vllm.ai/en/v0.32.0/features/tool_calling/) and
 [reasoning configuration](https://docs.vllm.ai/en/v0.32.0/features/reasoning_outputs/).
 Reasoning effort values must be supported by the served model. Finite reasoning
-budgets use `thinking_token_budget` and require a configured reasoning parser or
-reasoning boundaries; leave the budget empty for unlimited reasoning. Models
+budgets require **Chat Completions** with vLLM 0.32.0: that protocol uses
+`thinking_token_budget` and needs a configured reasoning parser or boundaries.
+Leave the budget empty for unlimited reasoning when using **Responses**. Models
 whose templates cannot disable thinking may still reason when the switch is off.
 
 If the server uses `--api-key`, enter its key in the masked **API key** field and
@@ -71,13 +87,19 @@ the server URL and proxy prefix and are not stored in settings or chat history.
 
 When connecting or selecting a model, Locality sends a tiny test image generated
 entirely in memory and reports image input as **Supported** or **Unavailable**.
-No test image file is created. vLLM only preprocesses the image; llama.cpp's check
-generates at most one token. Authentication, invalid responses and server outages
+No test image file is created. Responses checks generate at most one token.
+With Chat Completions, vLLM only preprocesses the image and llama.cpp generates
+at most one token. Authentication, invalid responses and server outages
 remain connection errors instead of marking the model as text-only. Clicking
-**Set** checks again. Actual vLLM image prompts are also preprocessed before generation.
-The complete vLLM prompt, tools and image tokens are counted on the server for
-the context guard, reserving up to 4,096 tokens (at most a quarter of the context)
-for the answer. Auxiliary requests reserve their explicit output limits.
+**Set** checks again. Responses token counts use llama.cpp's
+`/v1/responses/input_tokens` or vLLM's `/v1/responses/render`.
+The latter requires vLLM's `--enable-scale-out` option. Chat Completions uses
+llama.cpp's `/v1/chat/completions/input_tokens` or vLLM's chat `/tokenize` endpoint.
+Exact counting is required: **Set** checks it before accepting the connection.
+If the route is missing, upgrade the server or select a supported protocol;
+Locality does not substitute estimates.
+The context guard reserves output space; auxiliary requests reserve their
+explicit output limits.
 vLLM uses the normal waiting indicator without llama.cpp's
 prompt-progress percentage.
 
@@ -89,7 +111,11 @@ records the compatibility baseline and how to run live acceptance tests.
 
 Connection troubleshooting:
 
-- **401/403:** set or replace the API key for this server.
+- **Responses unavailable:** select **Chat Completions** under **Protocol**, or
+  upgrade the server to a version with Responses support.
+- **403 — “Scale-out endpoints are disabled”:** restart `vllm serve` with
+  `--enable-scale-out`, or select **Chat Completions** under **Protocol**.
+- **Authentication errors (401/403):** set or replace the API key for this server.
 - **Could not identify:** check the server URL and proxy routing. llama.cpp must
   expose `/props`; vLLM must expose `/v1/models` and `/tokenize`. A missing
   `/props` alone does not identify a server as vLLM.
@@ -337,16 +363,17 @@ The implementation is in the [AGENTS.md loader](../src/llm/agentsMd.ts),
 ## Managing context
 
 A small ring on the composer toggle bar shows how full the model's context
-window is. It updates during streaming with an estimate for incoming thinking,
-text, and tool content, then uses server-reported usage when available. These
-live estimates do not trigger compaction. When it gets close to full:
+window is. It shows the last measured full-request count and updates from
+server-reported prompt progress and usage. Streamed text does not create an
+estimated count. When it gets close to full:
 
 - **Auto-compact** (on by default) summarizes older parts of the
-  conversation when context reaches the configured threshold (80% by
-  default).
+  conversation before a model request reaches the configured threshold (80%
+  by default), or earlier if the reserved output budget requires it.
 - If auto-compact is off, the context ring turns red at that threshold so
   you can compact manually before the next request gets too large.
-- You can also click the context ring at any time to compact immediately.
+- You can also click the context ring to compact manually. During a response,
+  the request waits for a completed tool exchange or the end of the response.
 
 With **Auto-compact** enabled, a response cut short by a generation limit gets
 one recovery attempt per turn. The harness discards that unfinished response,
@@ -364,6 +391,29 @@ message asks for confirmation before removing later messages, tool results,
 and thinking from both the chat and model context. Canceling keeps your edit
 draft. Workspace file changes remain.
 
+Compaction uses the same policy with both backends and protocols. Each accepted
+checkpoint stores its summary, covered message IDs, protected-message IDs, and
+references to original tool evidence. Later compactions summarize the prior
+checkpoint plus newly removed history. The target is 20 percentage points below
+the trigger and at most 80% of the hard input limit, subject to protected context. Whole tool
+exchanges, the current request, steering, and tool results not yet consumed by
+the model remain intact. Large historical write payloads are represented by
+bounded evidence; the saved transcript remains complete.
+
+Only an exactly measured candidate that fits and reduces context is committed.
+The commit checks conversation/settings and disk revisions under the workspace
+storage lock. Generation, validation, cancellation, conflict, and save failures
+keep the preceding context. Encrypted native reasoning that cannot safely be
+replayed after a prefix change also prevents compaction.
+
+Compaction requests reasoning off when supported and adjusts its generation allowance when a summary reaches
+the output limit. Empty or incomplete summaries never replace the active
+context. Failed attempts retain the previous context and their explanation is
+saved with the chat. Compaction is available when there is older work to
+summarize, including short conversations with large tool results. The current
+request and its steering remain intact; if those alone exceed the available
+window, reduce the request or increase the server context size.
+
 Editing or deleting a message preserves any compacted context preceding it.
 If the message was itself summarized, context is rebuilt from the retained
 transcript so the discarded messages cannot survive in a summary. Context
@@ -378,6 +428,7 @@ Only settings supported by the installed edition are available.
 | Setting | Default | What it does |
 | --- | --- | --- |
 | `endpoint` | `http://localhost:8080/v1` | URL of your llama.cpp or vLLM server. Use `localhost` or a private IP literal such as `http://127.0.0.1:8080/v1` or `http://192.168.1.50:8080/v1`. |
+| `protocol` | `responses` | Model API: `responses` or `chat-completions`. Applies to chat, planning, compaction, titles, and commit messages. |
 | `model` | `local` | Model id sent with requests. Choose a served model or alias from `/v1/models`. |
 | `toolCallingMode` | `native` | Select `native`, `compat-gemma4`, `compat-qwen3`, `compat-muse-glimmer`, or `compat-gpt-oss`. Compatibility profiles are native-first and add only the selected family's recovery behavior. |
 | `temperature` | `0.8` | Sampling temperature for chat requests. Lower is more deterministic, higher more varied. |

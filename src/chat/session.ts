@@ -1,7 +1,9 @@
+import { identifyMessages, newMessageId } from "./contextHistory.js";
+import { responseIsCommentary, responseReasoning, type ResponseHistory } from "../llm/responseHistory.js";
 import { capturedConnectionSettings, connectionIdentity, withServerConnection } from "../llm/connection.js";
-import { countServerPrompt, outputTokenReserve } from "../llm/server.js";
+import { outputTokenReserve, promptBudget, type PromptMeasurement } from "../llm/requestPolicy.js";
+import { serverGuidance } from "../llm/serverGuidance.js";
 import type { ChatCompletionRequest } from "../llm/client.js";
-import type { ServerBackend } from "../llm/serverTypes.js";
 import { pendingPlanTimestamp } from "./planning.js";
 import { StreamFailure, type CompletionDiagnostics } from "../llm/completion.js";
 import { unresolvedInterruption } from "./interruption.js";
@@ -34,7 +36,6 @@ import {
   NativeToolsUnsupportedError,
   VisionUnsupportedError,
   streamChat,
-  tokenize,
   type LlmMessage
 } from "../llm/client.js";
 import { buildUserContext, withUserContext, buildSystemPrompt, coalesceSameRole, renderToolCallForPrompt } from "../llm/prompt.js";
@@ -63,18 +64,18 @@ import {
 } from "../tools/fsTools.js";
 import { assertInsideWorkspace } from "../tools/workspaceGuard.js";
 import { onSettingsChange, readSettings, writeSetting, type AutoApprovalSetting, type HarnessSettings } from "../config/settings.js";
-import { ChatStorage, VISION_TOKEN_RESERVE, modelMessages, appendChatMessage } from "./storage.js";
-import type { ChatAttachment, ChatMessage, ChatRecord } from "./types.js";
+import { ChatStorage, modelMessages, appendChatMessage } from "./storage.js";
+import type { ChatAttachment, ChatMessage, ChatRecord, CompactHistory } from "./types.js";
 import { attachmentFileType, isImageAttachment, synthesizeAttachmentPrompt } from "./attachments.js";
 import { MAX_ATTACHMENTS_PER_MESSAGE } from "./attachmentLimits.js";
 import {
   REASONING_NONE,
-  reasoningRequestOverrides,
+  generationReasoning,
   type ReasoningEffort
 } from "./reasoningEffort.js";
 import { normalizeTodos, renderTodosMarkdown, todoCounts } from "./todos.js";
-import { compact, compactAvailableForMessageCount, KEEP_TAIL, MIN_COMPACT_MESSAGES, type CompactConfig } from "./compactor.js";
-import { countTokens, promptTokens, recomputeTokens, truncateToTokenBudget } from "./contextTracker.js";
+import { compact, contextRevision, compactAvailableForMessages, KEEP_TAIL, MIN_COMPACT_MESSAGES, type CompactConfig } from "./compactor.js";
+import { countTokens, measureRequestPrompt, truncateToTokenBudget } from "./contextTracker.js";
 import { buildLineDiff, lineDiffStats, renderLineDiff } from "./diffPreview.js";
 import { fileUndoPlan, turnFileEdits, undoFiles, type FileUndoSnapshot } from "./fileUndo.js";
 import { rememberFileWrite, summarizeFileChanges, type FileChangeSummary, type TrackedFileWrite } from "./fileChanges.js";
@@ -200,10 +201,12 @@ export class ChatSession {
   // effective limit is min(configured, server). Refreshed before each request.
   private serverContextSize?: number;
   private supportsVision = false;
-  private serverBackend: ServerBackend = "llama.cpp";
+  private serverHelp = serverGuidance();
+  private promptAccuracy: PromptMeasurement["accuracy"] = "exact";
   private serverMetadataError = "";
-  private untrackedUserContextTokens = 0;
-  private systemPromptTokenCache?: { text: string; identity: string; tokens: number };
+  private recordingExchangeId?: string;
+  private pendingManualCompact = false;
+  private lastAutoCompactRevision?: string;
   // Last AGENTS.md content loaded for this session. Refreshed (mtime-cached) at
   // the start of every prompt build so the sync buildPromptMessages can read it.
   private agentsMdCache?: string;
@@ -247,6 +250,8 @@ export class ChatSession {
     this.storage = args.storage;
     this.workspaceRoot = args.workspaceRoot;
     this.record = args.record;
+    identifyMessages(this.record.messages);
+    if (this.record.contextMessages) identifyMessages(this.record.contextMessages);
     this.transient = args.transient ?? false;
     this.record.pendingPlanMessageTs = pendingPlanTimestamp(this.record);
     this.emit = event => {
@@ -294,7 +299,7 @@ export class ChatSession {
 
   getRecord(): ChatRecord { return this.record; }
 
-  isTurnActive(): boolean { return this.activeTurn !== undefined; }
+  isTurnActive(): boolean { return this.activeTurn !== undefined || this.compactTasks.size > 0; }
 
   async undoResponseFiles(userTs: number, check: (absolute: string) => void | Promise<void>, filePath?: string): Promise<void> {
     if (this.isTurnActive()) throw new Error("Wait for the response to finish before undoing its edits.");
@@ -334,56 +339,31 @@ export class ChatSession {
     return this.serverContextSize ?? 0;
   }
 
-  /**
-   * Budget handed to the compactor. Its `limit` is the room left for the
-   * message transcript AFTER reserving the system prompt (tool catalog) and a
-   * small margin for generation priming — the system prompt is not a stored
-   * message, so compaction must leave space for it or the assembled prompt
-   * overflows even though the messages fit their own budget.
-   */
-  private async compactConfig(s: HarnessSettings): Promise<CompactConfig> {
+  /** Snapshot the full next request; adapters own serialization and exact counting. */
+  private async compactConfig(s: HarnessSettings, signal?: AbortSignal, repairNote?: string): Promise<CompactConfig> {
+    await this.currentAgentsMd();
     const limit = this.contextLimit();
-    const sysTokens = await this.promptOverheadTokens(s);
-    // The current context is restored even if its user message leaves the tail.
+    const systemPrompt = this.systemPrompt();
     const userContext = this.currentUserContext();
-    const contextReserve = userContext && !this.untrackedUserContextTokens
-      ? await countTokens(s.endpoint, withUserContext("", userContext), s.model) : 0;
-    const messageBudget = Math.max(1024, limit - sysTokens - contextReserve - 256);
+    const template = this.generationRequest(s, []);
+    const configuration = JSON.stringify(readSettings());
     return {
-      limit: messageBudget,
+      limit: promptBudget(limit, outputTokenReserve(limit), "exact"),
+      summaryContextLimit: limit,
+      request: async messages => {
+        signal?.throwIfAborted();
+        const prompt = await this.buildPromptMessages(systemPrompt, userContext, messages);
+        return { ...template, messages: repairNote ? withPromptRepair(prompt, repairNote) : prompt };
+      },
+      assertCurrent: () => {
+        if (configuration !== JSON.stringify(readSettings()) || systemPrompt !== this.systemPrompt() || userContext !== this.currentUserContext()) {
+          throw new Error("Model settings or request context changed during compaction. Retry with the current settings.");
+        }
+      },
       thresholdPercent: s.autoCompactThresholdPercent,
       tailBudgetPercent: s.tailBudgetPercent,
-      maxMessageTokensPercent: s.maxMessageTokensPercent,
-      overheadPerMessage: s.templateOverheadTokensPerMessage
+      maxMessageTokensPercent: s.maxMessageTokensPercent
     };
-  }
-
-  /**
-   * Count the stable system/catalog plus any current context not yet stored
-   * in model history (pending acceptance or removed by compaction). Keep
-   * their caches separate so changing turn context never retokenizes the base.
-   */
-  private async promptOverheadTokens(s: HarnessSettings, refreshAgentsMd = true): Promise<number> {
-    const nativeTools = this.toolProtocol === "native";
-    if (refreshAgentsMd) await this.currentAgentsMd();
-    const text = this.systemPrompt();
-    const user = this.turnUserMessage();
-    const stored = modelMessages(this.record).find(message => message.role === "user" && message.ts === user?.ts);
-    const context = this.currentUserContext();
-    this.untrackedUserContextTokens = context && !stored?.requestContext
-      ? await countTokens(s.endpoint, withUserContext("", context), s.model) : 0;
-    const catalog = nativeTools
-      ? `\n<tools>${JSON.stringify(asOpenAiTools(toolsForPrompt("native", readSettings().memoryEnabled, this.supportsVision, readSettings())))}</tools>`
-      : "";
-    const countedText = text + catalog;
-    const identity = connectionIdentity(s.endpoint, s.model);
-    if (this.systemPromptTokenCache?.text !== countedText || this.systemPromptTokenCache.identity !== identity) {
-      let estimated = false;
-      const tokens = await tokenize(s.endpoint, `<|system|>${countedText}`, s.model, { onEstimate: () => { estimated = true; } });
-      this.systemPromptTokenCache = estimated ? undefined : { text: countedText, identity, tokens };
-      return tokens + this.untrackedUserContextTokens;
-    }
-    return this.systemPromptTokenCache.tokens + this.untrackedUserContextTokens;
   }
 
   private systemPrompt(): string {
@@ -413,8 +393,7 @@ export class ChatSession {
   }
 
   /** Restore the current mode even when compaction removed the original request. */
-  private promptContextMessages(userContext = this.currentUserContext()): ChatMessage[] {
-    const context = modelMessages(this.record);
+  private promptContextMessages(userContext = this.currentUserContext(), context = modelMessages(this.record)): ChatMessage[] {
     const user = this.turnUserMessage();
     if (!user || !userContext) return context;
     if (context.some(message => message.role === "user" && message.ts === user.ts)) {
@@ -431,10 +410,6 @@ export class ChatSession {
     return messages;
   }
 
-  /** Sync best-effort variant for mid-stream estimates; 0 until first computed. */
-  private cachedPromptOverheadTokens(): number {
-    return (this.systemPromptTokenCache?.tokens ?? 0) + this.untrackedUserContextTokens;
-  }
 
   /**
    * Load (mtime-cached) the project's root AGENTS.md and remember it for the
@@ -461,19 +436,19 @@ export class ChatSession {
     return undefined;
   }
 
-  private async refreshServerContextSize(s: HarnessSettings): Promise<boolean> {
+  private async refreshServerContextSize(s: HarnessSettings, signal?: AbortSignal): Promise<boolean> {
     try {
-      const metadata = await fetchServerMetadata(s.endpoint, { model: s.model, force: this.serverContextSize === undefined });
+      const metadata = await fetchServerMetadata(s.endpoint, { model: s.model, force: this.serverContextSize === undefined, signal });
       this.serverContextSize = metadata.contextSize;
-      this.serverBackend = metadata.backend ?? "llama.cpp";
+      this.serverHelp = serverGuidance(metadata.backend);
       this.serverMetadataError = "";
       this.supportsVision = metadata.supportsVision;
-      this.emit({ kind: "visionCapability", supported: this.supportsVision, endpoint: s.endpoint, model: s.model, serverType: s.serverType });
+      this.emit({ kind: "visionCapability", supported: this.supportsVision, endpoint: s.endpoint, model: s.model, serverType: s.serverType, protocol: s.protocol });
       return true;
     } catch (error) {
       this.serverMetadataError = error instanceof Error ? error.message : "The model server is unavailable.";
       this.supportsVision = false;
-      this.emit({ kind: "visionCapability", supported: false, endpoint: s.endpoint, model: s.model, serverType: s.serverType });
+      this.emit({ kind: "visionCapability", supported: false, endpoint: s.endpoint, model: s.model, serverType: s.serverType, protocol: s.protocol });
       return false;
     }
   }
@@ -481,7 +456,7 @@ export class ChatSession {
   emitLoaded(): void {
     this.emit({ kind: "chatLoaded", record: this.record });
     if (this.serverContextSize !== undefined) {
-      this.emit({ kind: "tokens", total: this.record.totalTokens + this.cachedPromptOverheadTokens(), limit: this.contextLimit() });
+      this.emit({ kind: "tokens", total: this.record.totalTokens, limit: this.contextLimit() });
     }
     this.emit({ kind: "chatModeChanged", mode: this.record.mode });
     this.emit({ kind: "reasoningEffortChanged", effort: this.record.reasoningEffort });
@@ -548,74 +523,93 @@ export class ChatSession {
     await this.runCompact(source, { reload: true });
   }
 
-  private async runCompact(source: "manual" | "auto", options: { reload: boolean }): Promise<boolean> {
+  private async runCompact(source: "manual" | "auto", options: { reload: boolean; atBoundary?: boolean; repairNote?: string }): Promise<boolean> {
     if (this.disposed) return false;
+    const existing = this.compactTasks.values().next().value;
+    if (existing) return existing;
+    if (source === "manual" && this.activeTurn && !options.atBoundary) {
+      this.pendingManualCompact = true;
+      this.emit({ kind: "notice", text: "Compaction queued for the next completed tool exchange or response." });
+      return false;
+    }
     const end = beginForeground();
     const task = withServerConnection(readSettings(), () => this.runCompactForeground(source, options));
     this.compactTasks.add(task);
     try { return await task; } finally { this.compactTasks.delete(task); end(); }
   }
 
-  private async runCompactForeground(source: "manual" | "auto", options: { reload: boolean }): Promise<boolean> {
-    try { await this.prepareTextAttachments(); } catch (error) {
-      this.emit({ kind: "notice", text: `Could not read an attached text file: ${(error as Error).message}` });
-      return false;
-    }
-    if (!compactAvailableForMessageCount(modelMessages(this.record).length)) {
+  private async runCompactForeground(source: "manual" | "auto", options: { reload: boolean; repairNote?: string }): Promise<boolean> {
+    if (!compactAvailableForMessages(modelMessages(this.record))) {
       this.emitCompactStatus();
       return false;
     }
-    const s = capturedConnectionSettings(readSettings());
-    if (!(await this.refreshServerContextSize(s))) {
-      this.emit({ kind: "notice", text: this.serverMetadataError || "Could not read the server context length. Verify the endpoint in Settings." });
-      return false;
-    }
-    await recomputeTokens(s.endpoint, this.record, s.model);
-    const before = this.record.totalTokens;
-    const beforeMessages = modelMessages(this.record).length;
-    const compactId = `compact_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     if (this.disposed || (source === "auto" && this.abort?.signal.aborted)) return false;
     const ac = new AbortController();
     this.compactAborts.add(ac);
+    const s = capturedConnectionSettings(readSettings());
+    const compactId = `compact_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const base = { compactId, ts: Date.now(), source, beforeTokens: this.record.totalTokens,
+      beforeMessages: modelMessages(this.record).length, keepTail: KEEP_TAIL };
     this.completeContextIngestion();
-    this.emit({ kind: "compactStart", compactId, source, beforeTokens: before, beforeMessages, keepTail: KEEP_TAIL });
+    this.emit({ kind: "compactStart", ...base });
+    let saved: CompactHistory | undefined;
+    let diskRevision: string | undefined;
+    let capturedRevision = false;
     try {
-      const cfg = await this.compactConfig(s);
-      const { keptTail } = await compact(s.endpoint, this.record, ac.signal, cfg, s.model);
-      // The rewritten prompt must be cached again on the next model request.
-      // Keep this pending across cancellation or failure until prefill completes.
-      this.loadedChatContextPending = true;
-      await this.saveRecord();
-      await this.promptOverheadTokens(s, false);
-      if (options.reload) this.emit({ kind: "chatLoaded", record: this.record });
-      this.emit({ kind: "tokens", total: this.record.totalTokens + this.cachedPromptOverheadTokens(), limit: this.contextLimit() });
-      this.emitCompactStatus();
-      const completion: Extract<UiEvent, { kind: "compactEnd" }> = {
-        kind: "compactEnd",
-        compactId,
-        source,
-        status: "executed",
-        beforeTokens: before,
-        afterTokens: this.record.totalTokens,
-        beforeMessages,
-        afterMessages: modelMessages(this.record).length,
-        keepTail: keptTail
+      await this.prepareTextAttachments();
+      ac.signal.throwIfAborted();
+      if (!(await this.refreshServerContextSize(s, ac.signal))) throw new Error(this.serverMetadataError || "Could not read the server context length.");
+      await this.saveChain;
+      diskRevision = await this.storage.captureRevision(this.record.id);
+      capturedRevision = true;
+      const cfg = await this.compactConfig(s, ac.signal, options.repairNote);
+      cfg.automatic = source === "auto";
+      cfg.commit = async (candidate, assertCurrent, publish, beforeTokens) => {
+        base.beforeTokens = beforeTokens;
+        const completion: CompactHistory = { ...base, status: "executed", afterTokens: candidate.totalTokens,
+          afterMessages: modelMessages(candidate).length, keepTail: modelMessages(candidate).length - 1, targetReached: candidate.contextCheckpoint?.targetReached };
+        candidate.compactions = [...(this.record.compactions ?? []), completion];
+        const save = this.saveChain.then(async () => {
+          assertCurrent();
+          await this.storage.saveCompaction(candidate, diskRevision, assertCurrent, publish);
+        });
+        this.saveChain = save.catch(() => undefined);
+        await save;
+        saved = completion;
       };
+      const result = await compact(s.endpoint, this.record, ac.signal, cfg, s.model);
+      if (result.kind === "failed") {
+        const error = result.error as Error & { compactionCause?: string };
+        error.compactionCause = result.cause;
+        throw error;
+      }
+      if (result.kind === "skipped") {
+        this.emit({ kind: "compactEnd", ...base, status: "skipped", afterTokens: base.beforeTokens, afterMessages: base.beforeMessages });
+        return false;
+      }
+      if (!saved) throw new Error("The compacted context was not committed.");
+      this.loadedChatContextPending = true;
+      if (options.reload) this.emit({ kind: "chatLoaded", record: this.record });
+      this.emit({ kind: "tokens", total: this.record.totalTokens, limit: this.contextLimit() });
+      this.emitCompactStatus();
+      const completion = { kind: "compactEnd" as const, ...saved };
       this.emit(completion);
       this.contextActivities.clear();
-      this.trackContextActivity(compactId, completion, this.isTurnActive() && !this.abort?.signal.aborted);
+      this.trackContextActivity(compactId, completion, this.activeTurn !== undefined && !this.abort?.signal.aborted);
       return true;
     } catch (err) {
-      this.emit({
-        kind: "compactEnd",
-        compactId,
-        source,
-        status: "failed",
-        beforeTokens: before,
-        beforeMessages,
-        keepTail: KEEP_TAIL,
-        error: (err as Error).message
-      });
+      const failure: CompactHistory = { ...base, status: "failed", error: ac.signal.aborted ? "Compaction stopped by user." : (err as Error).message,
+        diagnostics: err instanceof StreamFailure ? err.diagnostics : undefined,
+        failureCause: (err as Error & { compactionCause?: string }).compactionCause };
+      this.record.compactions = [...(this.record.compactions ?? []), failure];
+      try {
+        // Diagnostics must not overwrite another window's newer chat after a conflict.
+        if (!capturedRevision) { await this.saveChain; diskRevision = await this.storage.captureRevision(this.record.id); }
+        const revision = contextRevision(this.record);
+        const assertCurrent = () => { if (revision !== contextRevision(this.record)) throw new Error("Conversation changed."); };
+        await this.storage.saveCompaction({ ...this.record }, diskRevision, assertCurrent, () => undefined);
+      } catch { failure.error += " The failure could not be saved; the previous context remains active."; }
+      this.emit({ kind: "compactEnd", ...failure });
       return false;
     } finally { this.compactAborts.delete(ac); }
   }
@@ -638,6 +632,7 @@ export class ChatSession {
 
   cancel(): void {
     this.abort?.abort();
+    this.pendingManualCompact = false;
     this.completeContextIngestion();
     for (const controller of this.compactAborts) controller.abort();
     for (const feature of this.features) feature.cancel?.();
@@ -873,7 +868,7 @@ export class ChatSession {
     // live view. Keep completed work, but remove its terminal error card.
     this.lastInterruptionTs = interrupted.ts;
     this.record.messages.pop();
-    this.record.totalTokens = this.record.contextMessages.reduce((total, message) => total + (message.tokens ?? 0), 0);
+
     this.loadedChatContextPending = true;
     this.contextActivities.clear();
     const turn = this.runForegroundTurn(async (ready) => {
@@ -1015,12 +1010,15 @@ export class ChatSession {
   private truncateHistoryBefore(index: number): void {
     const target = this.record.messages[index];
     const context = this.record.contextMessages;
+    const discardedIds = new Set(this.record.messages.slice(index).map(message => message.id));
+    const checkpointCoversFuture = this.record.contextCheckpoint?.coveredIds.some(id => discardedIds.has(id)) ?? false;
     const contextIndex = context?.findIndex(message =>
       message.role === target.role && message.ts === target.ts) ?? -1;
     this.record.messages = this.record.messages.slice(0, index);
     if (!this.record.messages.some(message => message.ts === this.record.turnSystemPrompt?.messageTs)) delete this.record.turnSystemPrompt;
     this.pendingMemorySelection = undefined;
-    if (index > 0 && context && contextIndex >= 0) {
+    delete this.record.unconsumedExchangeId;
+    if (index > 0 && context && contextIndex >= 0 && !checkpointCoversFuture) {
       // The target survived in the compacted tail, so its preceding summary
       // cannot include the discarded future. Keep that summary instead of
       // resurrecting large archived reads and triggering compaction again.
@@ -1029,6 +1027,7 @@ export class ChatSession {
       // An archived target may be inside the summary. Only the retained
       // transcript is safe to replay; recount it before any compaction check.
       delete this.record.contextMessages;
+      delete this.record.contextCheckpoint;
     }
     this.record.memorySelections = this.record.memorySelections?.filter(selection => this.record.messages.some(message => message.role === "user" && message.ts === selection.messageTs));
     this.recalledNoteVersions.clear();
@@ -1036,7 +1035,6 @@ export class ChatSession {
     if (index === 0 || !this.record.contextMessages) delete this.record.initialMemories;
     this.record.memoryCreations = this.record.memoryCreations?.filter(creation =>
       this.record.messages.some(message => message.role === "assistant" && message.ts === creation.messageTs));
-    this.record.totalTokens = modelMessages(this.record).reduce((total, message) => total + (message.tokens ?? 0), 0);
   }
 
   private async deleteDroppedAttachments(before: ChatAttachment[]): Promise<void> {
@@ -1106,19 +1104,9 @@ export class ChatSession {
     if (controller) this.finishTitleGeneration(controller);
   }
 
-  /**
-   * Cheap, network-free token estimate emitted at tool/retry checkpoints so
-   * the context ring updates without waiting for /tokenize at turnEnd.
-   * Cached message tokens are exact; uncached and live buffer use char/4.
-   */
-  private emitLiveTokenEstimate(liveText: string): void {
-    let total = this.cachedPromptOverheadTokens();
-    for (const m of modelMessages(this.record)) {
-      total += m.tokens ?? Math.ceil((withUserContext(m.content, m.requestContext).length + (m.reasoningContent?.length ?? 0)) / 4)
-        + (m.attachments?.filter(isImageAttachment).length ?? 0) * VISION_TOKEN_RESERVE;
-    }
-    if (liveText) total += Math.ceil(liveText.length / 4);
-    this.emit({ kind: "tokens", total, limit: this.contextLimit() });
+  /** Display only the most recent measured/server-reported count. */
+  private emitMeasuredTokens(): void {
+    this.emit({ kind: "tokens", total: this.record.totalTokens, limit: this.contextLimit() });
   }
 
   private selectedNotes(): WorkspaceNote[] {
@@ -1164,7 +1152,6 @@ export class ChatSession {
         delete message.tokens;
       }
     }
-    if (modelMessages(this.record).some(message => message.role === "user" && message.ts === messageTs)) this.untrackedUserContextTokens = 0;
     if (newSelection) {
       this.pendingMemorySelection = undefined;
       this.record.memorySelections = [...(this.record.memorySelections ?? []).filter(previous => previous.messageTs !== messageTs), selection];
@@ -1208,7 +1195,7 @@ export class ChatSession {
 
   private async prepareContextForModelRequest(
     s: HarnessSettings,
-    options: { reload: boolean }
+    _options: { reload: boolean }
   ): Promise<boolean> {
     try { await this.prepareTextAttachments(); } catch (error) {
       this.emit({ kind: "abort", reason: `Could not read an attached text file: ${(error as Error).message}` });
@@ -1222,7 +1209,6 @@ export class ChatSession {
       this.emit({ kind: "abort", reason: "The selected server model has not reported vision support. Choose a vision-capable server model or remove image inputs before retrying." });
       return false;
     }
-    await recomputeTokens(s.endpoint, this.record, s.model);
     const latestUser = this.turnUserMessage();
     if (latestUser && this.pendingMemorySelection?.messageTs !== latestUser.ts
       && !this.record.memorySelections?.some(selection => selection.messageTs === latestUser.ts)) {
@@ -1232,20 +1218,8 @@ export class ChatSession {
     // Fit optional notes against the same fresh project instructions as the request.
     await this.currentAgentsMd();
     await this.fitQueryMemories(s);
-    let sysTokens = await this.promptOverheadTokens(s, false);
-    const limit = this.contextLimit();
-    this.emit({ kind: "tokens", total: this.record.totalTokens + sysTokens, limit });
+    this.emit({ kind: "tokens", total: this.record.totalTokens, limit: this.contextLimit() });
     this.emitCompactStatus();
-
-    if (this.serverBackend !== "vllm" && s.autoCompact && this.record.totalTokens + sysTokens >= autoCompactTriggerTokens(limit, s.autoCompactThresholdPercent)) {
-      await this.runCompact("auto", options);
-      sysTokens = this.cachedPromptOverheadTokens();
-    }
-
-    if (this.serverBackend !== "vllm" && this.record.totalTokens + sysTokens >= limit) {
-      this.emit({ kind: "abort", reason: contextWindowOverflowMessage(this.record.totalTokens + sysTokens, limit) });
-      return false;
-    }
 
     return true;
   }
@@ -1253,7 +1227,7 @@ export class ChatSession {
   private async buildPromptMessagesForRequest(
     s: HarnessSettings,
     options: { reload: boolean; repairNote?: string }
-  ): Promise<{ messages: PromptMessage[]; tokens: number; systemPrompt: string; userContext?: string } | undefined> {
+  ): Promise<{ generationRequest: ChatCompletionRequest; messages: PromptMessage[]; tokens: number; systemPrompt: string; userContext?: string } | undefined> {
     if (!(await this.prepareContextForModelRequest(s, options))) return undefined;
 
     const limit = this.contextLimit();
@@ -1268,18 +1242,22 @@ export class ChatSession {
     const userContext = this.currentUserContext();
     let messages = await this.buildPromptMessages(systemPrompt, userContext);
     if (options.repairNote) messages = withPromptRepair(messages, options.repairNote);
-    // Count the tokens of the prompt that is ACTUALLY sent (system prompt +
-    // re-rendered tool calls + wrapped results), not the sum of stored
-    // messages, using llama.cpp's tokenizer. This is the number the server
-    // sees, so the guard no longer passes while the server overflows.
-    let promptTok = await this.countRequestPrompt(s, messages);
-    const promptLimit = limit - (this.serverBackend === "vllm" ? outputTokenReserve(limit) : 0);
-    if (s.autoCompact && promptTok >= Math.min(promptLimit, autoCompactTriggerTokens(limit, s.autoCompactThresholdPercent))) {
-      const compacted = await this.runCompact("auto", options);
+    // Budget the assembled request, including reconstructed tool calls and
+    // wrapped results, using the adapter's reported measurement accuracy.
+    let generationRequest = this.generationRequest(s, messages);
+    let promptTok = await this.countRequestPrompt(s, messages, undefined, generationRequest);
+    const promptLimit = promptBudget(limit, outputTokenReserve(limit), this.promptAccuracy);
+    const autoRevision = contextRevision(this.record) + JSON.stringify(s);
+    const manual = this.pendingManualCompact;
+    this.pendingManualCompact = false;
+    if (manual || (s.autoCompact && this.lastAutoCompactRevision !== autoRevision && promptTok >= Math.min(promptLimit, autoCompactTriggerTokens(limit, s.autoCompactThresholdPercent)))) {
+      const compacted = await this.runCompact(manual ? "manual" : "auto", { ...options, atBoundary: true });
+      this.lastAutoCompactRevision = contextRevision(this.record) + JSON.stringify(s);
       if (compacted) {
         messages = await this.buildPromptMessages(systemPrompt, userContext);
         if (options.repairNote) messages = withPromptRepair(messages, options.repairNote);
-        promptTok = await this.countRequestPrompt(s, messages);
+        generationRequest = this.generationRequest(s, messages);
+        promptTok = await this.countRequestPrompt(s, messages, undefined, generationRequest);
       }
     }
 
@@ -1289,35 +1267,23 @@ export class ChatSession {
       return undefined;
     }
 
-    return { messages, tokens: promptTok, systemPrompt, userContext };
+    return { generationRequest, messages, tokens: promptTok, systemPrompt, userContext };
   }
 
   private generationRequest(s: HarnessSettings, messages: PromptMessage[]): ChatCompletionRequest {
     return {
       model: s.model, messages, temperature: s.temperature, top_k: s.topK, top_p: s.topP,
-      thinking_budget_tokens: this.turnReasoningEffort() === REASONING_NONE ? 0 : s.reasoningBudget ?? -1,
-      ...reasoningRequestOverrides(this.turnReasoningEffort(), s.reasoningEfforts),
+      generation: { task: "chat", maxOutputTokens: outputTokenReserve(this.contextLimit()), reasoning: generationReasoning(this.turnReasoningEffort(), s.reasoningEfforts, s.reasoningBudget), reportProgress: true },
       tools: this.toolProtocol === "native" ? asOpenAiTools(toolsForPrompt("native", readSettings().memoryEnabled, this.supportsVision, readSettings())) : undefined,
-      tool_choice: "auto", parallel_tool_calls: false, return_progress: true
+      tool_choice: "auto", parallel_tool_calls: false
     };
   }
 
-  private async countRequestPrompt(s: HarnessSettings, messages: PromptMessage[]): Promise<number> {
-    if (this.serverBackend === "vllm") {
-      return (await countServerPrompt(s.endpoint, this.generationRequest(s, messages), this.abort?.signal, false))!;
-    }
-    return await promptTokens(s.endpoint, this.messagesForTokenCount(messages), s.templateOverheadTokensPerMessage, s.model);
-  }
-
-  private messagesForTokenCount(messages: PromptMessage[]): PromptMessage[] {
-    if (this.toolProtocol !== "native") return messages;
-    return [
-      ...messages,
-      {
-        role: "system",
-        content: `<tools>${JSON.stringify(asOpenAiTools(toolsForPrompt("native", readSettings().memoryEnabled, this.supportsVision, readSettings())))}</tools>`
-      }
-    ];
+  private async countRequestPrompt(s: HarnessSettings, messages: PromptMessage[], signal?: AbortSignal, request = this.generationRequest(s, messages)): Promise<number> {
+    const measurement = await measureRequestPrompt(s.endpoint, request, s.templateOverheadTokensPerMessage, signal ?? this.abort?.signal);
+    this.promptAccuracy = measurement.accuracy;
+    this.record.totalTokens = measurement.tokens;
+    return measurement.tokens;
   }
 
   /**
@@ -1446,8 +1412,7 @@ export class ChatSession {
     let contextFailure: { error: unknown } | undefined;
     try {
       guardedContent = await this.prepareToolResultForContext(s, toolName, content);
-      tokens = await countTokens(s.endpoint, `<|tool|>${guardedContent}`, s.model)
-        + (outcome.attachments?.filter(isImageAttachment).length ?? 0) * VISION_TOKEN_RESERVE;
+      tokens = await countTokens(s.endpoint, guardedContent, s.model);
     } catch (error) {
       // The tool has already completed. A failed tokenizer/context request
       // must not erase its result or make Continue repeat its side effects.
@@ -1456,6 +1421,7 @@ export class ChatSession {
     }
     const message: ChatMessage = {
       role: "tool",
+      exchangeId: this.recordingExchangeId,
       content: guardedContent,
       tokens,
       attachments: outcome.attachments,
@@ -1484,43 +1450,31 @@ export class ChatSession {
         if (display.status) message.toolCall.status = display.status;
       }
     }
+    if (guardedContent !== content && !this.record.contextMessages) this.record.contextMessages = structuredClone(modelMessages(this.record));
+    message.content = content;
     appendChatMessage(this.record, message);
+    if (guardedContent !== content) this.record.contextMessages![this.record.contextMessages!.length - 1].content = guardedContent;
+    if (this.recordingExchangeId) this.record.unconsumedExchangeId = this.recordingExchangeId;
     if (callId) this.completedCallIds.set(callId, { name: toolName, argsJson });
-    this.record.totalTokens += tokens ?? 0;
     await this.saveRecord();
     if (contextFailure) throw contextFailure.error;
-    this.emitLiveTokenEstimate("");
+    this.emitMeasuredTokens();
     this.emitCompactStatus();
     return guardedContent;
   }
 
   private async prepareToolResultForContext(
     s: HarnessSettings,
-    toolName: string,
+    _toolName: string,
     content: string
   ): Promise<string> {
-    await recomputeTokens(s.endpoint, this.record, s.model);
-    let sysTokens = await this.promptOverheadTokens(s);
     const limit = this.contextLimit();
-    const overhead = s.templateOverheadTokensPerMessage;
-    const toolTokens = await countTokens(s.endpoint, `<|tool|>${content}`, s.model);
-    const projectedTokens = this.record.totalTokens + sysTokens + toolTokens + overhead;
-
-    if (s.autoCompact && projectedTokens >= autoCompactTriggerTokens(limit, s.autoCompactThresholdPercent)) {
-      await this.runCompact("auto", { reload: false });
-      sysTokens = this.cachedPromptOverheadTokens();
-    }
-
-    // A single result may never exceed its per-message cap, nor the room that
-    // is actually left after the rest of the context. If it would, middle-
-    // truncate it (with a marker) so the turn continues instead of aborting.
-    const perMsgCap = Math.max(256, Math.floor((limit * s.maxMessageTokensPercent) / 100));
-    const remaining = limit - (this.record.totalTokens + sysTokens + overhead) - 64;
-    const budget = Math.min(perMsgCap, remaining);
+    const toolTokens = await countTokens(s.endpoint, content, s.model, { exact: true });
+    // Per-result sizing is independent of compaction. The complete exchange is
+    // persisted before the next request performs its exact context check.
+    const budget = Math.max(256, Math.floor(limit * s.maxMessageTokensPercent / 100));
     if (toolTokens > budget) {
-      const r = await truncateToTokenBudget(s.endpoint, content, Math.max(128, budget), s.model);
-      return `${r.text}\n[context guard] ${toolName} output was truncated to fit the context window. ` +
-        `Request a narrower read (read_file with startLine/endLine), a more specific search, or a command with limited output for the full detail.`;
+      return (await truncateToTokenBudget(s.endpoint, content, budget, s.model)).text;
     }
 
     return content;
@@ -1543,6 +1497,7 @@ export class ChatSession {
     let emptyNativeRetries = 0;
     let planCorrectionAttempts = 0;
     let completion: CompletionDiagnostics | undefined;
+    let responseHistory: ResponseHistory | undefined;
     let malformedNativeRetries = 0;
     let lengthRecoveryRetries = 0;
     let disabledReasoningNoticeShown = false;
@@ -1580,6 +1535,8 @@ export class ChatSession {
       this.emit({ kind: "turnPreparing", reason: "server" });
       finishReason = undefined;
       completion = undefined;
+      responseHistory = undefined;
+      this.recordingExchangeId = newMessageId();
       const planResponse = this.planResponse = this.turnMode() === "plan" ? new PlanResponse() : undefined;
       // Memory writes (including compatibility calls) wait for terminal evidence.
       this.stagedToolCalls = this.turnMode() === "plan" || readSettings().memoryEnabled ? [] : undefined;
@@ -1612,37 +1569,20 @@ export class ChatSession {
       const { messages, systemPrompt, userContext } = request;
       serverUsageTotal = undefined;
       let promptTokenCount = request.tokens;
-      let generatedChars = 0;
       let reportedCompletionTokens = 0;
-      let charsAtUsage = 0;
-      let lastTokenUpdateAt = -Infinity;
-      const generatedToolChars = new Map<string, number>();
-      // Reuse the measured prompt, including tool schemas and attachments.
-      // Streaming estimates are display-only and never trigger compaction.
-      const emitStreamingTokens = (): void => {
-        const now = Date.now();
-        if (now - lastTokenUpdateAt < 250) return;
-        lastTokenUpdateAt = now;
-        this.emit({
-          kind: "tokens",
-          total: promptTokenCount + reportedCompletionTokens + Math.ceil((generatedChars - charsAtUsage) / 4),
-          limit: this.contextLimit()
-        });
-      };
 
-      const generationRequest = this.generationRequest(s, messages);
+      const generationRequest = request.generationRequest;
+      const requestExchange = this.record.unconsumedExchangeId;
       // Compare only the reusable prefix, not appended user context or tool
       // results. A changed system prompt/catalog requires loading context again
       // even on transports (vLLM) without live prefill progress. This is a local
       // invalidation hint, not a claim about the server's cache residency.
       const promptPrefix = createHash("sha256").update(JSON.stringify({
-        connection: connectionIdentity(s.endpoint, s.model), backend: this.serverBackend,
+        connection: connectionIdentity(s.endpoint, s.model),
         protocol: this.toolProtocol,
         system: messages.filter(message => message.role === "system"),
         tools: generationRequest.tools,
-        reasoningEffort: generationRequest.reasoning_effort,
-        template: generationRequest.chat_template_kwargs,
-        thinkingDisabled: generationRequest.thinking_budget_tokens === 0
+        reasoning: generationRequest.generation?.reasoning
       })).digest("hex");
       this.loadedChatContextPending ||= this.processedPromptPrefix !== undefined && this.processedPromptPrefix !== promptPrefix;
       const loadingChatContext = this.loadedChatContextPending;
@@ -1668,19 +1608,14 @@ export class ChatSession {
       let streamError: unknown;
       const responseAbort = new AbortController();
       this.responseAbort = responseAbort;
+      generationRequest.onResponseAccepted = () => {
+        this.commitRequestContext(systemPrompt, userContext);
+        this.startPendingTitle();
+      };
       try {
         for await (const chunk of streamChat(
           s.endpoint,
-          {
-            ...generationRequest,
-            onResponseAccepted: () => {
-              this.commitRequestContext(systemPrompt, userContext);
-              // HTTP headers can arrive while this request is still queued.
-              // Keep a title wait until prompt progress or model output proves
-              // the continuation has started using the server.
-              this.startPendingTitle();
-            }
-          },
+          generationRequest,
           AbortSignal.any([this.abort.signal, responseAbort.signal])
         )) {
           // Stream output also proves acceptance for transports without a callback.
@@ -1690,6 +1625,7 @@ export class ChatSession {
             if (promptFinished) continue;
             if (promptTokenCount !== chunk.totalTokens) {
               promptTokenCount = chunk.totalTokens;
+              this.record.totalTokens = promptTokenCount;
               this.emit({ kind: "tokens", total: promptTokenCount, limit: this.contextLimit() });
             }
             const processing = chunk.processedTokens < chunk.totalTokens;
@@ -1703,28 +1639,15 @@ export class ChatSession {
           }
           if (chunk.kind === "usage") {
             promptTokenCount = chunk.promptTokens;
-            reportedCompletionTokens = chunk.completionTokens ?? Math.ceil(generatedChars / 4);
-            charsAtUsage = generatedChars;
+            reportedCompletionTokens = chunk.completionTokens ?? 0;
             serverUsageTotal = chunk.promptTokens + reportedCompletionTokens;
+            this.record.totalTokens = serverUsageTotal;
             this.emit({
               kind: "tokens",
               total: serverUsageTotal,
               limit: this.contextLimit()
             });
             continue;
-          }
-          if (chunk.kind === "text" || chunk.kind === "thought") {
-            serverUsageTotal = undefined;
-            generatedChars += chunk.text.length;
-            emitStreamingTokens();
-          } else if (chunk.kind === "toolCallProgress" || chunk.kind === "toolCall") {
-            serverUsageTotal = undefined;
-            const key = chunk.id ?? chunk.name;
-            const previous = generatedToolChars.get(key) ?? 0;
-            const chars = chunk.kind === "toolCall" ? chunk.argsJson.length : chunk.content?.length ?? chunk.contentBytes;
-            generatedToolChars.set(key, Math.max(previous, chars));
-            generatedChars += Math.max(0, chars - previous);
-            emitStreamingTokens();
           }
           // First output also proves prefill has finished on servers that do
           // not send progress, or omit the final progress update.
@@ -1747,7 +1670,7 @@ export class ChatSession {
               this.emit({
                 kind: "notice",
                 text: "The model emitted reasoning even though Activate Reasoning is off. " +
-                  (this.serverBackend === "llama.cpp" ? "If llama-server was started with a positive --reasoning-budget, that fixed server value overrides per-request budgets; " : "Server reasoning configuration may override this request; ") +
+                  this.serverHelp.reasoning +
                   "otherwise this model's chat template may not support disabling reasoning."
               });
             }
@@ -1797,9 +1720,12 @@ export class ChatSession {
             continue;
           }
           if (chunk.kind === "finish") {
+            responseHistory = chunk.responseHistory;
             finishReason = chunk.reason;
             completion = chunk.diagnostics ?? { finishReason: chunk.reason, completionEvidence: "finish_reason" };
             completedEventCount = turnEvents.length;
+            if (requestExchange && this.record.unconsumedExchangeId === requestExchange
+              && completion.completionEvidence && completion.completionEvidence !== "none") delete this.record.unconsumedExchangeId;
             continue;
           }
           // Native mode normally executes only the protocol's `tool_calls`
@@ -1879,15 +1805,15 @@ export class ChatSession {
           turnEvents.length = 0;
           completedEventCount = 0;
           serverUsageTotal = undefined;
-          this.emitLiveTokenEstimate("");
-          const canCompact = compactAvailableForMessageCount(modelMessages(this.record).length);
+          this.emitMeasuredTokens();
+          const canCompact = compactAvailableForMessages(modelMessages(this.record));
           this.emit({
             kind: "notice",
             text: canCompact
               ? "The model reached a generation limit. Compacting context and retrying once…"
               : "The model reached a generation limit. Retrying once with a shorter continuation…"
           });
-          const recovered = !canCompact || await this.runCompact("auto", { reload: false });
+          const recovered = !canCompact || await this.runCompact("auto", { reload: false, repairNote: LENGTH_RECOVERY_NOTE });
           if (this.abort.signal.aborted || this.disposed) {
             this.emit({ kind: "abort", reason: "Cancelled." });
             aborted = true;
@@ -1899,11 +1825,11 @@ export class ChatSession {
           }
         }
         if (e instanceof VisionUnsupportedError) {
-          const muse = this.serverBackend === "llama.cpp" && compatibilityFamily(this.record.toolCallingMode) === "muse-glimmer";
+          const muse = compatibilityFamily(this.record.toolCallingMode) === "muse-glimmer";
           this.emit({
             kind: "abort",
             reason: muse
-              ? "Muse Glimmer image input requires llama.cpp b10353 or newer, --jinja, and --mmproj mmproj-Muse-Glimmer-30B-Q4_K_M.gguf. Verify that the projector matches the loaded model."
+              ? this.serverHelp.museVision
               : "The server rejected image input. Choose a vision-capable model and verify its server configuration."
           });
           aborted = true;
@@ -1918,7 +1844,7 @@ export class ChatSession {
             this.toolProtocol = "legacy";
             this.emit({
               kind: "notice",
-              text: `This server rejected native tool calling. Using the ${compatibilityFamilyLabel(fallbackFamily)} legacy adapter for this chat; ${this.serverBackend === "vllm" ? "configure --enable-auto-tool-choice and --tool-call-parser" : "start llama-server with --jinja and a tool-aware template"} to restore structured calls.`
+              text: `This server rejected native tool calling. Using the ${compatibilityFamilyLabel(fallbackFamily)} legacy adapter for this chat; ${this.serverHelp.tools} to restore structured calls.`
             });
             continue;
           }
@@ -1926,8 +1852,8 @@ export class ChatSession {
           this.emit({
             kind: "abort",
             reason: muse
-              ? (this.serverBackend === "llama.cpp" ? "Muse Glimmer requires native server tool support. Use llama.cpp build b10353 or newer, start llama-server with --jinja, and do not configure <|eom|> as a stop token." : "Muse Glimmer requires native server tool support. Configure the vLLM tool parser and preserve end-of-message tokens.")
-              : `The server rejected structured tool calling required by Native server only. ${this.serverBackend === "vllm" ? "Configure --enable-auto-tool-choice and --tool-call-parser" : "Start llama-server with --jinja and a tool-aware chat template"}, or select a compatibility profile.`
+              ? this.serverHelp.museTools
+              : `The server rejected structured tool calling required by Native server only. ${this.serverHelp.tools}, or select a compatibility profile.`
           });
           aborted = true;
           break;
@@ -1948,7 +1874,7 @@ export class ChatSession {
           });
           assistantBuf = "";
           thoughtBuf = "";
-          this.emitLiveTokenEstimate("");
+          this.emitMeasuredTokens();
           continue;
         }
         this.emit({ kind: "abort", reason: (e instanceof Error ? e.message : String(e)) || "The request stopped unexpectedly.", diagnostics: e instanceof StreamFailure ? e.diagnostics : e instanceof GenerationLengthError ? { cause: "generation_limit", finishReason: "length", completionEvidence: "finish_reason" } : undefined });
@@ -1963,11 +1889,16 @@ export class ChatSession {
         this.lastProgressEmitAt.clear();
         this.streamingFileState.clear();
         if (assistantBuf.trim() || thoughtBuf.trim() || turnEvents.length) {
-          appendChatMessage(this.record, {
+          const partial: ChatMessage = {
+            id: newMessageId(), exchangeId: this.recordingExchangeId,
             role: "assistant", content: assistantBuf,
-            reasoningContent: this.toolProtocol === "native" ? thoughtBuf || undefined : undefined,
+            reasoningContent: this.toolProtocol === "native" ? (responseHistory ? responseReasoning(responseHistory) : thoughtBuf || undefined) : undefined,
             events: turnEvents.splice(0), ts: Date.now()
-          });
+          };
+          if (s.protocol === "responses" && !completion) {
+            this.record.contextMessages ??= this.record.messages.slice();
+            this.record.messages.push(partial);
+          } else appendChatMessage(this.record, partial);
         }
         assistantBuf = "";
         thoughtBuf = "";
@@ -2009,11 +1940,13 @@ export class ChatSession {
         // a tool call to be replayed on that same assistant tool-call message.
         // It is stored after the tool results in our execution-oriented record
         // and moved back beside the calls by buildNativePromptMessages.
-        if (assistantBuf.trim() || thoughtBuf.trim()) {
+        if (assistantBuf.trim() || thoughtBuf.trim() || responseHistory) {
           appendChatMessage(this.record, {
             role: "assistant",
+            exchangeId: this.recordingExchangeId,
             content: assistantBuf,
-            reasoningContent: this.toolProtocol === "native" ? thoughtBuf || undefined : undefined,
+            responseHistory: this.toolProtocol === "native" && responseHistory ? { ...responseHistory, text: assistantBuf } : undefined,
+            reasoningContent: this.toolProtocol === "native" ? (responseHistory ? responseReasoning(responseHistory) : thoughtBuf || undefined) : undefined,
             events: turnEvents.splice(0),
             ts: Date.now()
           });
@@ -2023,7 +1956,7 @@ export class ChatSession {
         turnEvents.length = 0;
         completedEventCount = 0;
         await this.saveRecord();
-        this.emitLiveTokenEstimate("");
+        this.emitMeasuredTokens();
         continue;
       }
       if (
@@ -2043,16 +1976,22 @@ export class ChatSession {
           kind: "turnRecovery", messageId,
           text: `The model stopped after thinking without a reply. Retrying native continuation (${emptyNativeRetries}/${MAX_EMPTY_NATIVE_RETRIES})…`
         });
+        if (responseHistory) {
+          appendChatMessage(this.record, { role: "assistant", content: "", responseHistory: { ...responseHistory, text: "" },
+            reasoningContent: responseReasoning(responseHistory), events: turnEvents.splice(0), ts: Date.now() });
+          completedEventCount = 0;
+          await this.saveRecord();
+        }
         thoughtBuf = "";
-        this.emitLiveTokenEstimate("");
+        this.emitMeasuredTokens();
         continue;
       }
-      if (this.turnMode() === "plan" && (!completion || !planResponse?.complete)) {
+      if (this.turnMode() === "plan" && (!completion || !planResponse?.complete || responseIsCommentary(responseHistory))) {
         if (completion && planCorrectionAttempts++ < MAX_PLAN_CONTINUATIONS) {
           // Preserve visible progress and give the model its previous reply as context.
           // This is a continuation of planning, never a completed plan or approval state.
-          if (assistantBuf.trim() || thoughtBuf.trim()) appendChatMessage(this.record, {
-            role: "assistant", content: assistantBuf, reasoningContent: thoughtBuf || undefined,
+          if (assistantBuf.trim() || thoughtBuf.trim() || responseHistory) appendChatMessage(this.record, {
+            role: "assistant", content: assistantBuf, responseHistory: responseHistory ? { ...responseHistory, text: assistantBuf } : undefined, reasoningContent: responseHistory ? responseReasoning(responseHistory) : thoughtBuf || undefined,
             events: turnEvents.splice(0), ts: Date.now()
           });
           assistantBuf = "";
@@ -2079,7 +2018,8 @@ export class ChatSession {
         const assistantMessage: ChatMessage = {
           role: "assistant",
           content: assistantBuf,
-          reasoningContent: this.toolProtocol === "native" ? thoughtBuf || undefined : undefined,
+          responseHistory: this.toolProtocol === "native" && responseHistory ? { ...responseHistory, text: assistantBuf } : undefined,
+          reasoningContent: this.toolProtocol === "native" ? (responseHistory ? responseReasoning(responseHistory) : thoughtBuf || undefined) : undefined,
           events: turnEvents,
           ts: this.turnMode() === "plan"
             ? this.record.messages.reduce((next, message) => Math.max(next, message.ts + 1), Date.now())
@@ -2123,10 +2063,10 @@ export class ChatSession {
       if (content.trim() || reasoning.trim()) {
         // Retain received output in the transcript only. It is not completed model context.
         this.record.contextMessages ??= this.record.messages.slice();
-        const message: ChatMessage = { role: "assistant", content,
+        const message: ChatMessage = { id: newMessageId(), exchangeId: this.recordingExchangeId, role: "assistant", content,
           reasoningContent: reasoning || undefined, events, ts: Date.now() };
         this.record.messages.push(message);
-        const completed = events.slice(0, completedEventCount);
+        const completed = s.protocol === "responses" && !completion ? [] : events.slice(0, completedEventCount);
         if (completed.length) this.record.contextMessages.push({ ...message,
           content: completed.flatMap(event => event.kind === "text" ? [event.text] : []).join(""),
           reasoningContent: completed.flatMap(event => event.kind === "thought" ? [event.text] : []).join("") || undefined,
@@ -2142,12 +2082,15 @@ export class ChatSession {
     this.activeFileWrites = undefined;
     this.failUnfinishedStreamingTools();
     await this.saveRecord();
-    await recomputeTokens(s.endpoint, this.record, s.model);
     this.emit({
       kind: "tokens",
-      total: serverUsageTotal ?? this.record.totalTokens + this.cachedPromptOverheadTokens(),
+      total: serverUsageTotal ?? this.record.totalTokens,
       limit: this.contextLimit()
     });
+    if (this.pendingManualCompact && !this.abort?.signal.aborted) {
+      this.pendingManualCompact = false;
+      await this.runCompact("manual", { reload: false, atBoundary: true });
+    }
     this.emitCompactStatus();
     this.emit({ kind: "turnEnd", messageId, mode: this.turnMode(), messageTs: responseTs });
   }
@@ -2158,7 +2101,7 @@ export class ChatSession {
       kind: "compactStatus",
       currentMessages,
       minMessages: MIN_COMPACT_MESSAGES,
-      available: compactAvailableForMessageCount(currentMessages)
+      available: compactAvailableForMessages(modelMessages(this.record))
     });
   }
 
@@ -2819,12 +2762,12 @@ export class ChatSession {
     }
   }
 
-  private async buildPromptMessages(sys = this.systemPrompt(), userContext = this.currentUserContext()): Promise<PromptMessage[]> {
-    if (this.toolProtocol === "native") return this.buildNativePromptMessages(sys, userContext);
+  private async buildPromptMessages(sys = this.systemPrompt(), userContext = this.currentUserContext(), context = modelMessages(this.record)): Promise<PromptMessage[]> {
+    if (this.toolProtocol === "native") return this.buildNativePromptMessages(sys, userContext, context);
     const msgs: { role: "system" | "user" | "assistant" | "tool"; content: string }[] = [
       { role: "system", content: sys }
     ];
-    for (const { message: m } of chronologicalMessages(this.promptContextMessages(userContext))) {
+    for (const { message: m } of chronologicalMessages(this.promptContextMessages(userContext, context))) {
       if (m.role === "tool") {
         const name = m.toolCall?.name ?? "tool";
         const call = renderToolCallForPrompt(this.compatibilityFamily(), name, m.toolCall?.argsJson ?? "{}");
@@ -2846,13 +2789,13 @@ export class ChatSession {
     return coalesceSameRole(msgs);
   }
 
-  private async buildNativePromptMessages(systemPrompt: string, userContext?: string): Promise<PromptMessage[]> {
+  private async buildNativePromptMessages(systemPrompt: string, userContext?: string, storedContext = modelMessages(this.record)): Promise<PromptMessage[]> {
     // Compaction stores its summary as a leading system message. Native chat
     // templates commonly permit exactly one system message, at index zero, so
     // fold any leading stored system context into the harness prompt instead
     // of replaying it as a second system message.
     const storedSystemContext: string[] = [];
-    const context = this.promptContextMessages(userContext);
+    const context = this.promptContextMessages(userContext, storedContext);
     let transcriptStart = 0;
     while (context[transcriptStart]?.role === "system") {
       storedSystemContext.push(context[transcriptStart].content);
@@ -2865,7 +2808,7 @@ export class ChatSession {
     for (let index = transcriptStart; index < context.length; index++) {
       const stored = context[index];
       if (stored.role !== "tool") {
-        if (stored.role !== "assistant" || stored.content.trim() || stored.attachments?.length) {
+        if (stored.role !== "assistant" || stored.content.trim() || stored.attachments?.length || stored.responseHistory) {
           const attachments = stored.role === "user" ? stored.attachments?.filter(isImageAttachment) ?? [] : [];
           const content = attachments.length
             ? [
@@ -2879,7 +2822,9 @@ export class ChatSession {
           messages.push({
             role: stored.fileUndoNotice ? "user" : stored.role,
             content,
-            reasoning_content: stored.role === "assistant" ? stored.reasoningContent : undefined
+            reasoning_content: stored.role === "assistant" ? stored.reasoningContent : undefined,
+            responseHistory: stored.role === "assistant" ? stored.responseHistory : undefined,
+            replayContextChanged: stored.replayContextChanged
           });
         }
         continue;
@@ -2918,6 +2863,8 @@ export class ChatSession {
         role: "assistant",
         content: assistantRecord?.content ?? "",
         reasoning_content: assistantRecord?.reasoningContent,
+        responseHistory: assistantRecord?.responseHistory,
+        replayContextChanged: assistantRecord?.replayContextChanged,
         tool_calls: calls
       });
       toolMessages.forEach((message, callIndex) => {
@@ -3001,14 +2948,6 @@ function newToolCallId(): string {
 
 function autoCompactTriggerTokens(contextSize: number, thresholdPercent: number): number {
   return Math.max(1, Math.floor(contextSize * (thresholdPercent / 100)));
-}
-
-function contextWindowOverflowMessage(tokens: number, limit: number): string {
-  return [
-    `Context window guard: context is ${tokens} / ${limit} tokens.`,
-    `The request was not sent to the model because it would exceed the context window.`,
-    `Compact context, reduce recent tool output, or increase the server context (--ctx-size for llama.cpp; --max-model-len for vLLM) before continuing.`
-  ].join("\n");
 }
 
 function looksLikeLeakedNativeProtocol(text: string): boolean {

@@ -1,6 +1,6 @@
 import type { MemorySelection } from "./workspaceNotes.js";
 import type { CompletionDiagnostics } from "../llm/completion.js";
-import type { ServerType } from "../llm/serverTypes.js";
+import type { ModelProtocol, ServerType } from "../llm/serverTypes.js";
 /** Session events shared by the host, feature facades, and webviews. */
 import type { ChatAttachment, ChatMessage, ChatRecord, ChatToolProcess } from "./types.js";
 import type { ChatMode } from "./mode.js";
@@ -11,6 +11,7 @@ import type { FileChangeSummary } from "./fileChanges.js";
 /** Model-context size sent with chatLoaded, independently of the visible transcript. */
 export interface ChatContextState {
   contextMessageCount?: number;
+  contextCompactionAvailable?: boolean;
 }
 
 export interface ChatUserMessage {
@@ -90,7 +91,7 @@ export interface ChatResponseDiscarded {
 /** Events the session emits to the chat webview. */
 export type UiEvent =
   | ChatUserMessage
-  | { kind: "visionCapability"; supported: boolean; endpoint?: string; model?: string; serverType?: ServerType }
+  | { kind: "visionCapability"; supported: boolean; endpoint?: string; model?: string; serverType?: ServerType; protocol?: ModelProtocol }
   | ChatTurnPreparation
   | ChatContextActivity
   | { kind: "memorySelections"; selections: MemorySelection[] }
@@ -122,7 +123,7 @@ export type UiEvent =
   | { kind: "chatClosed" }
   | { kind: "compactStatus"; currentMessages: number; minMessages: number; available: boolean }
   | { kind: "compactStart"; compactId: string; source: "manual" | "auto"; beforeTokens: number; beforeMessages: number; keepTail: number }
-  | { kind: "compactEnd"; compactId: string; source: "manual" | "auto"; status: "executed" | "failed"; beforeTokens: number; afterTokens?: number; beforeMessages: number; afterMessages?: number; keepTail: number; error?: string }
+  | { kind: "compactEnd"; compactId: string; source: "manual" | "auto"; status: "executed" | "failed" | "skipped"; targetReached?: boolean; failureCause?: string; beforeTokens: number; afterTokens?: number; beforeMessages: number; afterMessages?: number; keepTail: number; error?: string; diagnostics?: CompletionDiagnostics }
   | { kind: "chatModeChanged"; mode: ChatMode }
   | { kind: "reasoningEffortChanged"; effort: ReasoningEffort };
 

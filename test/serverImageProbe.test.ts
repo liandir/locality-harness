@@ -12,7 +12,7 @@ let probe: () => Response | Promise<Response>;
 let probes: { url: string; body: Record<string, unknown>; headers: Headers }[];
 
 function connect(model = "test-model", apiKey?: string, force = false) {
-  return withConnectionDraft({ endpoint, model }, apiKey, () => fetchServerMetadata(endpoint, { model, force, probeImages: true }));
+  return withConnectionDraft({ protocol: "chat-completions", endpoint, model }, apiKey, () => fetchServerMetadata(endpoint, { model, force, probeImages: true }));
 }
 
 beforeEach(() => {
@@ -73,7 +73,7 @@ describe("image support on connection", () => {
   ])("keeps HTTP %s (%s) separate from unsupported images and permits retry", async (status, message) => {
     probe = () => Response.json({ error: { message } }, { status: Number(status) });
     await expect(connect()).rejects.toThrow(`HTTP ${status}`);
-    expect((await withConnectionDraft({ endpoint, model: "test-model" }, undefined, () => fetchServerMetadata(endpoint))).imageSupport).toBe("unknown");
+    expect((await withConnectionDraft({ protocol: "chat-completions", endpoint, model: "test-model" }, undefined, () => fetchServerMetadata(endpoint))).imageSupport).toBe("unknown");
     probe = tokenizer;
     expect((await connect()).imageSupport).toBe("supported");
     expect(probes).toHaveLength(2);
@@ -114,7 +114,7 @@ describe("image support on connection", () => {
   it("checks again for a different model, key or endpoint", async () => {
     await connect(); await connect("other-model"); await connect("test-model", "key");
     const other = "http://127.0.0.1:8001/proxy/v1";
-    await withConnectionDraft({ endpoint: other, model: "test-model" }, undefined, () => fetchServerMetadata(other, { probeImages: true }));
+    await withConnectionDraft({ protocol: "chat-completions", endpoint: other, model: "test-model" }, undefined, () => fetchServerMetadata(other, { probeImages: true }));
     expect(probes).toHaveLength(4);
   });
 
@@ -140,7 +140,7 @@ describe("image support on connection", () => {
     await expect(connect()).rejects.toThrow("Timed out");
     const controller = new AbortController();
     probe = () => { controller.abort(); return tokenizer(); };
-    await expect(withConnectionDraft({ endpoint, model: "test-model" }, undefined,
+    await expect(withConnectionDraft({ protocol: "chat-completions", endpoint, model: "test-model" }, undefined,
       () => fetchServerMetadata(endpoint, { probeImages: true, signal: controller.signal }))).rejects.toThrow();
     probe = tokenizer;
     expect((await connect()).imageSupport).toBe("supported");

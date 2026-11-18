@@ -9,6 +9,7 @@ export type WorkActivity =
       resource?: string;
       createsNewFile?: boolean;
       status?: ToolActivityStatus;
+      skipped?: boolean;
       /** True while the tool itself, or a process it launched, is still active. */
       active?: boolean;
     };
@@ -126,7 +127,7 @@ export function workActivityType(activity: WorkActivity): string | undefined {
   if (activity.kind === "thought") return "thought";
   // Failed and rejected calls remain available in the expanded timeline, but
   // must not be described as completed work in the collapsed summary.
-  if (activity.status === "failed" || activity.status === "rejected" || (activity.status === "pending" && activity.toolName !== "compact_context")) return undefined;
+  if (activity.skipped || activity.status === "failed" || activity.status === "rejected" || (activity.status === "pending" && activity.toolName !== "compact_context")) return undefined;
   // `tool_call` is the synthetic card name for an unparseable tool block, not
   // an activity type the model successfully used. Keep its rejected card in
   // the expanded timeline, but never advertise it in the sub-session summary.

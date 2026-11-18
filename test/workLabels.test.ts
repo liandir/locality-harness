@@ -485,3 +485,7 @@ describe("work summary icons", () => {
     ]);
   });
 });
+
+it("does not report skipped compaction as completed work", () => {
+  expect(finishedWorkSummary([{ kind: "tool", toolName: "compact_context", status: "executed", skipped: true }])).toBeUndefined();
+});

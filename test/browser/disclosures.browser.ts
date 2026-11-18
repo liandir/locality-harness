@@ -3,7 +3,7 @@ import type { ChatRecord } from "../../src/chat/types.js";
 import type { MemoryCreation } from "../../src/chat/memory.js";
 import { hostMessage, webview, type Theme } from "./harness.js";
 
-type Row = "memory-created" | "memory-failed" | "memory-generating" | "tool-executed" | "tool-failed" | "tool-rejected" | "future-tool" | "plan-submitted" | "plan-failed";
+type Row = "memory-created" | "memory-failed" | "memory-generating" | "tool-executed" | "tool-failed" | "tool-rejected" | "future-tool" | "plan-submitted" | "plan-failed" | "compact-executed" | "compact-failed" | "compact-skipped" | "compact-limited";
 
 async function chatRow(page: Page, theme: Theme, row: Row): Promise<Locator> {
   await webview(page, theme);
@@ -18,6 +18,9 @@ async function chatRow(page: Page, theme: Theme, row: Row): Promise<Locator> {
     const status = row.slice("memory-".length) as MemoryCreation["status"];
     record.memoryCreations = [{ messageTs: 3, operation: "update", status,
       text: "Parser decisions.", generatedAt: 4, error: status === "failed" ? "Memory generation failed." : undefined }];
+  } else if (row.startsWith("compact-")) {
+    record.compactions = [{ compactId: "restored-compact", ts: 3, source: "manual", status: row === "compact-failed" ? "failed" : row === "compact-skipped" ? "skipped" : "executed", targetReached: row !== "compact-limited",
+      beforeTokens: 7000, afterTokens: 2000, beforeMessages: 8, afterMessages: 3, keepTail: 2, error: row === "compact-failed" ? "Summary exhausted its generation budget." : undefined }];
   } else {
     const status = row.endsWith("-failed") ? "failed" : row === "tool-rejected" ? "rejected" : "executed";
     record.messages.push({ role: "tool", content: status === "executed" ? "Parser contents" : "Could not read parser", ts: 2,
@@ -58,7 +61,7 @@ async function foreground(head: Locator): Promise<string[]> {
 
 for (const theme of ["light", "dark"] as const) {
   test.describe(theme, () => {
-    for (const row of ["memory-created", "memory-failed", "tool-executed", "tool-failed", "tool-rejected", "future-tool", "plan-submitted", "plan-failed"] as const) {
+    for (const row of ["memory-created", "memory-failed", "tool-executed", "tool-failed", "tool-rejected", "future-tool", "plan-submitted", "plan-failed", "compact-executed", "compact-failed", "compact-skipped", "compact-limited"] as const) {
       test(`${row}: pointer focus does not latch emphasis; keyboard focus remains visible`, async ({ page }) => {
         const head = await chatRow(page, theme, row);
         const icon = head.locator(":scope > .disclosure-icon");
@@ -68,6 +71,11 @@ for (const theme of ["light", "dark"] as const) {
         await expect(head.locator(".tool-name")).toHaveCSS("color", await head.evaluate(element => getComputedStyle(element).color));
         const hovered = await foreground(head);
         await head.locator(".tool-name").click();
+        if (row === "compact-skipped") {
+          await expect(head).toContainText("Compaction skipped");
+          await expect(page.getByText("no useful reduction", { exact: false })).toBeVisible();
+        }
+        if (row === "compact-limited") await expect(page.getByText("protected context prevented", { exact: false })).toBeVisible();
         await page.mouse.move(990, 5);
         await expect.poll(() => foreground(head)).toEqual(resting);
         // Native summaries retain pointer focus; custom history rows activate
@@ -103,6 +111,26 @@ for (const theme of ["light", "dark"] as const) {
       await expect(page.getByRole("button", { name: "Retry", exact: true })).toHaveCount(0);
     });
 
+    test("active compaction remains pending until its terminal outcome", async ({ page }) => {
+      await webview(page, theme);
+      const activity = { compactId: "active-compact", source: "manual" as const, beforeTokens: 7000, beforeMessages: 8, keepTail: 2 };
+      await hostMessage(page, { kind: "compactStart", ...activity });
+      await expect(page.locator("#compact")).toHaveAttribute("aria-busy", "true");
+      await expect(page.locator("#compact")).toHaveAttribute("aria-disabled", "true");
+      await hostMessage(page, { kind: "compactEnd", ...activity, status: "failed", error: "The model returned an empty context summary." });
+      await expect(page.locator("#compact")).toHaveAttribute("aria-busy", "false");
+      const head = page.locator(".tool-card > .tool-head").first();
+      for (let depth = 0; depth < 3 && !await head.count(); depth++) await page.locator('.work-head[aria-expanded="false"]').first().click();
+      await head.click();
+      await expect(page.getByText("The model returned an empty context summary.", { exact: false })).toBeVisible();
+      await page.mouse.move(990, 5);
+      await keyboardFocus(page, head);
+      await page.keyboard.press("Space");
+      await expect(head).toBeFocused();
+      await page.keyboard.press("Enter");
+      await expect(page.getByText("The model returned an empty context summary.", { exact: false })).toBeVisible();
+    });
+
     test("active disclosure remains readable with reduced motion", async ({ page }) => {
       await page.emulateMedia({ reducedMotion: "reduce" });
       const head = await chatRow(page, theme, "memory-generating");
@@ -127,19 +155,38 @@ for (const theme of ["light", "dark"] as const) {
       await expect.poll(() => foreground(head)).not.toEqual(resting);
     });
 
-    test("settings use the same disclosure interaction", async ({ page }) => {
+    test("settings retain keyboard interaction without a Shift-triggered fill", async ({ page }) => {
       await webview(page, theme, "side");
       await hostMessage(page, { type: "focusTab", tab: "settings" });
       const head = page.locator(".settings-section-heading").first();
       const resting = await foreground(head);
-      await head.click();
-      await expect(head).toHaveAttribute("aria-expanded", "true");
-      await page.mouse.move(990, 5);
-      await expect.poll(() => foreground(head)).toEqual(resting);
+      const background = await head.evaluate(element => getComputedStyle(element).backgroundColor);
+      for (const expanded of ["true", "false"]) {
+        // Start each scenario with fresh pointer focus after the prior Shift.
+        await page.mouse.click(990, 5);
+        await head.click();
+        await expect(head).toHaveAttribute("aria-expanded", expanded);
+        await page.mouse.move(990, 5);
+        await expect.poll(() => foreground(head)).toEqual(resting);
+        await expect(head).toBeFocused();
+        // Chromium promotes retained pointer focus to :focus-visible on Shift.
+        await page.keyboard.down("Shift");
+        await expect.poll(() => head.evaluate(element => element.matches(":focus-visible"))).toBe(true);
+        await expect(head).toHaveCSS("background-color", background);
+        await page.keyboard.up("Shift");
+        await expect(head).toHaveCSS("background-color", background);
+        await expect(head).toBeFocused();
+        await expect(head).toHaveAttribute("aria-expanded", expanded);
+      }
       await keyboardFocus(page, head);
       await expect.poll(() => foreground(head)).not.toEqual(resting);
+      await expect(head.locator(".disclosure-icon")).toHaveCSS("opacity", "1");
+      await expect(head).toHaveCSS("background-color", background);
+      await page.keyboard.press("Enter");
+      await expect(head).toHaveAttribute("aria-expanded", "true");
       await page.keyboard.press("Space");
       await expect(head).toHaveAttribute("aria-expanded", "false");
+      await expect(head).toBeFocused();
     });
   });
 }

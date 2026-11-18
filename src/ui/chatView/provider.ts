@@ -157,15 +157,21 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       delete transcript.initialMemories;
       delete transcript.memorySources;
       delete transcript.turnSystemPrompt;
+      delete transcript.contextCheckpoint;
+      delete transcript.unconsumedExchangeId;
       payload = {
         ...msg,
         contextMessageCount: contextMessages?.length ?? transcript.messages.length,
+        contextCompactionAvailable: compactAvailableForMessages(contextMessages ?? transcript.messages),
         record: {
           ...transcript,
           messages: msg.record.messages.map(message => {
             const toolCall = message.toolCall ? { ...message.toolCall } : undefined;
             if (toolCall) delete toolCall.fileUndo;
-            return { ...message, toolCall, attachments: message.attachments?.map(attachment => this.toUiAttachment(attachment)) };
+            const visible = { ...message };
+            delete visible.responseHistory;
+            delete visible.replayContextChanged;
+            return { ...visible, toolCall, attachments: message.attachments?.map(attachment => this.toUiAttachment(attachment)) };
           })
         }
       };
@@ -199,8 +205,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   private async refreshServerCapabilities(): Promise<boolean> {
     const generation = ++this.serverMetadataGeneration;
-    const { endpoint, model, serverType } = readSettings();
-    const endpointKey = `${endpoint}\n${model}\n${serverType}`;
+    const { endpoint, model, serverType, protocol } = readSettings();
+    const endpointKey = `${endpoint}\n${model}\n${serverType}\n${protocol}`;
     if (this.serverMetadataKey !== endpointKey) {
       this.serverMetadataKey = endpointKey;
       this.post({ type: "serverContext" });
@@ -209,12 +215,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     let supported = false;
     let contextSize: number | undefined;
     try {
-      const metadata = await withServerConnection({ endpoint, model, serverType }, () => fetchServerMetadata(endpoint, { model, probeImages: true }), true);
+      const metadata = await withServerConnection({ endpoint, model, serverType, protocol }, () => fetchServerMetadata(endpoint, { model, probeImages: true }), true);
       supported = metadata.supportsVision;
       contextSize = metadata.contextSize;
     } catch { /* Unknown capabilities keep image input unavailable. */ }
     const current = readSettings();
-    if (endpoint !== current.endpoint || model !== current.model || serverType !== current.serverType) return false;
+    if (endpoint !== current.endpoint || model !== current.model || serverType !== current.serverType || protocol !== current.protocol) return false;
     if (generation === this.serverMetadataGeneration) {
       this.post({ type: "serverContext", contextSize });
       this.post({ kind: "visionCapability", supported });
@@ -367,7 +373,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         }
         if (event.kind === "visionCapability") {
           const current = readSettings();
-          if (event.endpoint === current.endpoint && event.model === current.model && event.serverType === current.serverType) this.post(event);
+          if (event.endpoint === current.endpoint && event.model === current.model && event.serverType === current.serverType && event.protocol === current.protocol) this.post(event);
           return;
         }
         // A fresh baseline plus this turn's events preserves streamed text and
@@ -1279,3 +1285,4 @@ function isInside(root: string, candidate: string): boolean {
 function sameFsPath(a: string, b: string): boolean {
   return path.resolve(a) === path.resolve(b);
 }
+import { compactAvailableForMessages } from "../../chat/compactor.js";

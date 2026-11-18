@@ -5,12 +5,12 @@ import { countTokens } from "../src/chat/contextTracker.js";
 afterEach(() => vi.unstubAllGlobals());
 
 describe("memory request prerequisites", () => {
-  it("does not reuse a token estimate as an authoritative count", async () => {
+  it("fails without estimation and retries exact counting after a tokenizer failure", async () => {
     const fetch = vi.fn().mockRejectedValueOnce(new TypeError("offline"))
       .mockResolvedValueOnce(new Response(JSON.stringify({ tokens: [1, 2, 3, 4, 5, 6, 7] })));
     vi.stubGlobal("fetch", fetch);
     const endpoint = "http://127.0.0.1:8411";
-    expect(await countTokens(endpoint, "漢字abcdef", "exact-cache")).toBe(2);
+    await expect(countTokens(endpoint, "漢字abcdef", "exact-cache")).rejects.toThrow("offline");
     expect(await countTokens(endpoint, "漢字abcdef", "exact-cache", { exact: true })).toBe(7);
     expect(fetch).toHaveBeenCalledTimes(2);
     expect(await countTokens(endpoint, "漢字abcdef", "exact-cache", { exact: true })).toBe(7);

@@ -29,7 +29,9 @@ body:is(.vscode-light, .vscode-high-contrast-light) {
 }
 /* One disclosure contract for native summaries, buttons and custom headings.
    Components supply semantic colors; pointer focus and expansion never imply
-   hover. Descendants (including shimmer) consume the same emphasis token. */
+   hover. Descendants (including shimmer) consume the same emphasis token.
+   Focus uses foreground and chevron cues only: Chromium can promote retained
+   pointer focus to :focus-visible on Shift, which must not add a row fill. */
 .disclosure-trigger {
   --disclosure-emphasis: initial;
   color: var(--disclosure-emphasis, var(--disclosure-foreground, inherit));
@@ -39,7 +41,6 @@ body:is(.vscode-light, .vscode-high-contrast-light) {
 .disclosure-trigger:is(:hover, :focus-visible, :has(:focus-visible)) {
   --disclosure-emphasis: var(--disclosure-highlight, var(--vscode-foreground));
 }
-.disclosure-trigger:focus-visible { background: var(--surface-fill-hover); }
 summary.disclosure-trigger { list-style: none; }
 summary.disclosure-trigger::-webkit-details-marker { display: none; }
 .disclosure-icon { flex: 0 0 auto; transform: rotate(0deg); transition: transform 0.16s ease, opacity 0.12s; }

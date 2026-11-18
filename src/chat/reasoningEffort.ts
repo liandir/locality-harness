@@ -1,4 +1,10 @@
+import type { GenerationPolicy } from "../llm/requestPolicy.js";
 export type ReasoningEffort = "none" | "default" | `effort:${string}`;
+
+export function generationReasoning(effort: ReasoningEffort, efforts: ReasoningEfforts, budget: number | null): GenerationPolicy["reasoning"] {
+  const selected = availableReasoningEffort(effort, efforts);
+  return { mode: selected === "none" ? "off" : "default", effort: reasoningEffortValue(selected), budgetTokens: budget ?? undefined };
+}
 export type ReasoningEfforts = Record<string, string>;
 
 export const REASONING_NONE = "none" as const;

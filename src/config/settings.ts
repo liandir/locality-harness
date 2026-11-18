@@ -1,4 +1,4 @@
-import type { ServerType } from "../llm/serverTypes.js";
+import { normalizeModelProtocol, type ModelProtocol, type ServerType } from "../llm/serverTypes.js";
 import { readFeatureSettings, featureSettingKeys } from "../build/settings.js";
 import * as vscode from "vscode";
 import { DEFAULT_MEMORY_MAX_COUNT, MAX_MEMORY_COUNT } from "../chat/memoryLimits.js";
@@ -15,6 +15,7 @@ export const DEFAULT_COMMIT_MESSAGE_PROMPT =
 
 export interface HarnessSettings {
   endpoint: string;
+  protocol: ModelProtocol;
   /** Internal connection selection; persisted backend overrides are ignored. */
   serverType?: ServerType;
   model: string;
@@ -61,6 +62,7 @@ export function readSettings(): HarnessSettings {
   const personalization = cfg.inspect?.<unknown>("personalization")?.globalValue;
   return {
     serverType: "auto",
+    protocol: normalizeModelProtocol(cfg.get<unknown>("protocol")),
     endpoint: cfg.get<string>("endpoint") ?? "http://localhost:8080/v1",
     model: cfg.get<string>("model")?.trim() || "local",
     toolCallingMode: normalizeToolCallingProfile(cfg.get<unknown>("toolCallingMode")),
@@ -106,6 +108,7 @@ export async function writeSetting<K extends keyof HarnessSettings>(
   scope: "global" | "effective" = "global"
 ): Promise<void> {
   if (!SETTING_KEYS.includes(key)) throw new Error("Setting is unavailable in this edition.");
+  if (key === "protocol" && value !== "responses" && value !== "chat-completions") throw new Error("Choose Responses or Chat Completions.");
   if (key === "personalization" && typeof value !== "string") throw new Error("Personalization must be text.");
   if (key === "reasoningBudget" && !isReasoningBudget(value)) {
     throw new Error("Enter a positive whole number or leave the reasoning budget empty for unlimited reasoning.");
@@ -125,6 +128,7 @@ export async function writeSetting<K extends keyof HarnessSettings>(
 /** Every harness setting key; maps 1:1 to the package.json configuration properties. */
 export const SETTING_KEYS: (keyof HarnessSettings)[] = [
   "endpoint",
+  "protocol",
   "model",
   "toolCallingMode",
   "temperature",

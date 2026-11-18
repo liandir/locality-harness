@@ -57,6 +57,21 @@ describe("tool calling settings", () => {
 });
 
 describe("reasoning and model settings", () => {
+  it("defaults protocol to Responses, validates writes and resets overrides", async () => {
+    const { readSettings, writeSetting, resetAllSettings } = await import("../src/config/settings.js");
+    expect(readSettings().protocol).toBe("responses");
+    mocks.values.set("protocol", "chat-completions");
+    expect(readSettings().protocol).toBe("chat-completions");
+    await writeSetting("protocol", "chat-completions");
+    expect(mocks.update).toHaveBeenCalledWith("protocol", "chat-completions", 1);
+    await expect(writeSetting("protocol", "automatic" as never)).rejects.toThrow("Choose Responses");
+    mocks.values.set("protocol", "invalid");
+    expect(readSettings().protocol).toBe("responses");
+    await resetAllSettings();
+    expect(mocks.update).toHaveBeenCalledWith("protocol", undefined, 1);
+    expect(mocks.update).toHaveBeenCalledWith("protocol", undefined, 2);
+  });
+
   it("always detects the backend automatically, ignoring old overrides", async () => {
     const { readSettings, writeSetting, SETTING_KEYS } = await import("../src/config/settings.js");
     for (const value of [undefined, "llama.cpp", "vllm"]) {
