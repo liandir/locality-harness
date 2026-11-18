@@ -15,6 +15,7 @@ export interface PromptMeasurement {
   accuracy: "exact";
 }
 
+/** Headroom for prompt fitting. Interactive requests leave the generation limit to the server. */
 export function outputTokenReserve(contextSize: number, maxTokens?: number): number {
   return maxTokens ?? Math.max(1, Math.min(4096, Math.floor(contextSize / 4)));
 }

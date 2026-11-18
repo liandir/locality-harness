@@ -17,7 +17,10 @@ export class StreamFailure extends Error {
 
 export class GenerationLengthError extends StreamFailure {
   constructor(diagnostics: CompletionDiagnostics = {}) {
-    super(`The server stopped generation at its output or context limit (${diagnostics.completionEvidence === "response_incomplete" ? "response incomplete" : 'finish_reason="length"'}). Compact context or adjust the server generation limits before continuing.`, {
+    const message = diagnostics.finishReason === "max_output_tokens"
+      ? "The response reached its output token limit before the model finished. Reasoning and the visible reply share this limit."
+      : `The server stopped generation at its output or context limit (${diagnostics.completionEvidence === "response_incomplete" ? "response incomplete" : 'finish_reason="length"'}). Compact context or adjust the server generation limits before continuing.`;
+    super(message, {
       cause: "generation_limit", finishReason: "length", completionEvidence: "finish_reason", ...diagnostics
     });
     this.name = "GenerationLengthError";

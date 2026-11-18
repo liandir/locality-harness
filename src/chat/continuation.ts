@@ -1,4 +1,5 @@
 import { modelMessages } from "./storage.js";
+import { newMessageId } from "./contextHistory.js";
 import type { ChatMessage, ChatRecord } from "./types.js";
 
 /** Keep completed work and any compacted summary, dropping the failed tail. */
@@ -7,7 +8,9 @@ export function continuationContext(record: ChatRecord): ChatMessage[] {
   let end = context.length;
   for (let index = context.length - 1; index >= 0; index--) {
     const message = context[index];
-    if (message.role === "user") {
+    // A completed Responses pass can contain commentary or reasoning after
+    // the last tool exchange. Its native items are part of the accepted prefix.
+    if (message.role === "user" || (message.role === "assistant" && message.responseHistory)) {
       end = index + 1;
       break;
     }
@@ -25,4 +28,14 @@ export function continuationContext(record: ChatRecord): ChatMessage[] {
     break;
   }
   return structuredClone(context.slice(0, end));
+}
+
+/** Keep the resume instruction in the model's prefix across later tool passes and reloads. */
+export function appendContinuationGuidance(record: ChatRecord, ts: number): void {
+  const content = "Resume the interrupted turn from the saved conversation and completed tool results. "
+    + "Pick up at the next unfinished step and answer the original request.";
+  const context = record.contextMessages ??= record.messages.slice();
+  const last = context.at(-1);
+  if (last?.steering && last.content === content) return;
+  context.push({ id: newMessageId(), role: "user", steering: true, content, ts });
 }
