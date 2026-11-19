@@ -367,6 +367,24 @@ describe("interrupted turn continuation", () => {
     }
   });
 
+  it("rejects a replayed completed tool call ID after reopening an interrupted review", async () => {
+    const { ChatSession } = await import("../src/chat/session.js");
+    const record = newRecord();
+    const argsJson = '{"path":"."}';
+    record.messages = [
+      { role: "user", content: "Review the files", mode: "review", ts: 1 },
+      { role: "tool", content: "main.ts", toolCall: { id: "listed", name: "list_dir", argsJson, status: "executed" }, ts: 2 },
+      { role: "assistant", content: "", interruption: { reason: "Disconnected", mode: "review", reasoningEffort: "default" }, ts: 3 }
+    ];
+    const session = new ChatSession({ storage: { ...compactionStorage, save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record, emit: vi.fn() });
+    mocks.streamChat.mockImplementation(async function* () { yield { kind: "toolCall", id: "listed", name: "list_dir", argsJson }; });
+    try {
+      await session.continueTurn(3);
+      expect(record.messages.filter(m => m.role === "tool")).toHaveLength(1);
+      expect(record.messages.at(-1)?.interruption?.reason).toContain("already completed");
+    } finally { await session.shutdown(); }
+  });
+
   it("keeps a finished thinking block when the following text is interrupted", async () => {
     const { ChatSession } = await import("../src/chat/session.js");
     const record = newRecord();
@@ -461,8 +479,8 @@ describe("interrupted turn continuation", () => {
         expect(loaded.messages).toEqual(completedHistory);
         expect((await storage.load(record.id))!.messages).toEqual(completedHistory);
         const serialized = JSON.stringify(request.messages);
-        expect(request.messages.filter((message: { role: string }) => message.role === "user")).toHaveLength(1);
-        expect(request.messages.at(-1)).toMatchObject({ role: "tool", tool_call_id: "completed_call" });
+        expect(request.messages.at(-2)).toMatchObject({ role: "tool", tool_call_id: "completed_call" });
+        expect(request.messages.at(-1)).toMatchObject({ role: "user", content: expect.stringContaining("Resume the interrupted turn") });
         expect(serialized).toContain("Create the first file.");
         for (const partial of ["unfinished answer", "unfinished reasoning", "pending_call", terminal.interruption!.reason]) {
           expect(serialized).not.toContain(partial);
@@ -1140,22 +1158,33 @@ describe("ChatSession", () => {
     );
   });
 
-  it("keeps interrupted Responses reasoning and text out of completed model history", async () => {
+  it.each(["unexpected_eof", "generation_limit"] as const)("resumes an interrupted Responses review after %s with unfinished output confined to the transcript", async cause => {
     mocks.settings.toolCallingMode = "native";
     const { ChatSession } = await import("../src/chat/session.js");
-    const { StreamFailure } = await import("../src/llm/completion.js");
+    const { StreamFailure, GenerationLengthError } = await import("../src/llm/completion.js");
     const record = newRecord();
     mocks.streamChat.mockImplementation(async function* () {
       yield { kind: "thought", text: "UNFINISHED_REASONING" };
       yield { kind: "text", text: "UNFINISHED_TEXT" };
+      if (cause === "generation_limit") throw new GenerationLengthError({ finishReason: "max_output_tokens", completionEvidence: "response_incomplete" });
       throw new StreamFailure("Connection lost", { cause: "unexpected_eof", completionEvidence: "none" });
     });
     const session = new ChatSession({ storage: { ...compactionStorage, save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record, emit: vi.fn() });
     try {
-      await session.sendUserMessage("Do the work");
+      await session.sendUserMessage("Review the processing loop", [], "review");
       expect(JSON.stringify(record.messages)).toContain("UNFINISHED_TEXT");
       expect(JSON.stringify(record.contextMessages)).not.toContain("UNFINISHED_");
       expect(record.messages.some(message => message.responseHistory)).toBe(false);
+      const terminal = record.messages.at(-1)!;
+      expect(terminal.interruption?.diagnostics?.cause).toBe(cause);
+      mocks.streamChat.mockImplementation(async function* (_endpoint, request: ChatCompletionRequest) {
+        expect(JSON.stringify(request.messages)).not.toContain("UNFINISHED_");
+        expect(request.messages.at(-1)?.content).toContain("Resume the interrupted turn");
+        yield { kind: "text", text: "The last sample is skipped." };
+      });
+      await session.continueTurn(terminal.ts);
+      expect(record.messages.filter(m => m.role === "user")).toHaveLength(1);
+      expect(record.messages.at(-1)?.content).toBe("The last sample is skipped.");
     } finally { await session.shutdown(); }
   });
 
@@ -1209,6 +1238,47 @@ describe("ChatSession", () => {
       session = new ChatSession({ storage, workspaceRoot: ws, record: loaded, emit: vi.fn() });
       await session.sendUserMessage("Continue");
       expect(pass).toBe(3);
+    } finally { await session.shutdown(); await fs.rm(ws, { recursive: true, force: true }); }
+  });
+
+  it("continues Responses review commentary through an interruption and reload until the findings arrive", async () => {
+    const ws = await fs.mkdtemp(path.join(os.tmpdir(), "locality-review-resume-"));
+    const storage = new ChatStorage(ws, path.join(ws, "chats"));
+    const record = storage.newRecord("native");
+    mocks.settings.toolCallingMode = "native";
+    const events: UiEvent[] = [];
+    const { ChatSession } = await import("../src/chat/session.js");
+    const { serializeRequest } = await import("../src/llm/server.js");
+    const { responseSource } = await import("../src/llm/responses.js");
+    const connection = { endpoint: mocks.settings.endpoint, model: mocks.settings.model, backend: "llama.cpp", serverType: "llama.cpp", protocol: "responses" } as const;
+    let session = new ChatSession({ storage, workspaceRoot: ws, record, emit: e => events.push(e) });
+    let pass = 0;
+    mocks.streamChat.mockImplementation(async function* () {
+      const text = ++pass === 1 ? "I’ll inspect the processing loop." : "I’ll verify its bounds.";
+      yield { kind: "text", text };
+      yield { kind: "finish", reason: "stop", diagnostics: { completionEvidence: "response_completed" }, responseHistory: {
+        source: responseSource(connection), output: [{ type: "message", id: `progress_${pass}`, role: "assistant", phase: "commentary",
+          content: [{ type: "output_text", text }] }]
+      } };
+    });
+    try {
+      await session.sendUserMessage("Review the processing loop", [], "review");
+      expect(pass).toBe(2);
+      expect(events.some(e => e.kind === "summary" || e.kind === "turnEnd")).toBe(false);
+      expect(record.messages.at(-1)?.interruption?.diagnostics?.cause).toBe("no_answer");
+      await session.shutdown();
+      const loaded = (await storage.load(record.id))!;
+      session = new ChatSession({ storage, workspaceRoot: ws, record: loaded, emit: e => events.push(e) });
+      mocks.streamChat.mockImplementation(async function* (_endpoint, request: ChatCompletionRequest) {
+        const input = serializeRequest(request, connection).input as { id?: string; phase?: string }[];
+        expect(input.filter(item => item.phase === "commentary").map(item => item.id)).toEqual(["progress_1", "progress_2"]);
+        expect(request.messages.at(-1)?.content).toContain("Resume the interrupted turn");
+        yield { kind: "text", text: "The loop skips the last sample." };
+      });
+      await session.continueTurn(loaded.messages.at(-1)!.ts);
+      expect(loaded.messages.filter(m => m.role === "user")).toHaveLength(1);
+      expect(events.filter(e => e.kind === "turnEnd")).toEqual([expect.objectContaining({ mode: "review" })]);
+      expect(loaded.messages.at(-1)?.content).toBe("The loop skips the last sample.");
     } finally { await session.shutdown(); await fs.rm(ws, { recursive: true, force: true }); }
   });
 
@@ -4484,6 +4554,33 @@ describe("live tool permissions", () => {
 });
 
 describe("length-limited generation recovery", () => {
+  it.each(["responses", "chat-completions"] as const)("reserves prompt space without capping Review output on %s", async protocol => {
+    const { ChatSession } = await import("../src/chat/session.js");
+    const { serializeRequest } = await import("../src/llm/server.js");
+    mocks.backend = "vllm";
+    mocks.settings.protocol = protocol;
+    mocks.settings.reasoningBudget = null;
+    const contextSize = 262_144;
+    mocks.fetchServerContextSize.mockResolvedValue(contextSize);
+    mocks.countPrompt.mockResolvedValue(54_020);
+    mocks.streamChat.mockImplementation(async function* () { yield { kind: "text", text: "Review complete." }; });
+    const record = newRecord();
+    const events: UiEvent[] = [];
+    const session = new ChatSession({ storage: { ...compactionStorage, save: vi.fn() } as never, workspaceRoot: "/tmp/workspace", record, emit: e => events.push(e) });
+    try {
+      await session.sendUserMessage("Review the workspace", [], "review");
+      expect(events).toContainEqual(expect.objectContaining({ kind: "turnEnd", mode: "review" }));
+      const request = mocks.streamChat.mock.calls[0][1];
+      const body = serializeRequest(request, { endpoint: mocks.settings.endpoint, serverType: "vllm", backend: "vllm", protocol });
+      expect(body[protocol === "responses" ? "max_output_tokens" : "max_completion_tokens"]).toBeUndefined();
+
+      mocks.countPrompt.mockResolvedValue(contextSize - 4096);
+      await session.sendUserMessage("Review the remaining files", [], "review");
+      expect(events).toContainEqual(expect.objectContaining({ kind: "abort", reason: expect.stringContaining("Context window guard") }));
+      expect(mocks.streamChat).toHaveBeenCalledTimes(1);
+    } finally { await session.shutdown(); }
+  });
+
   function recoveryRecord(): ChatRecord {
     const record = newRecord();
     record.title = "Existing chat";

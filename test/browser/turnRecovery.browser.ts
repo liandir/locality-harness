@@ -39,6 +39,35 @@ for (const theme of ["light", "dark"] as const) {
       expect(await posted(page)).toContainEqual(expect.objectContaining({ type: "continueChat", messageTs: 4 }));
     });
 
+    test("Continue reopens the review timeline when saved compaction cards follow its work", async ({ page }) => {
+      await webview(page, theme);
+      const review = record();
+      review.mode = "review";
+      review.messages[0].mode = "review";
+      review.messages.at(-1)!.interruption!.mode = "review";
+      const compact = { beforeTokens: 7000, afterTokens: 2000, beforeMessages: 8, keepTail: 2, status: "executed" as const };
+      review.compactions = [
+        { ...compact, compactId: "automatic", source: "auto", ts: 3 },
+        { ...compact, compactId: "idle", source: "manual", ts: 5 }
+      ];
+      await hostMessage(page, { kind: "chatLoaded", record: review });
+      await page.getByRole("button", { name: "Continue", exact: true }).click();
+      expect(await posted(page)).toContainEqual(expect.objectContaining({ type: "continueChat", messageTs: 4 }));
+      review.messages.pop();
+      await hostMessage(page, { kind: "chatLoaded", record: review });
+      await hostMessage(page, { kind: "turnWorkStarted", messageId: "resumed", startedAt: 6, continued: true });
+      await hostMessage(page, { kind: "turnStart", messageId: "resumed" });
+      await hostMessage(page, { kind: "text", messageId: "resumed", delta: "The loop skips the last sample." });
+      const resumed = page.locator('[data-message-id="resumed"]');
+      await expect(resumed.locator(".assistant-markdown")).toContainText("last sample");
+      await expect(page.locator(".work-section.conglomerate")).toHaveCount(0);
+      await expect(page.locator('[data-message-id="compact_msg_idle"]')).toHaveCount(1);
+      await hostMessage(page, { kind: "turnEnd", messageId: "resumed", mode: "review", messageTs: 7 });
+      await expect(resumed.locator(".work-section.conglomerate")).toHaveCount(1);
+      await expect(page.locator(".work-section.conglomerate")).toHaveCount(1);
+      await expect(page.locator(".msg.user")).toHaveCount(1);
+    });
+
     test("failed live turns show their error and let the user release queued work", async ({ page }) => {
       await webview(page, theme);
       const initial = record();

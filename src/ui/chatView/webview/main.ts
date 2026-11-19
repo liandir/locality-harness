@@ -26,7 +26,7 @@ import { renderMemoryCreation, renderMemoryResult } from "./memoryResults.js";
 import { CARD_SEPARATOR_HTML, renderToolOutputSurface } from "./toolOutputSurface.js";
 import { parseQuestionPayload, renderQuestionResult } from "./questionResult.js";
 import { copyableAssistantText } from "./messageCopy.js";
-import { discardResponseParts, resumeResponseMessage } from "./responseRecovery.js";
+import { discardResponseParts, latestTurnMessage, resumeResponseMessage } from "./responseRecovery.js";
 import { isAssistantTurnLive, isWorkPart, partStartedAt, resolveWorkTimeline, type ResolvedUnit as WorkTimelineUnit } from "./workTimeline.js";
 import { ScrollFollow } from "./scrollFollow.js";
 import MarkdownIt from "markdown-it";
@@ -214,6 +214,7 @@ type ComposerDecision =
 interface CompactActivity {
   id: string;
   ts?: number;
+  responseToTs?: number;
   source: "manual" | "auto";
   status: "pending" | "executed" | "failed" | "skipped";
   targetReached?: boolean;
@@ -418,7 +419,7 @@ function appendUserMessage(message: Message): void {
     state.messages.push(message);
     return;
   }
-  let response = state.messages.at(-1);
+  let response = latestTurnMessage(state.messages);
   if (response?.role !== "assistant" || response.aborted) {
     response = getOrCreateMsg(`steering_${message.id}`, "assistant");
     response.responseToTs = [...state.messages].reverse().find(m => m.role === "user" && !m.steering)?.recordTs;
@@ -495,7 +496,17 @@ function upsertCompactActivityMessage(activity: CompactActivity): void {
   // assistant turn so it appears as an item in that timeline rather than as a
   // visually separate message block. Idle (manual) compaction keeps its own
   // dedicated message.
-  let message = activity.ts === undefined ? [...state.messages].reverse().find(m => m.role === "assistant" && isAssistantTurnLive(m)) : undefined;
+  const ts = activity.ts;
+  let message: Message | undefined;
+  if (ts === undefined) {
+    message = [...state.messages].reverse().find(m => m.role === "assistant" && isAssistantTurnLive(m));
+  } else {
+    // Older auto-compactions have a timestamp but no explicit owner.
+    const owner = activity.responseToTs ?? (activity.source === "auto"
+      ? [...state.messages].reverse().find(m => m.role === "user" && m.recordTs !== undefined && m.recordTs <= ts)?.recordTs
+      : undefined);
+    if (owner !== undefined) message = state.messages.find(m => m.role === "assistant" && m.responseToTs === owner);
+  }
   if (!message) {
     const messageId = compactActivityMessageId(activity);
     message = state.messages.find(m => m.id === messageId);
@@ -508,7 +519,10 @@ function upsertCompactActivityMessage(activity: CompactActivity): void {
   }
   const card = compactActivityToolCard(activity, false);
   message.toolCards.push(card);
-  message.parts.push({ id: partId, kind: "tool", card, startedAt: activity.ts ?? Date.now() });
+  const part: MessagePart = { id: partId, kind: "tool", card, startedAt: ts ?? Date.now() };
+  const nextPart = ts === undefined ? -1 : message.parts.findIndex(item => item.kind === "abort" || (partStartedAt(item) ?? 0) > ts);
+  if (nextPart < 0) message.parts.push(part);
+  else message.parts.splice(nextPart, 0, part);
 }
 
 function renderFenceCode(tokens: Parameters<RenderRule>[0], idx: number): string {
@@ -1086,7 +1100,7 @@ function renderAttachmentHtml(attachment: UiAttachment, removeAttribute = ""): s
 
 function isContinuableResponse(message: Message): boolean {
   return !!message.aborted && !message.interruptionResolved && message.recordTs !== undefined
-    && [...state.messages].reverse().find(item => item.role === "assistant" || item.role === "user") === message;
+    && latestTurnMessage(state.messages) === message;
 }
 
 function renderMessageActions(parent: HTMLElement, m: Message): HTMLElement | undefined {
@@ -2621,22 +2635,60 @@ function editDisplayArgs(tc: ToolCard): Record<string, unknown> {
 
 function renderDiffLines(diff: string, filePath: string): string {
   const language = highlightLanguageForPath(filePath);
-  const lines = diff.split("\n").map(line => {
-    const parsed = parseDiffLine(line);
-    const lineNumber = parsed.kind === "del"
-      ? parsed.oldLine
-      : parsed.newLine || parsed.oldLine;
-    return `<span class="diff-line ${parsed.kind}">
-      <span class="diff-no">${escapeHtml(lineNumber)}</span>
-      <span class="diff-code">${highlightCode(parsed.code, language)}</span>
-    </span>`;
-  }).join("");
+  const lines: string[] = [];
+  let hunk: DiffLine[] = [];
+  for (const line of diff.split("\n")) {
+    const row = parseDiffLine(line);
+    if (row.kind === "neutral" && !row.oldLine && !row.newLine) {
+      // An omission or preview notice is outside the source on both sides.
+      lines.push(renderDiffHunk(hunk, language), renderDiffRow(row, escapeHtml(row.code)));
+      hunk = [];
+    } else {
+      hunk.push(row);
+    }
+  }
+  lines.push(renderDiffHunk(hunk, language));
   // One intrinsic-width grid makes every row share the longest line's width,
   // so row backgrounds continue through the full horizontal scroll extent.
-  return `<span class="diff-lines">${lines}</span>`;
+  return `<span class="diff-lines">${lines.join("")}</span>`;
 }
 
-function parseDiffLine(line: string): { kind: "add" | "del" | "neutral"; oldLine: string; newLine: string; marker: string; code: string } {
+interface DiffLine {
+  kind: "add" | "del" | "neutral";
+  oldLine: string;
+  newLine: string;
+  marker: string;
+  code: string;
+}
+
+function renderDiffHunk(rows: DiffLine[], language: string | undefined): string {
+  // Tokenize contiguous source on each side. Context feeds both grammars
+  // and is displayed with the new file's highlighting.
+  const highlightSide = (exclude: "add" | "del") => {
+    const source = rows.filter(row => row.kind !== exclude).map(row => row.code).join("\n");
+    return highlightCode(source, language).split("\n");
+  };
+  const before = rows.some(row => row.kind === "del") ? highlightSide("add") : [];
+  const after = highlightSide("del");
+  let oldIndex = 0;
+  let newIndex = 0;
+  return rows.map(row => {
+    const codeHtml = row.kind === "del" ? before[oldIndex] : after[newIndex];
+    if (row.kind !== "add") oldIndex++;
+    if (row.kind !== "del") newIndex++;
+    return renderDiffRow(row, codeHtml);
+  }).join("");
+}
+
+function renderDiffRow(row: DiffLine, codeHtml: string): string {
+  const lineNumber = row.kind === "del" ? row.oldLine : row.newLine || row.oldLine;
+  return `<span class="diff-line ${row.kind}">
+      <span class="diff-no">${escapeHtml(lineNumber)}</span>
+      <span class="diff-code">${codeHtml}</span>
+    </span>`;
+}
+
+function parseDiffLine(line: string): DiffLine {
   if (line === "...\t\t\t...") {
     return { kind: "neutral", oldLine: "", newLine: "", marker: "", code: "..." };
   }
@@ -2878,6 +2930,7 @@ function summaryRepeatsVisibleText(m: Message, summary: string): boolean {
 
 function restoreAssistantParts(msg: Message, recordMessage: ChatRecord["messages"][number]): void {
   msg.recordTs = recordMessage.ts;
+  msg.startNewPart = true;
   if (recordMessage.interruption) {
     msg.aborted = recordMessage.interruption.reason;
     msg.interruptionResolved = recordMessage.interruption.resolved;
@@ -4423,12 +4476,13 @@ function handleHostMessage(msg: ExtToChat): void {
       const message = getOrCreateMsg(msg.messageId, "assistant");
       finalizeLiveThoughts(message);
       appendPartText(message, "text", `\n\n${msg.text}\n\n`);
+      message.startNewPart = true;
       render();
       break;
     }
     case "abort": {
       state.serverPending = undefined;
-      let target = state.messages[state.messages.length - 1];
+      let target = latestTurnMessage(state.messages);
       // Preflight failures (for example, an unavailable llama.cpp /props
       // endpoint) happen before turnStart creates an assistant message. Do not
       // attach the abort part to the user's message, whose renderer ignores

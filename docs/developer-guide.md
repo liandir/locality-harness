@@ -51,10 +51,10 @@ chat `/tokenize` endpoint and does not require `--enable-scale-out`.
 Connection validation checks exact-count support. Missing counting routes
 (404/405/501), malformed responses and authentication failures remain errors;
 there is no estimation fallback. A vLLM 403 reporting “Scale-out endpoints are
-disabled” provides guidance to enable the flag. The shared budget reserves
-generation plus 1% of the context window. Main chat uses the shared output
-allowance, capped at 4,096 tokens or a quarter of the window; auxiliary requests
-reserve their explicit output limits.
+disabled” provides guidance to enable the flag. Prompt fitting reserves a 1%
+safety margin plus space for generation. Interactive turns reserve the smaller
+of 4,096 tokens and a quarter of the window. The model server sets their output
+limit. Auxiliary requests reserve and send their explicit output limits.
 
 Compaction works on a detached candidate. It pins the current request and its
 steering, groups completed tool exchanges, and splits historical data without

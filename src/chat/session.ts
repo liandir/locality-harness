@@ -80,7 +80,7 @@ import { buildLineDiff, lineDiffStats, renderLineDiff } from "./diffPreview.js";
 import { fileUndoPlan, turnFileEdits, undoFiles, type FileUndoSnapshot } from "./fileUndo.js";
 import { rememberFileWrite, summarizeFileChanges, type FileChangeSummary, type TrackedFileWrite } from "./fileChanges.js";
 import { generateChatTitle } from "./chatTitle.js";
-import { continuationContext } from "./continuation.js";
+import { appendContinuationGuidance, continuationContext } from "./continuation.js";
 import { chronologicalMessages, messageContainsToolCall } from "./messageOrder.js";
 import type { ChatMode } from "./mode.js";
 import { asOpenAiTools, toolsForMode, toolsForPrompt, isMemoryToolName, validateToolArguments } from "../tools/toolDefinitions.js";
@@ -396,8 +396,8 @@ export class ChatSession {
   private promptContextMessages(userContext = this.currentUserContext(), context = modelMessages(this.record)): ChatMessage[] {
     const user = this.turnUserMessage();
     if (!user || !userContext) return context;
-    if (context.some(message => message.role === "user" && message.ts === user.ts)) {
-      return context.map(message => message.role === "user" && message.ts === user.ts
+    if (context.some(message => message.role === "user" && !message.steering && message.ts === user.ts)) {
+      return context.map(message => message.role === "user" && !message.steering && message.ts === user.ts
         ? { ...message, requestContext: userContext } : message);
     }
     const messages = [...context];
@@ -548,7 +548,7 @@ export class ChatSession {
     this.compactAborts.add(ac);
     const s = capturedConnectionSettings(readSettings());
     const compactId = `compact_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-    const base = { compactId, ts: Date.now(), source, beforeTokens: this.record.totalTokens,
+    const base = { compactId, ts: Date.now(), responseToTs: this.activeTurnModes ? this.turnUserMessage()?.ts : undefined, source, beforeTokens: this.record.totalTokens,
       beforeMessages: modelMessages(this.record).length, keepTail: KEEP_TAIL };
     this.completeContextIngestion();
     this.emit({ kind: "compactStart", ...base });
@@ -868,6 +868,9 @@ export class ChatSession {
     // live view. Keep completed work, but remove its terminal error card.
     this.lastInterruptionTs = interrupted.ts;
     this.record.messages.pop();
+    const lastMessage = this.record.messages.at(-1);
+    const lastContext = this.record.contextMessages.at(-1);
+    if (lastMessage?.role === "assistant" || lastContext?.role === "tool") appendContinuationGuidance(this.record, interrupted.ts);
 
     this.loadedChatContextPending = true;
     this.contextActivities.clear();
@@ -1147,7 +1150,7 @@ export class ChatSession {
     if (!newSelection && saved?.messageTs === messageTs && saved.protocol === this.toolProtocol && saved.content === systemPrompt && this.turnUserMessage()?.requestContext === userContext) return;
     this.record.turnSystemPrompt = { messageTs, protocol: this.toolProtocol, content: systemPrompt, contextVersion: 1 };
     for (const message of [...this.record.messages, ...(this.record.contextMessages ?? [])]) {
-      if (message.role === "user" && message.ts === messageTs && message.requestContext !== userContext) {
+      if (message.role === "user" && !message.steering && message.ts === messageTs && message.requestContext !== userContext) {
         message.requestContext = userContext;
         delete message.tokens;
       }
@@ -1273,7 +1276,7 @@ export class ChatSession {
   private generationRequest(s: HarnessSettings, messages: PromptMessage[]): ChatCompletionRequest {
     return {
       model: s.model, messages, temperature: s.temperature, top_k: s.topK, top_p: s.topP,
-      generation: { task: "chat", maxOutputTokens: outputTokenReserve(this.contextLimit()), reasoning: generationReasoning(this.turnReasoningEffort(), s.reasoningEfforts, s.reasoningBudget), reportProgress: true },
+      generation: { task: "chat", reasoning: generationReasoning(this.turnReasoningEffort(), s.reasoningEfforts, s.reasoningBudget), reportProgress: true },
       tools: this.toolProtocol === "native" ? asOpenAiTools(toolsForPrompt("native", readSettings().memoryEnabled, this.supportsVision, readSettings())) : undefined,
       tool_choice: "auto", parallel_tool_calls: false
     };
@@ -1504,6 +1507,14 @@ export class ChatSession {
     let repairNote: string | undefined;
     let serverUsageTotal: number | undefined;
     this.completedCallIds.clear();
+    // Continue keeps the original turn's duplicate-call protection, including
+    // results already summarized out of model context.
+    for (let i = this.record.messages.length - 1; i >= 0; i--) {
+      const message = this.record.messages[i];
+      if (message.role === "user" && !message.steering) break;
+      const call = message.toolCall;
+      if (call?.id && call.status === "executed") this.completedCallIds.set(call.id, { name: call.name, argsJson: call.argsJson });
+    }
     // Events are stamped with wall-clock time so the webview can restore
     // chronological work groups and their "Worked for Ns" duration.
     const turnEvents: (ParsedEvent & { t?: number })[] = [];
@@ -1959,34 +1970,35 @@ export class ChatSession {
         this.emitMeasuredTokens();
         continue;
       }
-      if (
-        this.turnMode() !== "plan"
-        && this.toolProtocol === "native"
-        && !assistantBuf.trim()
-        && thoughtBuf.trim()
-        && emptyNativeRetries < MAX_EMPTY_NATIVE_RETRIES
-      ) {
-        emptyNativeRetries++;
-        repairNote = EMPTY_NATIVE_REPAIR_NOTE;
-        console.warn(
-          `[harness] native empty turn after reasoning; retry=${emptyNativeRetries}/${MAX_EMPTY_NATIVE_RETRIES} ` +
-          `finish_reason=${finishReason ?? "none"}`
-        );
-        this.emit({
-          kind: "turnRecovery", messageId,
-          text: `The model stopped after thinking without a reply. Retrying native continuation (${emptyNativeRetries}/${MAX_EMPTY_NATIVE_RETRIES})…`
-        });
+      const commentaryOnly = responseIsCommentary(responseHistory);
+      const retryReasoning = this.toolProtocol === "native" && !assistantBuf.trim() && thoughtBuf.trim()
+        && emptyNativeRetries < MAX_EMPTY_NATIVE_RETRIES;
+      if (this.turnMode() !== "plan" && (commentaryOnly || retryReasoning)) {
         if (responseHistory) {
-          appendChatMessage(this.record, { role: "assistant", content: "", responseHistory: { ...responseHistory, text: "" },
+          appendChatMessage(this.record, { role: "assistant", content: assistantBuf, responseHistory: { ...responseHistory, text: assistantBuf },
             reasoningContent: responseReasoning(responseHistory), events: turnEvents.splice(0), ts: Date.now() });
           completedEventCount = 0;
           await this.saveRecord();
         }
+        assistantBuf = "";
         thoughtBuf = "";
+        if (emptyNativeRetries >= MAX_EMPTY_NATIVE_RETRIES) {
+          this.emit({ kind: "abort", reason: "The model stopped after a progress update. Continue to resume the unfinished turn.",
+            diagnostics: { ...completion, cause: "no_answer" } });
+          break;
+        }
+        emptyNativeRetries++;
+        if (commentaryOnly) appendContinuationGuidance(this.record, Date.now());
+        else repairNote = EMPTY_NATIVE_REPAIR_NOTE;
+        this.emit({
+          kind: "turnRecovery", messageId,
+          text: commentaryOnly ? "Continuing after the model’s progress update…"
+            : `The model stopped after thinking without a reply. Retrying native continuation (${emptyNativeRetries}/${MAX_EMPTY_NATIVE_RETRIES})…`
+        });
         this.emitMeasuredTokens();
         continue;
       }
-      if (this.turnMode() === "plan" && (!completion || !planResponse?.complete || responseIsCommentary(responseHistory))) {
+      if (this.turnMode() === "plan" && (!completion || !planResponse?.complete || commentaryOnly)) {
         if (completion && planCorrectionAttempts++ < MAX_PLAN_CONTINUATIONS) {
           // Preserve visible progress and give the model its previous reply as context.
           // This is a continuation of planning, never a completed plan or approval state.

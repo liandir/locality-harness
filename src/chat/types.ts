@@ -147,6 +147,8 @@ export interface ChatRecord {
 }
 
 export interface CompactHistory {
+  /** Owning user turn when compaction ran during a response. */
+  responseToTs?: number;
   failureCause?: string;
   targetReached?: boolean;
   compactId: string;

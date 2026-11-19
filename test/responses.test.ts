@@ -156,6 +156,7 @@ describe("Responses terminal evidence", () => {
     ]);
     const { chunks, error } = await collect();
     expect(error).toBeInstanceOf(GenerationLengthError);
+    expect(error?.message).toContain("reached its output token limit");
     expect(error?.diagnostics).toMatchObject({ completionEvidence: "response_incomplete", cause: "generation_limit" });
     expect(chunks).toContainEqual({ kind: "text", text: "Partial" });
     expect(chunks.some(c => c.kind === "toolCall")).toBe(false);

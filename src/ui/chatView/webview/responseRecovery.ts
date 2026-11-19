@@ -16,9 +16,17 @@ interface ResumableResponse {
   parts: { kind: string; startedAt?: number }[];
 }
 
+/** Standalone compaction cards occupy transcript rows but do not own a turn. */
+export function latestTurnMessage<T extends { id: string; role: string }>(messages: readonly T[]): T | undefined {
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index];
+    if (message.role === "user" || (message.role === "assistant" && !message.id.startsWith("compact_msg_"))) return message;
+  }
+}
+
 /** Bind resumed events to the saved work instead of creating a second response. */
 export function resumeResponseMessage<T extends ResumableResponse>(messages: T[], messageId: string): T | undefined {
-  const message = messages.at(-1);
+  const message = latestTurnMessage(messages);
   if (message?.role !== "assistant" || message.aborted !== undefined) return;
   message.id = messageId;
   message.recordTs = undefined;
