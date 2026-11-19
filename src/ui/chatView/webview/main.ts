@@ -2635,22 +2635,60 @@ function editDisplayArgs(tc: ToolCard): Record<string, unknown> {
 
 function renderDiffLines(diff: string, filePath: string): string {
   const language = highlightLanguageForPath(filePath);
-  const lines = diff.split("\n").map(line => {
-    const parsed = parseDiffLine(line);
-    const lineNumber = parsed.kind === "del"
-      ? parsed.oldLine
-      : parsed.newLine || parsed.oldLine;
-    return `<span class="diff-line ${parsed.kind}">
-      <span class="diff-no">${escapeHtml(lineNumber)}</span>
-      <span class="diff-code">${highlightCode(parsed.code, language)}</span>
-    </span>`;
-  }).join("");
+  const lines: string[] = [];
+  let hunk: DiffLine[] = [];
+  for (const line of diff.split("\n")) {
+    const row = parseDiffLine(line);
+    if (row.kind === "neutral" && !row.oldLine && !row.newLine) {
+      // An omission or preview notice is outside the source on both sides.
+      lines.push(renderDiffHunk(hunk, language), renderDiffRow(row, escapeHtml(row.code)));
+      hunk = [];
+    } else {
+      hunk.push(row);
+    }
+  }
+  lines.push(renderDiffHunk(hunk, language));
   // One intrinsic-width grid makes every row share the longest line's width,
   // so row backgrounds continue through the full horizontal scroll extent.
-  return `<span class="diff-lines">${lines}</span>`;
+  return `<span class="diff-lines">${lines.join("")}</span>`;
 }
 
-function parseDiffLine(line: string): { kind: "add" | "del" | "neutral"; oldLine: string; newLine: string; marker: string; code: string } {
+interface DiffLine {
+  kind: "add" | "del" | "neutral";
+  oldLine: string;
+  newLine: string;
+  marker: string;
+  code: string;
+}
+
+function renderDiffHunk(rows: DiffLine[], language: string | undefined): string {
+  // Tokenize contiguous source on each side. Context feeds both grammars
+  // and is displayed with the new file's highlighting.
+  const highlightSide = (exclude: "add" | "del") => {
+    const source = rows.filter(row => row.kind !== exclude).map(row => row.code).join("\n");
+    return highlightCode(source, language).split("\n");
+  };
+  const before = rows.some(row => row.kind === "del") ? highlightSide("add") : [];
+  const after = highlightSide("del");
+  let oldIndex = 0;
+  let newIndex = 0;
+  return rows.map(row => {
+    const codeHtml = row.kind === "del" ? before[oldIndex] : after[newIndex];
+    if (row.kind !== "add") oldIndex++;
+    if (row.kind !== "del") newIndex++;
+    return renderDiffRow(row, codeHtml);
+  }).join("");
+}
+
+function renderDiffRow(row: DiffLine, codeHtml: string): string {
+  const lineNumber = row.kind === "del" ? row.oldLine : row.newLine || row.oldLine;
+  return `<span class="diff-line ${row.kind}">
+      <span class="diff-no">${escapeHtml(lineNumber)}</span>
+      <span class="diff-code">${codeHtml}</span>
+    </span>`;
+}
+
+function parseDiffLine(line: string): DiffLine {
   if (line === "...\t\t\t...") {
     return { kind: "neutral", oldLine: "", newLine: "", marker: "", code: "..." };
   }
